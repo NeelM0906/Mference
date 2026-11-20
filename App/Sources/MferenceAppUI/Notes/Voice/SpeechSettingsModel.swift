@@ -27,6 +27,7 @@ public final class SpeechSettingsModel {
     @ObservationIgnored private let permissions: any PermissionBroker
     @ObservationIgnored private var labelsTask: Task<Void, Never>?
     @ObservationIgnored private var labelsGeneration: UInt64 = 0
+    @ObservationIgnored private var resumeLabelsAfterWindDown = false
 
     public init(setup: SpeechSetupModel, preferences: SpeechPreferences, speech: any SpeechServicing,
                 permissions: any PermissionBroker) {
@@ -68,7 +69,11 @@ public final class SpeechSettingsModel {
 
     public func downloadSpeakerLabels() {
         guard !setup.offline else { return }
-        if labelsTask != nil, case .downloading = speech.status.speakerLabels { return }
+        if labelsTask != nil {
+            // Resume while a paused download winds down: start once it ends.
+            if case .paused = speech.status.speakerLabels { resumeLabelsAfterWindDown = true }
+            return
+        }
         labelsGeneration &+= 1
         let generation = labelsGeneration
         speakerLabelsError = nil
@@ -84,6 +89,10 @@ public final class SpeechSettingsModel {
             guard let self, generation == self.labelsGeneration else { return }
             self.labelsTask = nil
             self.speakerLabelsError = failure
+            if self.resumeLabelsAfterWindDown {
+                self.resumeLabelsAfterWindDown = false
+                if failure == nil, case .paused = speech.status.speakerLabels { self.downloadSpeakerLabels() }
+            }
         }
     }
 
@@ -96,7 +105,9 @@ public final class SpeechSettingsModel {
 
     /// The Fluid Speech Pro row's failure line, if any (status, install or Remove).
     public var speechFailure: String? {
-        if let removeError { return removeError }
+        // A failed Remove leaves the model installed; once it is gone or
+        // downloading again, that failure no longer applies.
+        if let removeError, speechState.isReady { return removeError }
         if case .failed(let message) = setup.display { return message }
         return nil
     }

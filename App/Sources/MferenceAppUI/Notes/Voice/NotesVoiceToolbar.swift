@@ -19,8 +19,7 @@ public struct NotesVoiceToolbar: View {
                 Label("Transcribe file", systemImage: "doc.text")
             }
             .buttonStyle(.mfSecondary)
-            .keyboardShortcut("o", modifiers: [.command, .shift])
-            .help("Transcribe audio files (⇧⌘O)")
+            .help("Transcribe audio files (⇧⌘O, in the Edit menu)")
             .sheet(isPresented: $voice.showsImportSheet) {
                 TranscribeFilesSheet(queue: voice.fileQueue, preferences: voice.preferences,
                                      onOpenNote: { noteID in
@@ -41,8 +40,7 @@ public struct NotesVoiceToolbar: View {
                     }
                 }
                 .buttonStyle(.mfSecondary)
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .help("Record a meeting (⇧⌘R)")
+                .help("Record a meeting (⇧⌘R, in the Edit menu)")
                 .popover(isPresented: $voice.showsRecordPopover, arrowEdge: .bottom) {
                     RecordMeetingPopover(model: voice.recordMeetingModel) { voice.showsRecordPopover = false }
                 }

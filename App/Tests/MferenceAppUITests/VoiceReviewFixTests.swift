@@ -1,16 +1,18 @@
 import Foundation
+import Observation
 import MferenceAppCore
 @testable import MferenceAppUI
 import Synchronization
 import Testing
 
-/// A speech service whose install blocks like a real download: it reports
-/// progress, then waits until the test completes it, or until pause or
-/// cancel ends it with `CancellationError` (the contract). A resumed install
+/// A speech service whose install blocks like a real download, following
+/// the `SpeechServicing` contract: it reports progress, then waits until the
+/// test completes it; pause or cancel ends it with `CancellationError`; a
+/// second call while one runs joins it (same outcome). A later install
 /// picks up where it paused. Everything else is the fake's.
 final class GatedInstallSpeech: SpeechServicing {
     private struct Gate {
-        var waiter: CheckedContinuation<Void, any Error>?
+        var waiters: [CheckedContinuation<Void, any Error>] = []
         var installs = 0
         var removeError: SpeechError?
     }
@@ -21,14 +23,14 @@ final class GatedInstallSpeech: SpeechServicing {
     init(_ base: FakeSpeechService = .notInstalled()) { self.base = base }
 
     var installCount: Int { gate.withLock { $0.installs } }
-    var isWaiting: Bool { gate.withLock { $0.waiter != nil } }
+    var isWaiting: Bool { gate.withLock { !$0.waiters.isEmpty } }
     func failNextRemove(with error: SpeechError) { gate.withLock { $0.removeError = error } }
 
     /// The download finishes: verified, prepared, ready.
     func complete() {
-        let waiter = gate.withLock { g -> CheckedContinuation<Void, any Error>? in defer { g.waiter = nil }; return g.waiter }
+        let waiters = gate.withLock { g -> [CheckedContinuation<Void, any Error>] in defer { g.waiters = [] }; return g.waiters }
         base.setStatus(SpeechStatus(speech: .ready, speakerLabels: base.status.speakerLabels))
-        waiter?.resume()
+        waiters.forEach { $0.resume() }
     }
 
     var status: SpeechStatus { base.status }
@@ -36,11 +38,16 @@ final class GatedInstallSpeech: SpeechServicing {
     func downloadSize(of package: SpeechPackageID) -> Int64 { base.downloadSize(of: package) }
 
     func install(_ package: SpeechPackageID) async throws {
-        gate.withLock { $0.installs += 1 }
-        let resumeAt: Double = if case .paused(let progress) = base.status.speech { progress } else { 0.1 }
-        base.setStatus(SpeechStatus(speech: .downloading(progress: resumeAt), speakerLabels: base.status.speakerLabels))
+        let joins = gate.withLock { g -> Bool in
+            if g.waiters.isEmpty { g.installs += 1 }
+            return !g.waiters.isEmpty
+        }
+        if !joins {
+            let resumeAt: Double = if case .paused(let progress) = base.status.speech { progress } else { 0.1 }
+            base.setStatus(SpeechStatus(speech: .downloading(progress: resumeAt), speakerLabels: base.status.speakerLabels))
+        }
         try await withCheckedThrowingContinuation { continuation in
-            gate.withLock { $0.waiter = continuation }
+            gate.withLock { $0.waiters.append(continuation) }
         }
     }
 
@@ -56,8 +63,8 @@ final class GatedInstallSpeech: SpeechServicing {
     }
 
     private func endWaiter() {
-        let waiter = gate.withLock { g -> CheckedContinuation<Void, any Error>? in defer { g.waiter = nil }; return g.waiter }
-        waiter?.resume(throwing: CancellationError())
+        let waiters = gate.withLock { g -> [CheckedContinuation<Void, any Error>] in defer { g.waiters = [] }; return g.waiters }
+        waiters.forEach { $0.resume(throwing: CancellationError()) }
     }
 
     func remove(_ package: SpeechPackageID) async throws {
@@ -131,6 +138,7 @@ final class GatedInstallSpeech: SpeechServicing {
         try await eventually { speech.isWaiting }
         await speech.pauseInstall(.speech)
         models.setup.download() // Resume before the first task saw its CancellationError
+        #expect(speech.installCount == 1, "no second call joins the ending install")
         try await eventually { speech.installCount == 2 && speech.isWaiting }
         speech.complete()
         try await eventually { models.setup.display == .ready }
@@ -217,5 +225,34 @@ final class GatedInstallSpeech: SpeechServicing {
         let note = AppendingTarget()
         models.focusedDictationTarget = note
         #expect(models.canToggleDictation)
+        #expect(models.canRecordMeeting == false, "a meeting records: ⇧⌘R waits")
+    }
+
+    @Test func focusingAnEditorReEnablesTheDictateMenuItem() {
+        let models = voice(FakeSpeechService())
+        let changed = Mutex(false)
+        withObservationTracking {
+            _ = models.canToggleDictation
+        } onChange: {
+            changed.withLock { $0 = true }
+        }
+        let note = AppendingTarget()
+        models.focusedDictationTarget = note
+        #expect(changed.withLock { $0 }, "the Commands body re-evaluates when focus moves")
+        #expect(models.canToggleDictation && models.focusedDictationNoteID == note.noteID)
+        #expect(models.canRecordMeeting)
+    }
+
+    @Test func aFailedRemoveNoLongerShowsOnceTheModelIsGone() async throws {
+        let speech = GatedInstallSpeech(FakeSpeechService())
+        speech.failNextRemove(with: .failed("disk busy"))
+        let models = voice(speech)
+        models.setup.start()
+        defer { models.setup.stop() }
+        await models.settings.removeSpeech()
+        #expect(models.settings.speechFailure != nil)
+        try await speech.base.remove(.speech) // removed later another way
+        try await eventually { models.settings.speechState == .notInstalled }
+        #expect(models.settings.speechFailure == nil)
     }
 }

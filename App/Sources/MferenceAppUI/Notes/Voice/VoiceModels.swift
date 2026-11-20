@@ -17,7 +17,17 @@ public final class VoiceModels {
     public let dictation: DictationController
     /// The note editor that has focus, set by the editor (team N1): ⇧⌘D
     /// dictates into it. Weak, so a closed editor never receives text.
-    @ObservationIgnored public weak var focusedDictationTarget: (any DictationInsertionTarget)?
+    public var focusedDictationTarget: (any DictationInsertionTarget)? {
+        get { focusedTarget }
+        set {
+            focusedTarget = newValue
+            focusedDictationNoteID = newValue?.noteID
+        }
+    }
+    @ObservationIgnored private weak var focusedTarget: (any DictationInsertionTarget)?
+    /// Observed (the menu's Dictate re-evaluates when focus moves): the note
+    /// of the editor that has focus.
+    public private(set) var focusedDictationNoteID: UUID?
     /// The record popover (board 3).
     @ObservationIgnored public private(set) var recordMeetingModel: RecordMeetingModel!
     public var showsRecordPopover = false
@@ -88,7 +98,9 @@ public final class VoiceModels {
     }
 
     /// ⇧⌘D is enabled with a focused note editor, or to stop dictation.
-    public var canToggleDictation: Bool { focusedDictationTarget != nil || dictation.isActive }
+    public var canToggleDictation: Bool {
+        (focusedDictationNoteID != nil && focusedTarget != nil) || dictation.isActive
+    }
 
     /// ⇧⌘D from the menu: the focused editor, or stop when there is none.
     public func toggleDictation() {
@@ -106,6 +118,9 @@ public final class VoiceModels {
     public var liveMeeting: LiveSessionStatus? {
         setup.status.liveSession.flatMap { $0.kind == .meeting ? $0 : nil }
     }
+
+    /// ⇧⌘R works while no meeting records (from any section: it opens Notes).
+    public var canRecordMeeting: Bool { !isMeetingActive }
 
     /// Record meeting (⇧⌘R): the popover, through the setup card on first use.
     public func recordMeeting() {

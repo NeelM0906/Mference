@@ -51,7 +51,7 @@ struct MferenceMacApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             ShellCommands(model: shell)
-            VoiceCommands(voice: delegate.runtime.voice)
+            VoiceCommands(voice: delegate.runtime.voice, shell: shell)
         }
 
         // While a meeting records: the time, Open, Pause or Resume, Stop (D7).

@@ -49,6 +49,10 @@ public final class SpeechSetupModel {
     /// Bumped by each download, so a paused download's late end never
     /// clears the task of the Resume that followed it.
     @ObservationIgnored private var installGeneration: UInt64 = 0
+    /// Resume pressed while the paused download is still winding down: the
+    /// service would join that install and end paused (its contract), so the
+    /// download starts again once it has ended.
+    @ObservationIgnored private var resumeAfterWindDown = false
 
     public init(speech: any SpeechServicing, isOffline: @escaping @MainActor () -> Bool) {
         self.speech = speech
@@ -128,7 +132,10 @@ public final class SpeechSetupModel {
     public func download() {
         guard !offline else { return }
         // The service's own status: the cached copy can lag a pause by a beat.
-        if installTask != nil, case .downloading = speech.status.speech { return }
+        if installTask != nil {
+            if case .paused = speech.status.speech { resumeAfterWindDown = true }
+            return
+        }
         installGeneration &+= 1
         let generation = installGeneration
         installError = nil
@@ -147,6 +154,7 @@ public final class SpeechSetupModel {
     }
 
     public func pause() {
+        resumeAfterWindDown = false
         Task { [speech] in await speech.pauseInstall(.speech) }
     }
 
@@ -163,6 +171,13 @@ public final class SpeechSetupModel {
         guard generation == installGeneration else { return }
         installTask = nil
         installError = error
+        if resumeAfterWindDown {
+            resumeAfterWindDown = false
+            if !finished, error == nil, case .paused = speech.status.speech {
+                download()
+                return
+            }
+        }
         apply(speech.status)
         guard finished, status.speech.isReady, let action = continuation else { return }
         continuation = nil
