@@ -34,6 +34,8 @@ enum NotesMetrics {
     static let separatorHeight: CGFloat = 18
     /// `.rec` dot on Record meeting.
     static let recordDot: CGFloat = 9
+    /// The transcript under a finished meeting's note before it scrolls.
+    static let transcriptMaxHeight: CGFloat = 260
     /// Empty states are at most this wide.
     static let emptyStateWidth: CGFloat = 320
     static let emptyStateIcon: CGFloat = 24
@@ -64,8 +66,42 @@ public struct NotesRootView: View {
 
 struct NotesScreen: View {
     @Bindable var model: NotesModel
+    @Environment(VoiceModels.self) private var voice: VoiceModels?
 
     var body: some View {
+        Group {
+            if model.showsMeetingLayout, let session = model.meetings, let voice {
+                // Board 4: the recording bar, the note beside the live transcript.
+                MeetingLayoutView(session: session, voice: voice,
+                                  onShowSidebar: { model.showsPanesDuringMeeting = true }) { onTimeChip in
+                    NoteEditorView(controller: model.editor, dateLine: "")
+                        .onAppear { model.editor.onTimeChipClick = onTimeChip }
+                }
+            } else {
+                panes
+            }
+        }
+        .background(MFColor.surface)
+        // Audio or video dropped anywhere on Notes becomes transcribed notes
+        // (spec 4.6); the editor takes its own drops (images attach).
+        .dropDestination(for: URL.self) { (urls: [URL], _: CGPoint) -> Bool in
+            model.voice.transcribe?(urls) ?? false
+        }
+        // The first note shows at once; the purge waits for launch recovery.
+        .task { await model.opened() }
+        .confirmationDialog("Write the summary again?",
+                            isPresented: Binding(get: { model.summaries?.redoConfirmation != nil },
+                                                 set: { if !$0 { model.summaries?.cancelRedo() } }),
+                            titleVisibility: .visible) {
+            Button("Redo") { model.summaries?.confirmRedo() }
+            Button("Cancel", role: .cancel) { model.summaries?.cancelRedo() }
+        } message: {
+            Text("The summary, decisions and action items are replaced. Your own notes stay.")
+        }
+        .modifier(NotesScreenChrome(model: model))
+    }
+
+    private var panes: some View {
         HStack(spacing: 0) {
             NotesSidebar(model: model)
                 .frame(width: NotesMetrics.sidebarWidth)
@@ -76,16 +112,15 @@ struct NotesScreen: View {
             NoteEditorPane(model: model)
                 .frame(maxWidth: .infinity)
         }
-        .background(MFColor.surface)
-        // Audio or video dropped anywhere on Notes becomes transcribed notes
-        // (spec 4.6); the editor takes its own drops (images attach).
-        .dropDestination(for: URL.self) { (urls: [URL], _: CGPoint) -> Bool in
-            model.voice.transcribe?(urls) ?? false
-        }
-        .task {
-            await model.purgeExpired()
-            model.selectFirstIfNeeded()
-        }
+    }
+}
+
+/// The Notes screen's toolbar items and dialogs.
+private struct NotesScreenChrome: ViewModifier {
+    @Bindable var model: NotesModel
+
+    func body(content: Content) -> some View {
+        content
         .shellToolbar(id: "notes.actions") { NotesToolbarActions(model: model) }
         .confirmationDialog(model.pendingDeletion?.title ?? "",
                             isPresented: Binding(get: { model.pendingDeletion != nil },
@@ -106,18 +141,31 @@ struct NotesScreen: View {
 }
 
 /// Transcribe file, Record meeting and New note in the shell's top bar.
+/// While a meeting records they step back for the shell's timer chip; the
+/// meeting layout (board 4) shows the chip alone.
 struct NotesToolbarActions: View {
     let model: NotesModel
 
     var body: some View {
         HStack(spacing: MFSpacing.s) {
-            if let toolbar = model.voice.toolbar {
-                // N3's toolbar: Transcribe file and Record meeting with its popover.
+            if !model.isMeetingLive {
+                if let toolbar = model.voice.toolbar {
+                    // N3's toolbar: Transcribe file and Record meeting with its popover.
+                    toolbar()
+                } else {
+                    ownVoiceButtons
+                }
+            } else if let toolbar = model.voice.toolbar {
+                // Hidden, but still there to present its sheet (⇧⌘O while recording).
                 toolbar()
-            } else {
-                ownVoiceButtons
+                    .hidden()
+                    .frame(width: 0, height: 0)
+                    .clipped()
+                    .accessibilityHidden(true)
             }
-            newNoteButton
+            if !model.showsMeetingLayout {
+                newNoteButton
+            }
         }
     }
 

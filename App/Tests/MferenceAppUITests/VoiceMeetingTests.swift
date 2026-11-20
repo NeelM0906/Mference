@@ -67,8 +67,10 @@ import Testing
         #expect(started.first?.callAudio == .app(bundleID: "us.zoom.xos", name: "Zoom"))
         await settle { h.session.transcript?.segments.count == 6 }
         #expect(h.session.transcript?.segments.last?.isFinal == false, "the phrase still being spoken")
-        await h.voice.stopLiveSessions()
-        #expect(h.session.phase == .idle, "quit's stop waits until the transcript is saved")
+        await h.voice.shutDownForQuit()
+        #expect(h.session.phase == .idle, "quit waits until the transcript is saved")
+        #expect(h.speech.calls.contains(.shutdown) && !h.speech.calls.contains(.stopMeeting),
+                "quit uses the speech service's quick shutdown, never a normal stop")
     }
 
     @Test func menuBarControlsReachTheSession() async throws {
@@ -82,7 +84,9 @@ import Testing
         await settle { h.session.phase == .recording }
         #expect(h.speech.calls.contains(.pause) && h.speech.calls.contains(.resume))
         await h.voice.recordingControls?.stopRecording()
+        await h.session.waitUntilFinished()
         #expect(h.session.phase == .idle)
+        #expect(h.speech.calls.contains(.stopMeeting), "the menu bar's Stop is a normal stop")
     }
 
     @Test func renameInTheTranscriptRenamesEverywhere() async throws {
@@ -94,7 +98,7 @@ import Testing
         transcript.rename(speakerID: "spk2", to: "Priya")
         let rows = transcript.segments.filter { $0.speakerID == "spk2" }.map { transcript.speaker(for: $0).name }
         #expect(rows == ["Priya", "Priya"])
-        await h.voice.stopLiveSessions()
+        await h.voice.shutDownForQuit()
     }
 
     @Test func followingPausesAfterAChipJumpThenResumes() {
@@ -155,7 +159,7 @@ import Testing
         .mfWindowBackground()
         .environment(h.voice)
         try Snapshot.render(board, name: "notes-04-meeting-live", colorScheme: colorScheme)
-        await h.voice.stopLiveSessions()
+        await h.voice.shutDownForQuit()
     }
 }
 

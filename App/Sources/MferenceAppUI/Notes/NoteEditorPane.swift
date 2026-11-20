@@ -9,6 +9,14 @@ import UniformTypeIdentifiers
 struct NoteEditorPane: View {
     @Bindable var model: NotesModel
     @Environment(VoiceModels.self) private var voice: VoiceModels?
+    /// The finished recording's player and transcript for the open note.
+    @State private var recording: RecordingViewState?
+
+    struct RecordingViewState {
+        var noteID: UUID
+        var transcript: TranscriptModel
+        var player: RecordingPlayerModel
+    }
     @State private var importingAttachment = false
 
     var body: some View {
@@ -34,8 +42,15 @@ struct NoteEditorPane: View {
                 Divider().overlay(MFColor.chromeDivider)
                 // A newer or damaged body explains itself in the editor.
                 if note.deletedAt != nil { deletedBanner(note) }
+                if let recording, recording.noteID == note.id {
+                    NoteRecordingHeader(model: model, note: note, transcript: recording.transcript,
+                                        player: recording.player)
+                }
+                // A recorded note's chips carry its date (board 5): no date line.
+                let hasRecording = recording?.noteID == note.id
                 NoteEditorView(controller: model.editor,
-                               dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar),
+                               dateLine: hasRecording ? ""
+                                   : Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar),
                                bottomInset: showsDictationBar ? NoteEditorMetrics.dictationBarInset : 0)
                     .accessibilityLabel("Note text")
                     // Dictation's bar sits over the bottom of the note (board 2).
@@ -46,10 +61,18 @@ struct NoteEditorPane: View {
                                 .padding(.bottom, MFSpacing.m)
                         }
                     }
+                if let recording, recording.noteID == note.id {
+                    Divider().overlay(MFColor.chromeDivider)
+                    NoteRecordingFooter(transcript: recording.transcript, player: recording.player)
+                }
                 Divider().overlay(MFColor.chromeDivider)
                 footer(note)
             }
             .background(MFColor.surface)
+            // Again when a file note finishes transcribing or the meeting
+            // shown with the panes ends.
+            .task(id: model.recordingKey(for: note)) { await loadRecording(for: note) }
+            .onDisappear { recording?.player.pause() }
             .fileImporter(isPresented: $importingAttachment, allowedContentTypes: [.image, .audio],
                           allowsMultipleSelection: true) { result in
                 guard case .success(let urls) = result else { return }
@@ -69,6 +92,26 @@ struct NoteEditorPane: View {
     private var showsDictationBar: Bool {
         guard let voice else { return false }
         return voice.dictation.isActive || voice.dictation.error != nil
+    }
+
+    /// A finished meeting or file note gets its player and transcript; a
+    /// live meeting, a typed note, a file still transcribing or a build
+    /// without meetings gets none.
+    private func loadRecording(for note: Note) async {
+        recording?.player.pause()
+        guard let finished = model.finishedRecording(for: note) else {
+            recording = nil
+            model.editor.onTimeChipClick = nil
+            return
+        }
+        let audio = finished.audio
+        let player = RecordingPlayerModel(tracks: audio?.tracks ?? [], directory: audio?.directory,
+                                          duration: audio?.duration ?? note.recording?.duration ?? 0,
+                                          playback: model.makePlayback())
+        recording = RecordingViewState(noteID: note.id, transcript: finished.transcript, player: player)
+        // A time chip in the note plays from there.
+        model.editor.onTimeChipClick = { [weak player] time in player?.play(from: time) }
+        await player.load()
     }
 
     /// "19 November 2026 at 11:40".
@@ -139,6 +182,17 @@ struct NoteEditorPane: View {
             .accessibilityHint("Shift Command D")
 
             Spacer(minLength: MFSpacing.s)
+
+            if model.liveMeetingNoteID == note.id, model.showsPanesDuringMeeting {
+                // Back to the meeting layout (board 4).
+                Button {
+                    model.showsPanesDuringMeeting = false
+                } label: {
+                    Label("Meeting", systemImage: "waveform")
+                }
+                .buttonStyle(.mfSecondary)
+                .help("Show the live meeting")
+            }
 
             iconButton(note.isPinned ? "pin.fill" : "pin", label: note.isPinned ? "Unpin" : "Pin",
                        help: note.isPinned ? "Unpin" : "Pin") { model.togglePin(note) }

@@ -15,6 +15,7 @@ public final class VoiceModels {
     public let settings: SpeechSettingsModel
     /// `AppServices.dictation`: the one consumer of dictation events.
     public let dictation: DictationController
+    @ObservationIgnored private let speech: any SpeechServicing
     /// The note editor that has focus, set by the editor (team N1): ⇧⌘D
     /// dictates into it. Weak, so a closed editor never receives text.
     public var focusedDictationTarget: (any DictationInsertionTarget)? {
@@ -54,6 +55,7 @@ public final class VoiceModels {
                 dictation: DictationController? = nil,
                 isOffline: @escaping @MainActor () -> Bool) {
         self.preferences = preferences
+        self.speech = speech
         self.dictation = dictation ?? DictationController(speech: speech, permissions: permissions,
                                                           preferences: preferences)
         setup = SpeechSetupModel(speech: speech, isOffline: isOffline)
@@ -161,12 +163,20 @@ public final class VoiceModels {
     public var isMeetingActive: Bool { liveMeeting != nil || meetingIsActive?() == true }
     public var isMeetingFinishing: Bool { meetingIsFinishing?() == true }
 
-    /// Quit and the menu bar's Stop: stops the meeting (or lets it finish)
-    /// and waits until its transcript is saved; then any dictation (its last
-    /// phrase lands).
-    public func stopLiveSessions() async {
-        if isMeetingActive { await recordingControls?.stopRecording() }
+    /// Quit (spec 6.1), inside the app's 10 s deadline:
+    /// 1. dictation stops and its last phrase lands;
+    /// 2. a meeting (recording, paused or finishing) quits through N4's
+    ///    `stopForQuit`: it marks the session as quitting, shuts the speech
+    ///    service down (capture stops, files close; the last phrases, speaker
+    ///    pass and conversion are deferred to the next launch), saves the quick
+    ///    end and leaves the summary pending for the next launch;
+    /// 3. the speech service shuts down (already done when a meeting ran).
+    /// A meeting is never stopped the normal way here, and the session never
+    /// sees an ordinary end it would summarize during quit.
+    public func shutDownForQuit() async {
         await dictation.stop()
+        if isMeetingActive, let recordingControls { await recordingControls.finishForQuit() }
+        await speech.shutdown()
     }
 
     // MARK: Files (spec 4.6)
