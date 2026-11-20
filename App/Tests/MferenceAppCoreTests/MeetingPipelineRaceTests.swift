@@ -125,10 +125,13 @@ import Testing
         let sleeping = Task { await pipeline.willSleep() }
         for _ in 0..<1_000 where !mic.isStopping { await Task.yield() }
         #expect(mic.isStopping)
-        await pipeline.stop()
-        #expect(await log.waitUntilFinished())
+        let stopping = Task { await pipeline.stop() }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!(await log.isFinished), "the meeting does not end before its capture has stopped")
         mic.open()
         await sleeping.value
+        await stopping.value
+        #expect(await log.waitUntilFinished())
         await pipeline.didWake()
         #expect(mic.startCount == 1, "wake does not restart a meeting that ended")
     }

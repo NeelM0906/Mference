@@ -60,6 +60,8 @@ actor MeetingPipeline {
     private var quitting = false
     private var quitWaiters: [any QuitWaiter] = []
     private var finishTask: Task<Void, Never>?
+    /// The capture stop under way, which a second stop waits for.
+    private var captureStop: Task<Void, Never>?
     /// Capture chunks being handled, which pause waits for.
     private var chunksInFlight = 0
     private var chunkWaiters: [CheckedContinuation<Void, Never>] = []
@@ -428,13 +430,25 @@ actor MeetingPipeline {
         publishStatus()
     }
 
-    /// Stops the sources and waits until every captured phrase is cut.
+    /// Stops the sources and waits until every captured phrase is cut. A
+    /// second caller (Stop during sleep) waits for the stop already under
+    /// way, so nothing is finished before the capture has drained.
     private func stopCapture() async {
+        while let inFlight = captureStop {
+            await inFlight.value
+            // Whoever wakes first clears it: a finished stop is never waited on again.
+            if captureStop == inFlight { captureStop = nil }
+        }
         readStartedTracks()
-        let running = active
+        let running = Array(active.values)
         active = [:]
-        for track in running.values { await track.source.stop() }
-        for track in running.values { await track.task?.value }
+        let stopping = Task {
+            for track in running { await track.source.stop() }
+            for track in running { await track.task?.value }
+        }
+        captureStop = stopping
+        await stopping.value
+        if captureStop == stopping { captureStop = nil }
     }
 
     // MARK: Stop
