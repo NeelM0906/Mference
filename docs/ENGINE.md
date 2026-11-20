@@ -169,6 +169,41 @@ with latches to hold a load or a generation at a known point. Its journal
 records load, unload, deinit, and generation order, and counts the most
 models live and the most generations running at once.
 
+## Embeddings
+
+`LlamaEmbedder` turns text into vectors with a pooled GGUF embedding model
+through the same vendored llama.cpp. The Mac app's Find uses it with the text
+part of EmbeddingGemma 2 (`gemma-embedding2`, Q8_0, about 310 MB) and, when
+photos, video and audio are on, its image and audio encoders (the `mmproj`
+GGUF, Q8_0, about 555 MB), which map pictures and sound into the same space
+as text.
+
+- It is not an `EngineModel` and the host never sees it: it is a second,
+  small llama.cpp model and context beside the one resident model, so a search
+  never evicts the model a chat is using.
+- The weights are mapped (`use_mmap`) and offloaded to Metal like a GGUF chat
+  model (`MFERENCE_LLAMA_GPU_LAYERS` applies). The context has embeddings on,
+  the model's own pooling, and no KV cache (non-causal attention).
+- `embed(_:)` tokenizes each text with the model's special tokens, cuts it to
+  `maxSequenceTokens` (2,048), packs up to `maxSequences` (16) texts into one
+  batch as separate sequences, and returns one pooled vector per text, as the
+  model writes it (callers truncate and normalise). Calls are synchronous and
+  serialised; `unload()` frees everything.
+- With `mediaModelPath`, `embed(media:)` takes an image (packed RGB, already
+  at `imageSize(width:height:tokens:)`: the budget filled in 48-px tiles, as
+  the reference processor sizes it) or up to 30 s of 16 kHz mono audio.
+  llama.cpp's multimodal library (`mtmd`, vendored without its decoders; the
+  caller decodes) encodes it, and the rows go through the text model framed
+  as `<bos> <|image> rows <image|> <eos>` (or the audio markers) in one mixed
+  `llama_batch_ext`. The media encoder loads on the first media call.
+  `embed(media: [LlamaMediaInput])` embeds many at once: same-size images
+  share one vision-encoder pass (`mtmd_batch_encode`, up to 1,024 tokens),
+  and up to 16 encoded inputs share one text-model pass, with the same
+  vectors as one at a time; an input that fails is nil.
+- `LlamaEmbedderTests` covers batch packing and image sizing without a model;
+  its real-model cases run only with `MFERENCE_EMBEDDING_GGUF` (and
+  `MFERENCE_EMBEDDING_MMPROJ` for media) set, under the machine lock.
+
 ## Discovery
 
 `EngineCatalogDiscovery.discover` builds the catalog from what is on disk.

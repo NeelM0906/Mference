@@ -66,6 +66,8 @@ public final class ChatViewModel {
     @ObservationIgnored public let service: any EngineServicing
     @ObservationIgnored public let store: ConversationStore
     @ObservationIgnored private let tools: (any ChatToolboxProvider)?
+    /// Find's Files tool (per chat, like Web); nil when Find is not wired.
+    @ObservationIgnored private let files: (any ChatFilesProviding)?
     /// The model a new chat starts with (Settings' default model), read each
     /// time a chat is started so a change applies to the next one.
     @ObservationIgnored private let defaultModel: @MainActor () -> AppModel
@@ -107,6 +109,8 @@ public final class ChatViewModel {
     /// The model for the selected chat (or the next new one).
     public private(set) var model: AppModel = .quick
     public private(set) var webEnabled = false
+    /// The chat answers from the person's files with Find (`search_files`).
+    public private(set) var filesEnabled = false
     public private(set) var isPrivate = false
     public private(set) var title = Conversation.defaultTitle
     /// The person turned web on for the first time: ask before enabling (L7).
@@ -125,10 +129,12 @@ public final class ChatViewModel {
 
     public init(service: any EngineServicing, store: ConversationStore,
                 tools: (any ChatToolboxProvider)? = nil,
+                files: (any ChatFilesProviding)? = nil,
                 defaultModel: @escaping @MainActor () -> AppModel = { .quick }) {
         self.service = service
         self.store = store
         self.tools = tools
+        self.files = files
         self.defaultModel = defaultModel
         model = defaultModel()
     }
@@ -185,6 +191,7 @@ public final class ChatViewModel {
         let preferred = defaultModel()
         if case .notInstalled = option(for: preferred)?.availability {} else { model = preferred }
         webEnabled = false
+        filesEnabled = false
         self.isPrivate = isPrivate
         title = Conversation.defaultTitle
     }
@@ -197,6 +204,7 @@ public final class ChatViewModel {
         model = conversation.model
         fallBackIfModelHidden()
         webEnabled = conversation.webEnabled
+        filesEnabled = files?.filesEnabled(for: id) ?? false
         isPrivate = conversation.isPrivate
         title = conversation.title
         messages = ChatMessageItem.items(from: conversation.orderedMessages)
@@ -302,6 +310,37 @@ public final class ChatViewModel {
         tools?.webUsageChanged(enabled: enabled)
     }
 
+    /// Whether the Files chip is shown at all (Find is wired).
+    public var offersFiles: Bool { files != nil }
+
+    /// Why the Files toggle cannot turn on now (Find off, or Apple's model).
+    public var filesBlockedReason: String? {
+        guard let files else { return nil }
+        if model == .apple { return "Files needs Quick or Deep" }
+        return files.filesUnavailableReason
+    }
+
+    public func setFilesEnabled(_ enabled: Bool) {
+        if enabled, filesBlockedReason != nil { return }
+        filesEnabled = enabled
+        if let selectedID { files?.setFilesEnabled(enabled, for: selectedID) }
+    }
+
+    /// Starts a new chat about one file (Find's "Ask about this").
+    public func startChat(about file: URL) {
+        newChat()
+        if filesBlockedReason == nil { filesEnabled = true }
+        draft = "About “\(file.lastPathComponent)”: "
+    }
+
+    /// Starts a new chat with Files on and `question` ready to send (Find's
+    /// "Ask in Chat").
+    public func startChat(question: String) {
+        newChat()
+        if filesBlockedReason == nil { filesEnabled = true }
+        draft = question
+    }
+
     /// "Turn on" in the web consent prompt.
     public func confirmWebConsent() {
         webConsentRequested = false
@@ -349,6 +388,7 @@ public final class ChatViewModel {
             if selectedID != conversation.id {
                 selectedID = conversation.id
             }
+            if filesEnabled { files?.setFilesEnabled(true, for: conversation.id) }
             let message = try store.append(to: conversation, role: .user, content: text, now: now())
             draft = ""
             title = conversation.title
@@ -391,7 +431,7 @@ public final class ChatViewModel {
     private func answer(in conversation: Conversation) {
         let model = conversation.model
         // Apple's model answers without tools (web needs Quick or Deep).
-        let toolbox = model.isEngineModel ? tools?.makeToolbox(webEnabled: conversation.webEnabled) : nil
+        let toolbox = model.isEngineModel ? makeToolbox(for: conversation) : nil
         historyTrimmed = false
         isGenerating = true
         generatingConversationID = conversation.id
@@ -400,6 +440,19 @@ public final class ChatViewModel {
         pendingReasoning = ""
         generationTask = Task { [weak self] in
             await self?.runAnswer(conversation: conversation, model: model, toolbox: toolbox)
+        }
+    }
+
+    /// Web and Files tools for one answer, combined when both are on.
+    private func makeToolbox(for conversation: Conversation) -> (any ChatToolbox)? {
+        let web = tools?.makeToolbox(webEnabled: conversation.webEnabled)
+        let filesOn = files != nil && (files?.filesEnabled(for: conversation.id) ?? false)
+        let fileTools = filesOn && filesBlockedReason == nil ? files?.makeFilesToolbox() : nil
+        switch (web, fileTools) {
+        case (let web?, let fileTools?): return CombinedToolbox([web, fileTools])
+        case (let web?, nil): return web
+        case (nil, let fileTools?): return fileTools
+        case (nil, nil): return nil
         }
     }
 

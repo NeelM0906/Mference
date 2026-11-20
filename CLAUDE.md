@@ -187,13 +187,15 @@ schema, `AppSection`, `PermissionBroker`); changing one is its own PR.
 | Target | Path | Notes |
 | --- | --- | --- |
 | `MferenceDesign` | `App/Sources/MferenceDesign` | Tokens (`MFColor`, `MFFont`, `MFSpacing`, `MFRadius`, `MFLineSpacing`) and components. Views use tokens only. |
-| `MferenceAppCore` | `App/Sources/MferenceAppCore` | No SwiftUI views. `Engine/` (`EngineServicing`, `EngineService` over `EngineHost`), `Services/AppServices` (the one composition root), `Models/` (library, downloads, memory fit), `Chat/`, `Web/` (bundled SearXNG, tools, citations), `Apple/` (Vision, EventKit, Mail, FoundationModels), `Persistence/` (SwiftData), `Permissions/`, `Memory/`, `Settings/`. Only `Engine/` imports `MferenceEngine` or `Mference`. |
+| `MferenceAppCore` | `App/Sources/MferenceAppCore` | No SwiftUI views. `Engine/` (`EngineServicing`, `EngineService` over `EngineHost`), `Services/AppServices` (the one composition root), `Models/` (library, downloads, memory fit), `Chat/`, `Web/` (bundled SearXNG, tools, citations), `Apple/` (Vision, EventKit, Mail, FoundationModels), `Find/` (content search: FTS5 + vector index, extractors, photo/video/audio sampling, crawler, searcher), `Persistence/` (SwiftData), `Permissions/`, `Memory/`, `Settings/`. Only `Engine/` imports `MferenceEngine` or `Mference`. |
 | `MferenceAppUI` | `App/Sources/MferenceAppUI` | SwiftUI screens, one folder per mockup board; `Shell/` routes `AppSection`s; `Adapters/` (`ScreenModels.live`) maps core services to view-facing protocols. |
 | `MferenceMac` | `App/Sources/MferenceMac` | `@main`: sets `AGX_RELAX_CDM_CTXSTORE_TIMEOUT` before any Metal device exists; `AppRuntime` must build exactly one `AppServices.live` and shut it down in order on quit (web first, then the engine). |
 | `MferenceSmoke` | `App/Sources/MferenceSmoke` | Real-model smoke through the app's engine path; refuses to run without `MFERENCE_APP_SMOKE=1`. |
 
 - One `AppServices` per process, so one `EngineHost` and one resident model;
-  never construct a second `EngineService.live()`.
+  never construct a second `EngineService.live()`. Find's small search model
+  (`LlamaEmbedder`, EmbeddingGemma 2 text) is the one exception: a separate
+  llama.cpp context, freed when Find is idle (App/CONTRACTS.md).
 - `App/Scripts/bundle.sh` assembles `build/Mference.app` (bundle ID
   `ai.mference.app`, no App Sandbox, ad hoc signed), copies the
   `Mference_Mference` and `Mference_LlamaCpp` resource bundles and the SearXNG

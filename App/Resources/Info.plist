@@ -52,5 +52,7 @@
 	<string>To hear you when you dictate or record a meeting.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>To hear the other side of a call while you record a meeting.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>To find photos and videos in your Photos library by what is in them, on this Mac.</string>
 </dict>
 </plist>

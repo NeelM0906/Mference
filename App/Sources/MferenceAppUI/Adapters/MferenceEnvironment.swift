@@ -4,8 +4,8 @@ import SwiftUI
 
 extension View {
     /// Everything the screens read from the environment, in one call at the
-    /// root: U1's `ScreenModels`, U4's Scan, Calendar and Mail models, and
-    /// the SwiftData container.
+    /// root: U1's `ScreenModels`, U4's Scan, Calendar and Mail models, Find,
+    /// and the SwiftData container.
     public func mferenceEnvironment(services: AppServices, screens: ScreenModels) -> some View {
         modifier(MferenceEnvironment(services: services, screens: screens))
     }
@@ -18,6 +18,7 @@ struct MferenceEnvironment: ViewModifier {
     func body(content: Content) -> some View {
         let base = content
             .environment(screens)
+            .environment(services.find)
             .modelContainer(services.modelContainer)
         if let apple = services.apple {
             base

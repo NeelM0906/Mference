@@ -4,17 +4,19 @@ import Foundation
 // the shell that renders it; each team owns its section's screen.
 
 /// A top-level screen in the pill bar, in mockup order, plus Settings.
+/// Find (content search) sits after Chat (design canvas, locked 2026-11-19).
 public enum AppSection: String, Sendable, Hashable, Codable, CaseIterable, Identifiable {
-    case chat, mail, calendar, notes, errands, scan, settings
+    case chat, find, mail, calendar, notes, errands, scan, settings
 
     public var id: String { rawValue }
 
     /// The sections shown as pills (Settings is the gear at the right).
-    public static let pills: [AppSection] = [.chat, .mail, .calendar, .notes, .errands, .scan]
+    public static let pills: [AppSection] = [.chat, .find, .mail, .calendar, .notes, .errands, .scan]
 
     public var title: String {
         switch self {
         case .chat: "Chat"
+        case .find: "Find"
         case .mail: "Mail"
         case .calendar: "Calendar"
         case .notes: "Notes"
@@ -28,6 +30,7 @@ public enum AppSection: String, Sendable, Hashable, Codable, CaseIterable, Ident
     public var systemImage: String {
         switch self {
         case .chat: "bubble.left"
+        case .find: "doc.text.magnifyingglass"
         case .mail: "envelope"
         case .calendar: "calendar"
         case .notes: "note.text"

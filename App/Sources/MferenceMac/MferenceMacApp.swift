@@ -46,6 +46,17 @@ struct MferenceMacApp: App {
                     delegate.runtime.services.apple?.calendar.openSettings = {
                         shell.openSettings(.connections)
                     }
+                    // Find's quick panel on ⌥Space, from any app.
+                    if let find = delegate.runtime.services.find {
+                        let chat = delegate.runtime.chat
+                        FindPanelController.shared.install(
+                            find: find,
+                            askAbout: { url in
+                                chat.startChat(about: url)
+                                shell.show(.chat)
+                            },
+                            openFind: { shell.show(.find) })
+                    }
                 }
                 .task {
                     if let path = WindowCapture.requestedPath {
