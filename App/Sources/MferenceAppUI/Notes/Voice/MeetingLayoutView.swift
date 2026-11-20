@@ -85,10 +85,11 @@ extension MeetingSession: LiveRecordingControls {
     /// The menu bar's Stop and summarize: a normal stop.
     public func stopRecording() async { await stop() }
 
-    /// Quit: the speech service has already shut down and sent the quick
-    /// end; wait until the session has saved it (a meeting that was already
-    /// finishing ends the same way).
-    public func waitUntilSaved() async { await waitUntilFinished() }
+    /// Quit: N4's `stopForQuit` marks the session as quitting, shuts the
+    /// speech service down (its quick end), saves the end and leaves the
+    /// summary for the next launch; a meeting already finishing ends the same
+    /// way. Never a normal stop or a wait for the speaker pass.
+    public func finishForQuit() async { await stopForQuit() }
 }
 
 extension VoiceModels {

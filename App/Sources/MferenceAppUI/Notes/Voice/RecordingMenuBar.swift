@@ -14,10 +14,10 @@ public protocol LiveRecordingControls: AnyObject {
     /// Stop and summarize (the menu bar): a normal stop; the last phrases,
     /// the speaker pass and the summary follow as usual.
     func stopRecording() async
-    /// Quit, after the speech service has shut down (which ends the meeting
-    /// at once and defers its finishing to the next launch): waits until the
-    /// session has saved what it received.
-    func waitUntilSaved() async
+    /// Quit: the session ends the meeting through the speech service's quick
+    /// shutdown (finishing deferred to the next launch), saves that end and
+    /// leaves the summary to the next launch.
+    func finishForQuit() async
 }
 
 /// The menu bar item's menu while a meeting records (D7): the time, Open,

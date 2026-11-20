@@ -14,7 +14,7 @@ final class FakeRecordingControls: LiveRecordingControls {
     func resumeRecording() async { calls.append("resume") }
     func stopRecording() async { calls.append("stop") }
     func markMomentInRecording() async { calls.append("mark") }
-    func waitUntilSaved() async { calls.append("saved") }
+    func finishForQuit() async { calls.append("saved") }
 }
 
 /// The record popover (board 3), the timer chip and menu bar (D7), and quit.

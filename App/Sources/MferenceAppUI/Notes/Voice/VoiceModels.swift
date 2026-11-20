@@ -165,16 +165,18 @@ public final class VoiceModels {
 
     /// Quit (spec 6.1), inside the app's 10 s deadline:
     /// 1. dictation stops and its last phrase lands;
-    /// 2. the speech service shuts down: capture stops and files close at
-    ///    once, and a meeting's last phrases, speaker pass and conversion are
-    ///    deferred to the next launch (N2's quick end);
-    /// 3. the meeting session saves that end.
-    /// A meeting is never stopped the normal way here: that waits for the
-    /// whole speaker pass and would overrun the deadline.
+    /// 2. a meeting (recording, paused or finishing) quits through N4's
+    ///    `stopForQuit`: it marks the session as quitting, shuts the speech
+    ///    service down (capture stops, files close; the last phrases, speaker
+    ///    pass and conversion are deferred to the next launch), saves the quick
+    ///    end and leaves the summary pending for the next launch;
+    /// 3. the speech service shuts down (already done when a meeting ran).
+    /// A meeting is never stopped the normal way here, and the session never
+    /// sees an ordinary end it would summarize during quit.
     public func shutDownForQuit() async {
         await dictation.stop()
+        if isMeetingActive, let recordingControls { await recordingControls.finishForQuit() }
         await speech.shutdown()
-        if let recordingControls { await recordingControls.waitUntilSaved() }
     }
 
     // MARK: Files (spec 4.6)
