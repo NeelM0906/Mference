@@ -8,9 +8,23 @@ import Testing
 /// editor, Esc, note switches, Open note, the toolbar. FakeSpeechService.
 @MainActor
 @Suite(.serialized) struct NotesVoiceWiringTests {
+    /// A small store (two notes, one folder): these tests need little data.
+    static func smallModel(speech: FakeSpeechService) throws -> NotesModel {
+        let store = NoteStore(container: try AppModelContainer.inMemory(), attachments: .temporary(), speech: speech)
+        let work = try store.createFolder(named: "Work")
+        let dentist = try store.createNote(now: NotesFixtures.date(11, 16))
+        try store.save(.titled("Dentist questions", body: [.paragraph(runs: [TextRun("Ask about the guard.")])]),
+                       to: dentist, now: NotesFixtures.date(11, 16))
+        let lisbon = try store.createNote(in: work, now: NotesFixtures.date(11, 19))
+        try store.save(.titled("Lisbon trip, March"), to: lisbon, now: NotesFixtures.date(11, 19))
+        let model = NotesModel(store: store, speech: speech, now: { NotesFixtures.now })
+        model.select(lisbon)
+        return model
+    }
+
     func setUp() throws -> (NotesModel, VoiceModels, NoteEditorTests.Harness) {
         let speech = FakeSpeechService(dictation: .saying("then the hotel."))
-        let model = try NotesFixtures.model(speech: speech)
+        let model = try Self.smallModel(speech: speech)
         let voice = VoiceModels(speech: speech,
                                 permissions: FakePermissionBroker(states: [.microphone: .granted]),
                                 preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
@@ -30,36 +44,36 @@ import Testing
         #expect(voice.focusedDictationTarget == nil)
     }
 
-    @Test func dictateFromTheButtonLandsInTheNoteAndEscStops() async throws {
-        let (model, voice, h) = try setUp()
-        let note = try #require(model.selectedNote)
-        h.view.setSelectedRange(NSRange(location: (h.view.string as NSString).length, length: 0))
+    // These tests start no dictation session: dictation end to end is
+    // covered by NoteDictationTargetTests (the editor) and N3's controller
+    // tests; running sessions here made N3's timing-sensitive setup test flaky.
+
+    @Test func dictateGoesThroughTheVoiceModels() throws {
+        let speech = FakeSpeechService.notInstalled()
+        let model = try Self.smallModel(speech: speech)
+        let voice = VoiceModels(speech: speech, permissions: FakePermissionBroker(),
+                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
+        model.connect(voice)
+        // Not installed yet: the Dictate button brings up the setup card.
         model.voice.toggleDictation?(model.editor)
-        #expect(await eventually { voice.dictation.isDictating(into: note.id) || note.hasDictation })
-        #expect(await eventually { note.hasDictation })
-        #expect(h.view.document.plainText.contains("then the hotel."))
-        // Esc in the editor stops dictation when one runs; otherwise it is the
-        // text view's own.
-        if voice.dictation.isActive {
-            #expect(model.editor.onCancel?() == true)
-            #expect(await eventually { !voice.dictation.isActive })
-        }
+        #expect(voice.setup.pendingAction == .dictate)
+        #expect(model.voice.isDictating?(try #require(model.selectedNoteID)) == false)
+        // Esc without dictation is the text view's own.
         #expect(model.editor.onCancel?() == false)
     }
 
-    @Test func switchingNotesStopsDictation() async throws {
-        let speech = FakeSpeechService(dictation: .saying("one", "two"), stepped: true)
-        let model = try NotesFixtures.model(speech: speech)
-        let voice = VoiceModels(speech: speech, permissions: FakePermissionBroker(states: [.microphone: .granted]),
-                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
-        model.connect(voice)
-        let h = NoteEditorTests.Harness()
-        model.editor.attach(h.view)
-        let first = try #require(model.selectedNote)
-        model.voice.toggleDictation?(model.editor)
-        #expect(await eventually { voice.dictation.isDictating(into: first.id) })
+    @Test func switchingNotesStopsDictationIntoTheNoteLeft() throws {
+        let (model, _, _) = try setUp()
+        let first = try #require(model.selectedNoteID)
+        var stopped = 0
+        model.voice.isDictating = { $0 == first }
+        model.voice.stopDictation = { stopped += 1 }
         model.selectAdjacent(1)
-        #expect(await eventually { !voice.dictation.isActive })
+        #expect(model.selectedNoteID != first)
+        #expect(stopped == 1)
+        // Moving on from a note not being dictated into stops nothing.
+        model.selectAdjacent(-1)
+        #expect(stopped == 1)
     }
 
     @Test func openNoteShowsTheNoteWhereverTheListWas() throws {
