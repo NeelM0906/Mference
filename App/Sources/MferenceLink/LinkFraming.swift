@@ -74,11 +74,18 @@ struct LinkDirection {
         next += 1
     }
 
-    /// Takes the next sequence number for an outgoing frame.
-    mutating func take() throws -> UInt64 {
+    /// The sequence number the next outgoing frame carries. It is used up
+    /// only by `advance()`, once that frame is built: a frame that fails to
+    /// encode or seal (too large, say) must not leave a gap the peer would
+    /// refuse as out of order.
+    func peek() throws -> UInt64 {
         guard next < UInt64.max else { throw LinkFailure.closed }
-        defer { next += 1 }
         return next
+    }
+
+    /// Marks the number from `peek()` as sent.
+    mutating func advance() {
+        next += 1
     }
 }
 

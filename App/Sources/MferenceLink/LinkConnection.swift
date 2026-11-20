@@ -103,15 +103,16 @@ public struct LinkConnection {
     private var inbound = LinkDirection()
     private var version: Int?
 
-    // Handshake transcript pieces: the exact JSON bytes of each plain envelope.
-    private var phoneHello = Data()
-    private var macHello = Data()
+    // Handshake transcript pieces, kept as the decoded values (see
+    // `LinkKeySchedule.field`): the JSON bytes they came in are not hashed.
+    private var localHello: LinkHello?
     private var peerHello: LinkHello?
-    private var pairRequestJSON = Data()
-    private var pairResponseJSON = Data()
-    private var phoneNonceJSON = Data()
-    private var macNonceJSON = Data()
+    /// The phone's name exactly as sent in `pairRequest`.
+    private var pairRequestName = ""
+    /// The Mac's name exactly as sent in `pairResponse`.
+    private var pairResponseName = ""
     private var commitment = Data()
+    private var phoneNonce = Data()
     private var macNonce = Data()
     private var peerName = ""
 
@@ -148,8 +149,8 @@ public struct LinkConnection {
             identityKey: identity.publicKey, ephemeralKey: ephemeral.publicKey)
         var events: [Event] = []
         do {
-            let json = try sendPlain(.hello(hello), into: &events)
-            if role == .phone { phoneHello = json } else { macHello = json }
+            try sendPlain(.hello(hello), into: &events)
+            localHello = hello
         } catch {
             fail(error, into: &events)
         }
@@ -234,19 +235,25 @@ public struct LinkConnection {
         events.append(.closed(failure))
     }
 
-    @discardableResult
-    private mutating func sendPlain(_ message: LinkMessage, into events: inout [Event]) throws -> Data {
-        let envelope = LinkEnvelope(version: version ?? LinkProtocol.version, sequence: try outbound.take(), message: message)
-        let json = try LinkFrameCodec.encode(envelope)
-        events.append(.send(LinkFraming.frame(LinkFrameCodec.plainBody(json))))
-        return json
+    // Both senders use a sequence number only once the frame is built, so a
+    // message that fails to encode or seal leaves the next number free.
+
+    private mutating func sendPlain(_ message: LinkMessage, into events: inout [Event]) throws {
+        let sequence = try outbound.peek()
+        let json = try LinkFrameCodec.encode(
+            LinkEnvelope(version: version ?? LinkProtocol.version, sequence: sequence, message: message))
+        let frame = LinkFraming.frame(LinkFrameCodec.plainBody(json))
+        outbound.advance()
+        events.append(.send(frame))
     }
 
     private mutating func sendSealed(_ message: LinkMessage, into events: inout [Event]) throws {
         guard let key = outbound.key, let version else { throw LinkFailure.unexpectedMessage }
-        let sequence = try outbound.take()
+        let sequence = try outbound.peek()
         let json = try LinkFrameCodec.encode(LinkEnvelope(version: version, sequence: sequence, message: message))
-        events.append(.send(LinkFraming.frame(try LinkFrameCodec.sealedBody(json, sequence: sequence, key: key))))
+        let frame = LinkFraming.frame(try LinkFrameCodec.sealedBody(json, sequence: sequence, key: key))
+        outbound.advance()
+        events.append(.send(frame))
     }
 
     private mutating func handle(_ body: Data, into events: inout [Event]) throws {
@@ -264,7 +271,7 @@ public struct LinkConnection {
             }
             try inbound.accept(envelope.sequence)
             if let version, envelope.version != version { throw LinkFailure.unsupportedVersion }
-            try handlePlain(envelope.message, json: json, into: &events)
+            try handlePlain(envelope.message, into: &events)
 
         case .sealed:
             var adoptingCandidate = false
@@ -299,7 +306,7 @@ public struct LinkConnection {
 
     // MARK: - Plain messages (handshake)
 
-    private mutating func handlePlain(_ message: LinkMessage, json: Data, into events: inout [Event]) throws {
+    private mutating func handlePlain(_ message: LinkMessage, into events: inout [Event]) throws {
         if case .error(let error) = message {
             switch error.code {
             case .notPaired: throw LinkFailure.notPaired
@@ -309,7 +316,7 @@ public struct LinkConnection {
         }
         switch (state, message) {
         case (.awaitingHello, .hello(let hello)):
-            try receiveHello(hello, json: json, into: &events)
+            try receiveHello(hello, into: &events)
 
         case (.macAwaitingPhone, .pairRequest(let request)):
             guard configuration.pairingAllowed else {
@@ -319,28 +326,28 @@ public struct LinkConnection {
                 throw LinkFailure.pairingOff
             }
             candidateKeys = nil
-            pairRequestJSON = json
+            pairRequestName = request.deviceName
             peerName = LinkPeer.cleanName(request.deviceName, role: .phone)
             macNonce = random.bytes(LinkProtocol.keyBytes)
             commitment = try expectedCommitment(macNonce: macNonce)
-            pairResponseJSON = try sendPlain(
-                .pairResponse(LinkPairResponse(macName: configuration.deviceName, commitment: commitment)),
-                into: &events)
+            pairResponseName = configuration.deviceName
+            try sendPlain(.pairResponse(LinkPairResponse(macName: pairResponseName, commitment: commitment)),
+                          into: &events)
             state = .macAwaitingPhoneNonce
 
         case (.phoneAwaitingPairResponse, .pairResponse(let response)):
             guard response.commitment.count == LinkProtocol.keyBytes else { throw LinkFailure.malformedFrame }
-            pairResponseJSON = json
+            pairResponseName = response.macName
             commitment = response.commitment
             peerName = LinkPeer.cleanName(response.macName, role: .mac)
-            phoneNonceJSON = try sendPlain(.pairNonce(LinkPairNonce(nonce: random.bytes(LinkProtocol.keyBytes))),
-                                           into: &events)
+            phoneNonce = random.bytes(LinkProtocol.keyBytes)
+            try sendPlain(.pairNonce(LinkPairNonce(nonce: phoneNonce)), into: &events)
             state = .phoneAwaitingMacNonce
 
         case (.macAwaitingPhoneNonce, .pairNonce(let nonce)):
             guard nonce.nonce.count == LinkProtocol.keyBytes else { throw LinkFailure.malformedFrame }
-            phoneNonceJSON = json
-            macNonceJSON = try sendPlain(.pairNonce(LinkPairNonce(nonce: macNonce)), into: &events)
+            phoneNonce = nonce.nonce
+            try sendPlain(.pairNonce(LinkPairNonce(nonce: macNonce)), into: &events)
             try deriveFromPairing(into: &events)
 
         case (.phoneAwaitingMacNonce, .pairNonce(let nonce)):
@@ -351,7 +358,7 @@ public struct LinkConnection {
                     message: "Pairing didn't check out, so nothing was saved. Try again.")), into: &events)
                 throw LinkFailure.commitmentMismatch
             }
-            macNonceJSON = json
+            macNonce = nonce.nonce
             try deriveFromPairing(into: &events)
 
         default:
@@ -359,7 +366,7 @@ public struct LinkConnection {
         }
     }
 
-    private mutating func receiveHello(_ hello: LinkHello, json: Data, into events: inout [Event]) throws {
+    private mutating func receiveHello(_ hello: LinkHello, into events: inout [Event]) throws {
         guard hello.role != role else { throw LinkFailure.unexpectedMessage }
         guard hello.identityKey.count == LinkProtocol.keyBytes, hello.ephemeralKey.count == LinkProtocol.keyBytes,
               hello.identityKey != identity.publicKey
@@ -371,14 +378,13 @@ public struct LinkConnection {
         }
         version = common
         peerHello = hello
-        if role == .phone { macHello = json } else { phoneHello = json }
 
         let known = try storedPeer(identityKey: hello.identityKey)
         switch role {
         case .phone:
             if configuration.intent == .pair {
-                pairRequestJSON = try sendPlain(.pairRequest(LinkPairRequest(deviceName: configuration.deviceName)),
-                                                into: &events)
+                pairRequestName = configuration.deviceName
+                try sendPlain(.pairRequest(LinkPairRequest(deviceName: pairRequestName)), into: &events)
                 state = .phoneAwaitingPairResponse
                 return
             }
@@ -449,6 +455,16 @@ public struct LinkConnection {
 
     // MARK: - Keys
 
+    /// The fields both sides agree on once the hellos are in: every field of
+    /// the phone's hello, then the Mac's, then the version in use. Each later
+    /// transcript starts with these.
+    private func helloTranscript() throws -> [Data] {
+        guard let localHello, let peerHello, let version else { throw LinkFailure.unexpectedMessage }
+        let (phone, mac) = role == .phone ? (localHello, peerHello) : (peerHello, localHello)
+        return LinkKeySchedule.helloFields(phone) + LinkKeySchedule.helloFields(mac)
+            + [LinkKeySchedule.field(version)]
+    }
+
     /// SHA-256 over the Mac's ephemeral key, the phone's ephemeral key and the
     /// Mac's nonce, bound to everything sent before the commitment (both
     /// hellos, so both identity keys, and the pair request).
@@ -456,7 +472,8 @@ public struct LinkConnection {
         guard let peerHello else { throw LinkFailure.unexpectedMessage }
         let macEphemeral = role == .mac ? ephemeral.publicKey : peerHello.ephemeralKey
         let phoneEphemeral = role == .phone ? ephemeral.publicKey : peerHello.ephemeralKey
-        let context = LinkKeySchedule.transcriptHash("commit context", [phoneHello, macHello, pairRequestJSON])
+        let context = LinkKeySchedule.transcriptHash(
+            "commit context", try helloTranscript() + [LinkKeySchedule.field(pairRequestName)])
         return LinkKeySchedule.commitment(macEphemeral: macEphemeral, phoneEphemeral: phoneEphemeral,
                                           macNonce: macNonce, context: context)
     }
@@ -470,7 +487,7 @@ public struct LinkConnection {
 
     private func sessionKeys(pairingSecret: Data) throws -> LinkSessionKeys {
         guard pairingSecret.count == LinkProtocol.keyBytes else { throw LinkFailure.badKey }
-        let transcript = LinkKeySchedule.transcriptHash("session", [phoneHello, macHello])
+        let transcript = LinkKeySchedule.transcriptHash("session", try helloTranscript())
         return LinkKeySchedule.sessionKeys(secrets: try handshakeSecrets(), pairingSecret: pairingSecret,
                                            transcript: transcript)
     }
@@ -478,8 +495,13 @@ public struct LinkConnection {
     private mutating func deriveFromPairing(into events: inout [Event]) throws {
         guard let peerHello else { throw LinkFailure.unexpectedMessage }
         let secrets = try handshakeSecrets()
-        let transcript = LinkKeySchedule.transcriptHash(
-            "pairing", [phoneHello, macHello, pairRequestJSON, pairResponseJSON, phoneNonceJSON, macNonceJSON])
+        // Every value the pairing exchanged, in one fixed order on both sides.
+        // The Mac's name and nonce were fixed by the commitment before the
+        // phone's nonce was known, so nothing here is left to choose after it.
+        let transcript = LinkKeySchedule.transcriptHash("pairing", try helloTranscript() + [
+            LinkKeySchedule.field(pairRequestName), LinkKeySchedule.field(pairResponseName), commitment,
+            phoneNonce, macNonce,
+        ])
         let pairingSecret = LinkKeySchedule.pairingSecret(secrets: secrets, transcript: transcript)
         let keys = LinkKeySchedule.sessionKeys(secrets: secrets, pairingSecret: pairingSecret, transcript: transcript)
         outbound.key = keys.sending(as: role)
@@ -509,8 +531,8 @@ public struct LinkConnection {
     }
 
     private mutating func sendSealedHello(into events: inout [Event]) throws {
-        let hello = try LinkFrameCodec.decoder.decode(LinkEnvelope.self, from: phoneHello).message
-        try sendSealed(hello, into: &events)
+        guard let localHello else { throw LinkFailure.unexpectedMessage }
+        try sendSealed(.hello(localHello), into: &events)
     }
 
     private func storedPeer(identityKey: Data) throws -> LinkPeer? {

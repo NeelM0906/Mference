@@ -122,6 +122,30 @@ enum LinkKeySchedule {
         return Data(hasher.finalize())
     }
 
+    // MARK: Transcript fields
+    //
+    // The transcript is built from the decoded field values in a fixed order,
+    // never from the JSON bytes they arrived in: whitespace, key order and
+    // unknown fields are free for anyone on the path to change, so hashing
+    // them would let a device in the middle re-roll the code without
+    // touching a single committed value.
+
+    static func field(_ string: String) -> Data { Data(string.utf8) }
+
+    static func field(_ value: Int) -> Data {
+        var big = Int64(value).bigEndian
+        return Data(bytes: &big, count: 8)
+    }
+
+    /// Fixed 8 bytes per entry, so the list needs no inner separators.
+    static func field(_ values: [Int]) -> Data { values.reduce(into: Data()) { $0 += field($1) } }
+
+    /// Every field of a hello, in declaration order.
+    static func helloFields(_ hello: LinkHello) -> [Data] {
+        [field(hello.role.rawValue), field(hello.deviceName), field(hello.protocolVersions),
+         field(hello.appVersion), hello.identityKey, hello.ephemeralKey]
+    }
+
     /// The three Diffie-Hellman results, in the same order on both sides:
     /// ephemeral-ephemeral, phone identity with Mac ephemeral, phone ephemeral
     /// with Mac identity.

@@ -179,6 +179,30 @@ enum LinkFixture {
         return LinkFraming.frame(Data([0]) + (try JSONEncoder().encode(envelope)))
     }
 
+    /// Re-serializes a plain frame's JSON with the same values but different
+    /// bytes: an unknown field added to every object, keys sorted, pretty
+    /// printed. Anyone on the path can do this, since plain frames carry no
+    /// tag. Returns the frame unchanged if it is not plain.
+    static func reshapePlain(_ frame: Data) -> Data {
+        let body = frame.dropFirst(LinkFraming.lengthBytes)
+        guard body.first == 0,
+              let object = try? JSONSerialization.jsonObject(with: Data(body.dropFirst())),
+              let json = try? JSONSerialization.data(withJSONObject: addUnknownFields(object),
+                                                     options: [.sortedKeys, .prettyPrinted])
+        else { return frame }
+        return LinkFraming.frame(Data([0]) + json)
+    }
+
+    private static func addUnknownFields(_ value: Any) -> Any {
+        if var object = value as? [String: Any] {
+            for (key, inner) in object { object[key] = addUnknownFields(inner) }
+            object["aUnknownField"] = ["padding": "   ", "n": 42] as [String: Any]
+            return object
+        }
+        if let array = value as? [Any] { return array.map(addUnknownFields) }
+        return value
+    }
+
     static func plainMessage(_ frame: Data) -> LinkMessage? {
         let body = frame.dropFirst(LinkFraming.lengthBytes)
         guard body.first == 0 else { return nil }

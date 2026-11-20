@@ -111,6 +111,59 @@ struct LinkSecurityTests {
         #expect(pipe.phoneEvents.paired == nil && pipe.macEvents.paired == nil)
     }
 
+    /// The code and keys come from the decoded field values, not the JSON
+    /// bytes they travel in. A device on the path that adds unknown fields,
+    /// reorders keys and changes spacing in every handshake frame (which it
+    /// could repeat freely to re-roll the code) changes nothing.
+    @Test func reshapedHandshakeJSONChangesNeitherCodeNorKeys() throws {
+        final class Count: @unchecked Sendable { var changed = 0 }
+        func pairing(reshape: Bool) throws -> (pipe: LinkPipe, changed: Int) {
+            let count = Count()
+            var pipe = LinkPipe(phone: try LinkFixture.phone(InMemoryLinkKeyStore(), intent: .pair, seed: 40),
+                                mac: try LinkFixture.mac(InMemoryLinkKeyStore(), pairing: true, seed: 41))
+            if reshape {
+                pipe.intercept = { _, frame in
+                    let reshaped = LinkFixture.reshapePlain(frame)
+                    if reshaped != frame { count.changed += 1 }
+                    return [reshaped]
+                }
+            }
+            pipe.start()
+            pipe.confirm(phone: true, mac: true)
+            return (pipe, count.changed)
+        }
+        let untouched = try pairing(reshape: false).pipe
+        let result = try pairing(reshape: true)
+        var reshaped = result.pipe
+        // Both hellos, the request, the response and both nonces were rewritten.
+        #expect(result.changed == 6)
+
+        let code = try #require(untouched.phoneEvents.code)
+        #expect(reshaped.phoneEvents.code == code)
+        #expect(reshaped.macEvents.code == code)
+        let secret = try #require(untouched.phoneEvents.paired?.pairingSecret)
+        #expect(reshaped.phoneEvents.paired?.pairingSecret == secret)
+        #expect(reshaped.macEvents.paired?.pairingSecret == secret)
+        // The session keys agree too: sealed frames open both ways.
+        try reshaped.sendFromMac(LinkFixture.capabilities)
+        #expect(reshaped.phoneEvents.established != nil)
+        #expect(reshaped.phoneEvents.received == [LinkFixture.capabilities])
+        #expect(reshaped.phoneEvents.failure == nil && reshaped.macEvents.failure == nil)
+    }
+
+    /// The same holds for a paired connection: reshaped hellos still give
+    /// both sides the same session keys.
+    @Test func reshapedHellosStillConnect() throws {
+        let stores = try LinkFixture.pairedStores(seed: 42)
+        var pipe = LinkPipe(phone: try LinkFixture.phone(stores.phone, intent: .connect, seed: 43),
+                            mac: try LinkFixture.mac(stores.mac, pairing: false, seed: 44))
+        pipe.intercept = { _, frame in [LinkFixture.reshapePlain(frame)] }
+        pipe.start()
+        try pipe.sendFromMac(LinkFixture.capabilities)
+        #expect(pipe.macEvents.established != nil && pipe.phoneEvents.established != nil)
+        #expect(pipe.phoneEvents.received == [LinkFixture.capabilities])
+    }
+
     /// The commitment covers both ephemeral keys and the Mac's nonce: a
     /// commitment made for another key or nonce does not check.
     @Test func commitmentBindsBothEphemeralsAndTheNonce() {
@@ -482,6 +535,26 @@ struct LinkSecurityTests {
         let huge = LinkMessage.modelChunk(LinkModelChunk(
             transferID: UUID(), offset: 0, data: Data(count: LinkProtocol.maxEnvelopeBytes)))
         #expect(throws: LinkFailure.tooLarge) { _ = try pipe.mac.send(huge) }
+    }
+
+    /// A send that fails (here: too large) uses no sequence number, so the
+    /// next message still arrives in order on the peer, in both directions.
+    @Test func failedSendKeepsTheSequence() throws {
+        var pipe = try LinkFixture.established()
+        func chunk(_ count: Int, _ byte: UInt8) -> LinkMessage {
+            .modelChunk(LinkModelChunk(transferID: UUID(), offset: 0, data: Data(repeating: byte, count: count)))
+        }
+        #expect(throws: LinkFailure.tooLarge) { _ = try pipe.mac.send(chunk(LinkProtocol.maxEnvelopeBytes, 1)) }
+        #expect(throws: LinkFailure.tooLarge) { _ = try pipe.phone.send(chunk(LinkProtocol.maxEnvelopeBytes, 2)) }
+        #expect(pipe.mac.isEstablished && pipe.phone.isEstablished)
+
+        let toPhone = chunk(16, 3)
+        try pipe.sendFromMac(toPhone)
+        #expect(pipe.phoneEvents.received.last == toPhone)
+        let toMac = chunk(16, 4)
+        try pipe.sendFromPhone(toMac)
+        #expect(pipe.macEvents.received.last == toMac)
+        #expect(pipe.phoneEvents.failure == nil && pipe.macEvents.failure == nil)
     }
 
     @Test func emptyFrameIsMalformed() throws {
