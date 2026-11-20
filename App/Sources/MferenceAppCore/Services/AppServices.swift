@@ -28,6 +28,11 @@ public final class AppServices {
     /// Dictation, meetings and file transcription (Notes spec 6.2). The UI
     /// and Notes talk only to this protocol.
     public let speech: any SpeechServicing
+    /// The remembered voice choices (Settings › Speech, the popover, the
+    /// dictation bar's chips).
+    public let speechPreferences: SpeechPreferences
+    /// The one consumer of dictation events (stream ownership, team N3).
+    public let dictation: DictationController
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -43,6 +48,7 @@ public final class AppServices {
                 downloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
                 speech: (any SpeechServicing)? = nil,
+                speechPreferences: SpeechPreferences? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -57,7 +63,11 @@ public final class AppServices {
         }
         self.downloads = downloads
         self.apple = apple
-        self.speech = speech ?? UnavailableSpeechService()
+        let speech = speech ?? UnavailableSpeechService()
+        let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
+        self.speech = speech
+        self.speechPreferences = speechPreferences
+        dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -104,6 +114,7 @@ public final class AppServices {
                            downloads: downloads,
                            apple: AppleServices.live(engine: engine, broker: permissions, container: container,
                                                      useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                           speechPreferences: SpeechPreferences(),
                            appleChat: FoundationChatModel(),
                            storeError: storeError,
                            idleUnload: idleUnload)

@@ -71,9 +71,14 @@ import Testing
 /// placeholders in the app.
 struct NotesBoard<Content: View>: View {
     let content: Content
+    /// Grey bars in the sidebar and list (boards 3, 6, 7); off draws them empty.
+    var placeholders = true
     let shell = ShellModel(selection: .notes, defaults: nil)
 
-    init(@ViewBuilder content: () -> Content) { self.content = content() }
+    init(placeholders: Bool = true, @ViewBuilder content: () -> Content) {
+        self.placeholders = placeholders
+        self.content = content()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -86,9 +91,9 @@ struct NotesBoard<Content: View>: View {
                     Button {} label: { Image(systemName: "square.and.pencil") }.buttonStyle(.mfSecondary))),
             ])
             HStack(spacing: 0) {
-                placeholders([0.62, 0.5, 0.48], width: 210, fill: MFColor.sidebar)
+                bars(placeholders ? [0.62, 0.5, 0.48] : [], width: 210, fill: MFColor.sidebar)
                 Rectangle().fill(MFColor.chromeDivider).frame(width: MFLayout.hairline)
-                placeholders([0.8, 0.6, 0.7, 0.5], width: 300, fill: MFColor.surface)
+                bars(placeholders ? [0.8, 0.6, 0.7, 0.5] : [], width: 300, fill: MFColor.surface)
                 Rectangle().fill(MFColor.chromeDivider).frame(width: MFLayout.hairline)
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -98,7 +103,7 @@ struct NotesBoard<Content: View>: View {
         .mfWindowBackground()
     }
 
-    private func placeholders(_ widths: [CGFloat], width: CGFloat, fill: Color) -> some View {
+    private func bars(_ widths: [CGFloat], width: CGFloat, fill: Color) -> some View {
         VStack(alignment: .leading, spacing: MFSpacing.m) {
             ForEach(Array(widths.enumerated()), id: \.offset) { _, fraction in
                 Capsule().fill(MFColor.fill).frame(width: (width - 28) * fraction, height: 12)

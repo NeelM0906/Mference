@@ -44,6 +44,7 @@ struct MferenceMacApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             ShellCommands(model: shell)
+            VoiceCommands(voice: delegate.runtime.voice)
         }
     }
 }
