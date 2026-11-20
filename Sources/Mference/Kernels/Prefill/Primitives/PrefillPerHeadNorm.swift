@@ -5,9 +5,14 @@ final class PrefillPerHeadNorm {
     private let psoBF16W: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
 
-    init(context: MetalContext, sourceFP16: Bool = false) throws {
+    /// `weightF32`: the weighted form reads F32 weights (WS4 GGUF install,
+    /// `FC_PREFILL_PERHEAD_W_F32`); false for every shipped caller.
+    init(context: MetalContext, sourceFP16: Bool = false, weightF32: Bool = false) throws {
         let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
-        self.psoBF16W = try context.pipeline("prefill_rmsnorm_bf16w_perhead_block", constants: precision)
+        self.psoBF16W = try context.pipeline(
+            "prefill_rmsnorm_bf16w_perhead_block",
+            constants: precision + (weightF32
+                ? [MetalFunctionConstant(index: 121, value: .bool(true))] : []))
         self.psoNoScale = try context.pipeline("prefill_rmsnorm_no_scale_perhead_block", constants: precision)
     }
 

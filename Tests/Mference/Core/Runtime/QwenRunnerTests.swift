@@ -189,12 +189,33 @@ import Metal
         #expect(qwen.qElements == 32 * 256)
         #expect(qwen.attentionOutputElements == 32 * 4 * 32)
 
-        let gemma = PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 128)
-        #expect(gemma.qProjElementsPerToken == gemma.maxQElementsPerToken)
-        #expect(gemma.attnGateElementsPerToken == 0)
-        #expect(gemma.gdnQKVDim == 0)
-        #expect(gemma.gdnValueDim == 0)
-        #expect(gemma.sharedScalarGateElements == 0)
-        #expect(gemma.qElements == 128 * gemma.maxQElementsPerToken)
+        let plain = PrefillChunkScratchLayout(config: .defaultsToy(topKExperts: 8), chunkTokens: 128)
+        #expect(plain.qProjElementsPerToken == plain.maxQElementsPerToken)
+        #expect(plain.attnGateElementsPerToken == 0)
+        #expect(plain.gdnQKVDim == 0)
+        #expect(plain.gdnValueDim == 0)
+        #expect(plain.sharedScalarGateElements == 0)
+        #expect(plain.qElements == 128 * plain.maxQElementsPerToken)
+    }
+}
+
+/// After a chunked prefill the runner continues from exactly the prefilled
+/// position (its gated-DeltaNet state cannot be rewound, only continued).
+extension QwenRunnerTests {
+    @Test func qwenRunnerContinuesFromThePrefilledPosition() async throws {
+        let directory = try QwenToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try MetalContext()
+        let config = ArchConfig.qwen36Toy()
+        let model = try Model.load(directoryURL: directory, device: context.device,
+            expecting: config, streamingMode: .pread(slotCount: 8))
+        let runner = try RealForwardRunner(model: model, context: context, maxContext: 128,
+            runtimeConfiguration: .init(expertCacheSlots: 8, prefillChunkTokens: 64, forceLogitsHead: true))
+        let output = try #require(context.device.makeBuffer(length: config.vocabSize * 2, options: .storageModeShared))
+        let tokens = (0..<33).map { Int32(4 + ($0 * 37) % (config.vocabSize - 4)) }
+        _ = try await runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64), into: output, onProgress: { _ in })
+        try runner.prepareForContinuation(expectedPosition: 33)
+        #expect(runner.continuationPosition == 33)
     }
 }

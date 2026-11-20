@@ -32,7 +32,6 @@ public struct RuntimeMemorySnapshot: Sendable, Equatable, Encodable {
         let reporting = producer as? any RuntimeMemoryReporting
         var metrics = model.diagnosticMemoryBytes
         metrics["targetKVStateBuffers"] = .some(reporting?.diagnosticKVStateBytes)
-        metrics["gemmaPrefixRecoveryBuffers"] = .some((producer as? any GemmaPrefixRecovering)?.gemmaRecoveryBytes)
         metrics["runnerScratchBuffers"] = .some(reporting?.diagnosticScratchBytes)
         metrics["completionScratchBuffers"] = scratch.diagnosticBufferBytes
         metrics["metalAllocated"] = UInt64(model.device.currentAllocatedSize)
@@ -55,15 +54,36 @@ public struct RuntimeMemorySnapshot: Sendable, Equatable, Encodable {
     }
 }
 
-public struct GemmaPrefixRecoveryDiagnostics: Sendable, Equatable, Encodable {
+/// The server's multi-prefix cache for one request: how it started, what it
+/// copied, and what it retains afterwards.
+public struct PrefixCacheDiagnostics: Sendable, Equatable, Encodable {
     public let outcome: String
-    public let capture: String?
-    public let allocatedBytes: UInt64
+    public let beginSeconds: Double
+    public let displacedBytes: Int
+    public let restoredBytes: Int
+    public let capturedBytes: Int
+    public let captureSeconds: Double
+    public let retainedBytes: Int
+    public let ceilingBytes: Int
+    public let checkpoints: Int
+    public let images: Int
+    /// The live-memory governor's sheds, swap reading and shadow admission;
+    /// nil when the cache runs without one.
+    public let memory: PrefixCacheMemoryReport?
 
-    public init(outcome: String, capture: String?, allocatedBytes: UInt64) {
-        self.outcome = outcome
-        self.capture = capture
-        self.allocatedBytes = allocatedBytes
+    public init(cache: PrefixStateCache, memory: PrefixCacheMemoryReport? = nil) {
+        let report = cache.lastReport
+        outcome = report.outcome.rawValue
+        beginSeconds = report.beginSeconds
+        displacedBytes = report.displacedBytes
+        restoredBytes = report.restoredBytes
+        capturedBytes = report.capturedBytes
+        captureSeconds = report.captureSeconds
+        retainedBytes = cache.retainedBytes
+        ceilingBytes = cache.ceilingBytes
+        checkpoints = cache.checkpointCount
+        images = cache.imageCount
+        self.memory = memory
     }
 }
 
@@ -74,12 +94,11 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
     public let computedPrefillTokens: Int
     public let prefill: PrefillExecutionReport?
     public let memory: RuntimeMemorySnapshot
-
-    public let gemmaRecovery: GemmaPrefixRecoveryDiagnostics?
+    public let prefixCache: PrefixCacheDiagnostics?
 
     public init(result: RawDecodeResult, memory: RuntimeMemorySnapshot,
-                gemmaRecovery: GemmaPrefixRecoveryDiagnostics? = nil) {
-        self.gemmaRecovery = gemmaRecovery
+                prefixCache: PrefixCacheDiagnostics? = nil) {
+        self.prefixCache = prefixCache
         cachedPromptTokens = result.cachedPromptTokens
         computedPrefillTokens = result.computedPrefillTokens
         prefill = result.prefillExecution
@@ -94,11 +113,12 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
         try c.encode(computedPrefillTokens, forKey: .computedPrefillTokens)
         try c.encode(prefill, forKey: .prefill)
         try c.encode(memory, forKey: .memory)
-        try c.encodeIfPresent(gemmaRecovery, forKey: .gemmaRecovery)
+        try c.encodeIfPresent(prefixCache, forKey: .prefixCache)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory, gemmaRecovery
+        case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory
+        case prefixCache
     }
 
     public static var enabled: Bool {

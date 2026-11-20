@@ -3,28 +3,7 @@ import Metal
 
 extension RealForwardRunner: RuntimeMemoryReporting {
     var diagnosticKVStateBytes: UInt64? {
-        let convBuffers = inklingConvStates.flatMap { [$0.k, $0.v, $0.attn, $0.mlp] }
-        return (kv?.diagnosticBufferBytes ?? 0) + (gdnState?.diagnosticBufferBytes ?? 0)
-            + (dsv4State?.diagnosticBufferBytes ?? 0) + uniqueBufferBytes(convBuffers)
-    }
-}
-
-/// Faults detected at the Inkling output head. Both cases mean an
-/// intermediate went non-finite somewhere in the 42-layer stack; the head is
-/// simply the first place that can see it cheaply.
-public enum InklingHeadError: Error, CustomStringConvertible, Equatable {
-    case nonFiniteLogits(position: Int, count: Int)
-    case noFiniteLogit(position: Int)
-
-    public var description: String {
-        switch self {
-        case .nonFiniteLogits(let position, let count):
-            return "Inkling head produced \(count) non-finite logits at "
-                + "position \(position); an intermediate overflowed upstream"
-        case .noFiniteLogit(let position):
-            return "Inkling head produced no finite logit at position "
-                + "\(position); greedy argmax has no candidate"
-        }
+        (kv?.diagnosticBufferBytes ?? 0) + (gdnState?.diagnosticBufferBytes ?? 0)
     }
 }
 
@@ -100,35 +79,6 @@ struct RDAdviceAdaptivePolicyState: Sendable, Equatable {
     }
 }
 
-/// Gemma 4 real-forward decode pass.
-///
-/// Composes the production kernels against the `.gturbo` model:
-///
-///   embed_lookup_int4(token) * sqrt(H)
-///   for L in 0..<30:
-///     a = rmsnorm_bf16w(h, input_layernorm)
-///     Q = q_proj(a)    K = k_proj(a)    V = (SWA) v_proj(a) | (full) k_proj(a)
-///     per-head q/k_norm (bf16w), per-head v_norm (no_scale)
-///     NeoX RoPE on Q + K (default for SWA, proportional for full)
-///     write K and V into separate cache slots
-///     attn = attention(scale=1.0, SWA window or full causal)
-///     attn = o_proj(attn)
-///     h = h + rmsnorm_bf16w(attn, post_attention_layernorm)
-///     h1 = rmsnorm_bf16w(h, pre_feedforward_layernorm)
-///     h1 = SharedExpertInt8(h1)
-///     h1 = rmsnorm_bf16w(h1, post_feedforward_layernorm_1)
-///     // router + routed branch
-///     xr   = rmsnorm_no_scale(h)
-///     idx, w = router_topk_gemma4(xr, effective_scale[L], per_expert_scale[L])
-///     h2 = rmsnorm_bf16w(h, pre_feedforward_layernorm_2)
-///     h2 = moe_fused_ffn_streamed_routed(h2, residual=0, routedBlobs=fetch(idx), w)
-///     h2 = rmsnorm_bf16w(h2, post_feedforward_layernorm_2)
-///     h = h + rmsnorm_bf16w(h1 + h2, post_feedforward_layernorm)
-///     h = h * layer_scalar[L]
-///   logits = DequantInt4GEMV(rmsnorm_bf16w(h, model.norm), embed_table^T)
-///   // final softcap and softmax happen in the Sampler.
-///
-/// Direct against `Model`; this is the only production decode forward path.
 internal enum PrefillProjectionFamily: Sendable, Equatable {
     case q
     case kv
@@ -157,23 +107,18 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
-public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, GemmaPrefixRecovering, FusedHeadLogitProducer, @unchecked Sendable {
-    /// Per-layer fp32 short-convolution states, one buffer per conv site.
-    /// k/v carry the last K-1 KV-stream inputs; attn/mlp the last K-1
-    /// sublayer outputs.
-    struct InklingLayerConvState {
-        let k: MTLBuffer
-        let v: MTLBuffer
-        let attn: MTLBuffer
-        let mlp: MTLBuffer
-    }
-
+/// The real-forward runner for Qwen 3.6 (`.qwen36`): chunked layer-major
+/// prefill and one-token decode with streamed routed experts, gated-DeltaNet
+/// linear-attention layers and gated full-attention layers. Generic config
+/// axes (FFN sandwich norms, sliding window, router scale, ...) keep their
+/// paths. Direct against `Model`.
+public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, FusedHeadLogitProducer, @unchecked Sendable {
     struct LayerSharedExpertProjections {
         let gate: SharedExpertInt8Proj
         let up: SharedExpertInt8Proj
         let down: SharedExpertInt8Proj
-        /// Gemma-only post_feedforward_layernorm_1; nil when the arch has no
-        /// FFN sandwich norms.
+        /// post_feedforward_layernorm_1; nil when the arch has no FFN
+        /// sandwich norms.
         let postF1: TensorView?
         /// Qwen-only [1, hidden] scalar gate on the shared expert branch.
         let scalarGate: TensorView?
@@ -203,12 +148,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdnState: GDNStateManager?
     private let rope: RoPE?
     private let int8ScalarGate: DequantInt8GEMV?
-
-    // DeepSeek-V4 kernels and state. Nil on architectures without CSA/HCA
-    // layers.
-    private let dsv4: DSV4Kernels?
-    private let moeDSV4: MoEDeepseekV4?
-    private let dsv4State: DSV4StateManager?
 
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
@@ -272,84 +211,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdnY: MTLBuffer?             // [valueDim] delta-rule output
     private let gdnOut: MTLBuffer?           // [valueDim] gated-norm output
     private let sharedScalarGateBuf: MTLBuffer? // [1] shared-expert gate logit
-    // DeepSeek-V4 decode scratch (nil on other architectures). The residual
-    // streams ping-pong: `dsv4Streams` at layer entry/exit, `dsv4StreamsAlt`
-    // between the attention and FFN sites.
-    private let dsv4Streams: MTLBuffer?          // [mult * D] FP16
-    private let dsv4StreamsAlt: MTLBuffer?       // [mult * D] FP16
-    private let dsv4QA: MTLBuffer?               // [qLoraRank] FP16
-    private let dsv4OGrouped: MTLBuffer?         // [oGroups * oLoraRank] FP16
-    private let dsv4HCPreA: MTLBuffer?           // [mult] FP32, attention site
-    private let dsv4HCPostA: MTLBuffer?          // [mult] FP32
-    private let dsv4HCCombA: MTLBuffer?          // [mult * mult] FP32
-    private let dsv4HCPreF: MTLBuffer?           // [mult] FP32, FFN site
-    private let dsv4HCPostF: MTLBuffer?          // [mult] FP32
-    private let dsv4HCCombF: MTLBuffer?          // [mult * mult] FP32
-    private let dsv4IndexerQ: MTLBuffer?         // [indexNHeads * indexHeadDim]
-    private let dsv4IndexerW: MTLBuffer?         // [indexNHeads] FP16
-    private let dsv4IndexerScores: MTLBuffer?    // [maxContext / csaRate] FP32
-    private let dsv4Selected: MTLBuffer?         // [indexTopK] UInt32
-
-    // Inkling-Small kernels + scratch, keyed off the family so other
-    // architectures pay no PSO compile or allocation cost. Conv states are
-    // fp32 [C, K-1] per site (k/v on the KV streams, attn/mlp on the sublayer
-    // outputs); `inklingSharedProjections[L]` holds one projection set per
-    // shared expert (empty for the leading dense layers, which instead use
-    // `inklingDenseProjections[L]`).
-    let inkling: InklingKernels?
-    let inklingPrefillGLU: InklingPrefillExpertGLU?
-    let inklingConvStates: [InklingLayerConvState]
-    let inklingRelScratch: MTLBuffer?        // [numHeads * dRel] FP16
-    /// FP32 residual stream: Inkling's hidden state overflows FP16 by layer
-    /// 23 (max channel 55k at L22, cap 65 504). Every consumer is an RMS
-    /// norm, so the stream converts to FP16 only at norm outputs.
-    let inklingHiddenF32: MTLBuffer?         // [D] FP32
-    let inklingDeltaF32: MTLBuffer?          // [D] FP32 sublayer delta
-    // Layer-major prefill chunk state (see prefillInklingChunk): per-token
-    // FP32 hidden rows, per-token router outputs, and the expert-major FFN
-    // accumulator. Sized to maxPrefillChunkTokens.
-    let inklingHiddenChunk: MTLBuffer?       // [chunk, D] FP32
-    let inklingRoutedXChunk: MTLBuffer?      // [chunk, D] FP16
-    let inklingQChunk: MTLBuffer?            // [chunk, numHeads * headDim] FP16
-    let inklingKChunk: MTLBuffer?            // [chunk, numKVHeads * headDim] FP16
-    let inklingVChunk: MTLBuffer?            // [chunk, numKVHeads * headDim] FP16
-    let inklingRelChunk: MTLBuffer?          // [chunk, numHeads * dRel] FP16
-    let inklingAttentionChunk: MTLBuffer?    // [chunk, numHeads * headDim] FP16
-    let inklingRouterLogitsChunk: MTLBuffer? // [chunk, routed + shared] FP32
-    let inklingIdxChunk: MTLBuffer?          // [chunk, 8] u32
-    let inklingWChunk: MTLBuffer?            // [chunk, 8] FP16
-    let inklingGammaChunk: MTLBuffer?        // [chunk, 2] FP32
-    let inklingAccChunk: MTLBuffer?          // [chunk, D] FP32
-    let inklingChunkCapacity: Int
-    /// Raw shared-expert down-projection rows, FP32. These are pre-gamma, so
-    /// the 1/32 FFN prescale does not protect them and single channels run to
-    /// ~6e4 on the released checkpoint — an FP16 store clips to infinity.
-    let inklingSharedY0: MTLBuffer?          // [D] FP32
-    let inklingSharedY1: MTLBuffer?          // [D] FP32
-    /// Batched prefill expert application: the chunk's (token, expert) pairs
-    /// grouped by expert, and one expert's activation tile.
-    let inklingPairTokens: MTLBuffer?        // [chunk * 8] UInt32
-    let inklingPairWeights: MTLBuffer?       // [chunk * 8] FP32
-    let inklingExpertActScratch: MTLBuffer?  // [chunk, F] FP16
-    let inklingSharedProjections: [[LayerSharedExpertProjections]]
-    let inklingDenseProjections: [LayerSharedExpertProjections?]
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
     private let onesPerExpertScale: MTLBuffer?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
-    /// Lazily built layer-major DeepSeek-V4 prefill; see
-    /// `RealForwardRunner+DSV4Prefill.swift`.
-    private var dsv4Prefill: DSV4ChunkedPrefill?
-    /// Internal fault-injection boundary; production leaves this unset.
-    var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
-    private let gemmaPrefillPolicy: GemmaPrefillPolicy
-    /// Grouped-GEMM routed experts for well-filled Gemma prefill tiles.
+    /// Grouped-GEMM routed experts for well-filled Qwen 3.6 prefill tiles
+    /// (`usesGroupedRoutedExpertGEMM`).
     private let prefillGroupedGEMM: MPPGroupedRoutedMoE?
+    /// Test-only: false sends every routed tile to the row kernel, the control
+    /// arm of the Qwen 3.6 prefill tolerance gate.
+    private var prefillGroupedGEMMEnabled = true
     /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
     private(set) var prefillGroupedExpertTiles = 0
+    /// Simdgroup-matrix grouped routed experts for Qwen 3.6 prefill tiles on
+    /// GPUs without the Apple10 TensorOps path
+    /// (`usesSimdgroupGroupedRoutedExperts`). Ahead of the MPP kernel, which
+    /// stays the fallback where this one is absent.
+    private let prefillSimdGroupedGEMM: SimdgroupGroupedRoutedMoE?
+    /// Test-only: false leaves routed tiles to MPP and the row kernel, as
+    /// before this kernel (the control arm of its tolerance gate).
+    private var prefillSimdGroupedGEMMEnabled = true
+    /// Routed prefill tiles that ran on the simdgroup grouped kernel.
+    private(set) var prefillSimdGroupedExpertTiles = 0
     /// Prefill attention layer chunks that ran the tensor-ops kernel. It falls
-    /// back to the tiled or QAT kernels silently when the pipeline is missing.
+    /// back to the tiled or GQA kernels silently when the pipeline is missing.
     private(set) var prefillTensorOpsAttentionLayers = 0
     /// How the last prefill layer ran its shared expert. A batched layout that
     /// silently falls back to per-row dispatch costs a third of a long prefill.
@@ -357,19 +243,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Test-only failure seam. Prior layer work is drained at this boundary;
     /// production leaves it nil and adds no GPU synchronization.
     var prefillWillEncodeLayer: ((Int) throws -> Void)?
-    /// Numerical diagnosis only. Nil in production; enabled captures wait for
-    /// the existing commands without changing their math or routing choices.
-    var gemmaDecodeTrace: ((Int, Int, String, [Float]) -> Void)?
-    /// Numerical diagnosis at existing prefill completion boundaries only.
-    /// Nil during normal execution; never changes the batched dispatch.
-    var gemmaPrefillTrace: ((Int, Int, String, [Float]) -> Void)?
+
+    /// Shared chunked-path stage timing, on only under the existing
+    /// `MFERENCE_PREFILL_BREAKDOWN=1` diagnostic toggle (see `PrefillStageBreakdown`).
+    /// Tests inject an instance to prove output is unchanged with it on.
+    var prefillStageBreakdown: PrefillStageBreakdown? =
+        RealForwardRunner.prefillBreakdownEnabled ? .shared : nil
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
     private static let rdadviseAdaptiveMissCap = 12
     private static let rdadviseAdaptiveByteCap: UInt64 = 384 * 1_048_576
     private static let rdadviseAdaptiveSlowCallNanos: UInt64 = 1_000_000
-    private static let prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig()
+    /// Two tiles of 16 experts in flight: the next tile's reads start while
+    /// the GPU still holds two, so tile drains stop idling the SSD and each
+    /// fetch has twice the experts in flight (Qwen 3.6, 506 tokens, 24 GiB
+    /// M4 Pro: prefill 3.47-3.79 -> 3.18-3.42 s against depth 1 x 8).
+    private static let prefillRoutedTileSchedulerConfig =
+        PrefillRoutedTileSchedulerConfig(maxPendingDepth: 2, tileExperts: 16)
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
     /// allocation per layer. ~168 KB total at 30 layers × 2816 BF16 — bounded
@@ -477,29 +368,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// and `MFERENCE_SHADOW_BUDGET` apply; otherwise the family default.
         /// Every mode is byte-identical to no speculation.
         ///
-        /// DeepSeek-V4-Flash: shadow, budget 2 (community A/B 2026-08-07, short
-        /// +18%, long +13%; docs/experiments/summaries/14-dsv4-shadow-prefetch.md).
-        ///
-        /// Qwen 3.6 and Gemma 4 on hosts from 16 GiB to below 24 GiB: shadow,
-        /// budget 4. There the GPU idles about half of decode waiting for expert
+        /// Qwen 3.6 on hosts from 16 GiB to under 24 GiB: shadow, budget 4; at
+        /// 24 GiB, budget 8 (below). There the GPU idles about half of decode waiting for expert
         /// reads; on an M2 with 16 GiB (diagnostic runs, 2026-09-21) Qwen 3.6
-        /// decoded 7.35 / 8.91 / 9.62 / 10.55 tok/s at off / 1 / 2 / 4, and Gemma
-        /// 4 and Gemma 4 QAT gained about 11% from budget 2 with nothing more at
-        /// 4, at no memory cost in any case. Hosts from 24 GiB can hold the pool
-        /// in the file cache, and smaller hosts are unmeasured, so both stay off.
+        /// decoded 7.35 / 8.91 / 9.62 / 10.55 tok/s at off / 1 / 2 / 4, at no
+        /// memory cost. On a 24 GiB M4 Pro (2026-10-27)
+        /// Qwen 3.6 went 17.8-18.3 -> 19.6-20.6 tok/s at budget 4 and
+        /// 14.8-20.3 -> 19.7-21.8 at budget 8, so 24 GiB hosts run budget 8.
+        ///
+        /// Qwen 3.6 above 24 GiB up to 32 GiB: shadow, budget 8. Only 32 GiB is
+        /// measured; no current Mac sits between. On a 32 GiB M1 Max (diagnostic
+        /// runs, 2026-11-17) long decode went 28.45-28.55 -> 30.10-30.19 tok/s,
+        /// with budget 4 at 29.92-30.02. At 32K context decode stayed flat at
+        /// budget 8 (23.88-24.41 -> 23.96): fewer expert misses, but GPU busy
+        /// per token rose 25-29%, at budget 4 as at 8.
+        ///
+        /// Qwen 3.6 below 16 GiB or above 32 GiB is unmeasured and stays off,
+        /// as does every other family.
         static func plan(requestedShadowBudget: Int?,
                          environment: [String: String],
                          family: ModelFamily,
                          physicalMemoryBytes: UInt64) -> SpeculativePrefetchPlan {
             let gib = UInt64(1) << 30
-            let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes < 24 * gib
             let familyMode: SpeculativePrefetchMode
             let familyBudget: Int
             switch family {
-            case .deepseekV4Flash:
-                familyMode = .shadow; familyBudget = 2
-            case .qwen36, .gemma4:
-                familyMode = measuredTier ? .shadow : .off; familyBudget = 4
+            case .qwen36:
+                let measuredCeiling = 32 * gib
+                let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes <= measuredCeiling
+                familyMode = measuredTier ? .shadow : .off
+                familyBudget = physicalMemoryBytes >= 24 * gib ? 8 : 4
             default:
                 familyMode = .off; familyBudget = 2
             }
@@ -539,12 +437,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// byte-identical). `MFERENCE_SLOT_MAP=0` is the kill-switch.
     static let slotMapEnabledDefault =
         ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP"] != "0"
-    /// Inkling prefill expert streaming: depth-1 pipeline — pread expert e+1
-    /// while expert e's GLU runs, misses placed only in slots the in-flight
-    /// command buffer does not touch. `MFERENCE_INKLING_PREFILL_PIPELINE=0`
-    /// is the kill-switch back to the serialized fetch->encode->drain loop.
-    static let inklingPrefillPipelineEnabled =
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING_PREFILL_PIPELINE"] != "0"
     var slotMapEnabled = RealForwardRunner.slotMapEnabledDefault
     /// Debug discriminator: encode the whole slot-map chain but feed the
     /// lookup an all-empty table, so the guarded kernels always no-op and
@@ -595,28 +487,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// into, and what lets tests drive the reserve/read/join/confirm machinery
     /// without depending on a fixture whose routing happens to churn the cache.
     var speculativeExpertPredictor: (@Sendable (Int) -> [Int])?
-    /// PILOT lookahead kernels, built on first use so `off` pays nothing and
-    /// the (concurrently edited) DSV4 init block stays untouched.
-    private var pilotRouter: SpeculativeRouterDSV4?
-    /// Inkling twin of `pilotRouter`: same lazy construction, same lifecycle,
-    /// family-matched scoring kernels.
-    private var inklingPilotRouter: SpeculativeRouterInkling?
-    /// The prediction read out of `pilotRouter`/`inklingPilotRouter` (or the
-    /// hash table) at the current layer's router wake, consumed by
-    /// `issueSpeculativePrefetch`.
+    /// The lookahead router's prediction (`pilotIndices`), read at the current
+    /// layer's router wake and consumed by `issueSpeculativePrefetch`.
     private var pilotPrediction: (layer: Int, experts: [Int])?
 
-    public convenience init(model: Model, context: MetalContext, maxContext: Int,
-                            runtimeConfiguration: RuntimeConfiguration = .production) throws {
-        try self.init(model: model, context: context, maxContext: maxContext,
-                      runtimeConfiguration: runtimeConfiguration, gemmaPrefillPolicy: nil)
-    }
-
-    /// `gemmaPrefillPolicy` is nil in production, which derives it from the
-    /// checkpoint identity and the documented environment switches.
-    init(model: Model, context: MetalContext, maxContext: Int,
-         runtimeConfiguration: RuntimeConfiguration = .production,
-         gemmaPrefillPolicy: GemmaPrefillPolicy?) throws {
+    public init(model: Model, context: MetalContext, maxContext: Int,
+                runtimeConfiguration: RuntimeConfiguration = .production) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
@@ -650,33 +526,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      // when a larger prefill chunk is opted
                                      // into, never from the static cap.
                                      maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens,
-                                     // Gemma 4, Qwen 3.6 and Inkling grow full-attention KV
-                                     // with the conversation; DeepSeek-V4 keeps its attention
-                                     // state in DSV4StateManager and reserves it whole.
-                                     fullAttentionGrowthStep: [.gemma4, .qwen36, .inklingSmall].contains(cfg.family)
+                                     // Qwen 3.6 grows full-attention KV with the
+                                     // conversation.
+                                     fullAttentionGrowthStep: cfg.family == .qwen36
                                          ? runtimeConfiguration.kvGrowthTokens : nil)
 
         let silu = cfg.hiddenActivation == "silu"
         let int4GroupSize = model.affineInt4GroupSize
-        let policy = gemmaPrefillPolicy ?? GemmaPrefillPolicy(modelID: model.modelID)
-        self.gemmaPrefillPolicy = policy
-        let sourceFP16 = policy.sourceFP16
-        // Prefill projections, shared expert and routed experts reorder only
-        // floating-point sums; the rest of the QAT profile stays source-exact.
-        let prefillMatmulSourceFP16 = policy.prefillMatmulSourceFP16
-        self.embedInt4 = try EmbedLookupInt4(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
-        self.rms       = try RMSNorm(context: context, sourceFP16: sourceFP16)
+        self.embedInt4 = try EmbedLookupInt4(context: context, groupSize: int4GroupSize)
+        self.rms       = try RMSNorm(context: context)
         self.int4      = try DequantInt4GEMV(
             context: context,
             additionalShapes: cfg.decodeInt4GEMVShapes,
-            groupSize: int4GroupSize, sourceFP16: sourceFP16)
-        self.attention = try Attention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
+            groupSize: int4GroupSize)
+        self.attention = try Attention(context: context)
+        // Qwen 3.6 decode runs the batched grouped full-attention kernel (class
+        // T, gated by Qwen36PrefillEquivalenceGateTests' decode-attention gate).
+        self.attention.groupedFull256Batched = cfg.family == .qwen36
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu,
                                                   specializedD: cfg.hiddenSize,
                                                   specializedF: cfg.intermediateSize,
-                                                  groupSize: int4GroupSize, sourceFP16: sourceFP16)
+                                                  groupSize: int4GroupSize)
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  specializedD: UInt32(cfg.hiddenSize),
@@ -684,43 +556,57 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  specializedNumExperts: UInt32(cfg.numExperts),
                                  specializedTopK: UInt32(cfg.topKExperts),
                                  groupSize: int4GroupSize,
-                                 routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
+                                 routerBF16: false)
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize,
-                                              groupSize: int4GroupSize, sourceFP16: sourceFP16)
-        self.fusedQKVGEMV = try FusedQKVGEMV(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
-        self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context, sourceFP16: sourceFP16)
-        self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context, sourceFP16: sourceFP16)
-        self.fusedTail = try FusedLayerTail(context: context, sourceFP16: sourceFP16)
-        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
-        self.prefillRMS = try PrefillRMSNorm(context: context, sourceFP16: sourceFP16)
-        self.prefillQMM = try PrefillInt4QMM(context: context, groupSize: int4GroupSize,
-                                             sourceFP16: prefillMatmulSourceFP16)
-        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize,
-                                                      sourceFP16: prefillMatmulSourceFP16)
-        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context, sourceFP16: sourceFP16)
-        self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil,
-                                                     gemmaQATFullAttentionTensorOps: !policy.prefillAttentionSourceFP16)
-        self.prefillPostAttention = try PrefillPostAttentionSetup(context: context, sourceFP16: sourceFP16)
-        self.prefillRouter = try PrefillRouter(context: context, routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
+                                              groupSize: int4GroupSize)
+        self.fusedQKVGEMV = try FusedQKVGEMV(context: context, groupSize: int4GroupSize)
+        self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context)
+        self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context)
+        self.fusedTail = try FusedLayerTail(context: context)
+        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context, groupSize: int4GroupSize)
+        self.prefillRMS = try PrefillRMSNorm(context: context)
+        self.prefillQMM = try PrefillInt4QMM(context: context, groupSize: int4GroupSize)
+        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize)
+        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
+        // Qwen 3.6 full attention (headDim 256, 16/2 heads) never fits the
+        // TensorOps kernel's shape gate, so off Apple10 it takes the
+        // GQA-shared simdgroup kernel instead of the per-head tiled one.
+        self.prefillAttention = try PrefillAttention(context: context,
+                                                     gqaSimdgroup: Self.usesQwenGQASimdAttention(
+                                                        family: cfg.family,
+                                                        supportsApple10TensorOps: context.device.supportsApple10TensorOps))
+        self.prefillPostAttention = try PrefillPostAttentionSetup(context: context)
+        self.prefillRouter = try PrefillRouter(context: context, routerBF16: false)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
             weightBits: model.sharedExpertWeightBits,
             siluActivation: silu,
-            groupSize: int4GroupSize, sourceFP16: prefillMatmulSourceFP16)
+            groupSize: int4GroupSize)
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(context: context,
                                                              siluActivation: silu,
-                                                             groupSize: int4GroupSize,
-                                                             sourceFP16: prefillMatmulSourceFP16)
-        self.prefillGroupedGEMM = cfg.family == .gemma4 && policy.batchedExperts
+                                                             groupSize: int4GroupSize)
+        self.prefillGroupedGEMM = Self.usesGroupedRoutedExpertGEMM(
+            family: cfg.family,
+            supportsApple10TensorOps: context.device.supportsApple10TensorOps)
             ? MPPGroupedRoutedMoE(context: context, groupSize: int4GroupSize, gelu: !silu)
             : nil
-        self.prefillMoE = try PrefillMoE(context: context, sourceFP16: sourceFP16)
-        self.prefillLayerTail = try PrefillLayerTail(context: context, sourceFP16: sourceFP16)
+        self.prefillSimdGroupedGEMM = Self.usesSimdgroupGroupedRoutedExperts(
+            family: cfg.family,
+            supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+            && silu
+            && SimdgroupGroupedRoutedMoE.supports(d: cfg.hiddenSize,
+                                                  routedIntermediate: cfg.moeIntermediateSize,
+                                                  groupSize: int4GroupSize)
+            // A pipeline that fails to build leaves MPP and the row kernel.
+            ? try? SimdgroupGroupedRoutedMoE(context: context, groupSize: int4GroupSize)
+            : nil
+        self.prefillMoE = try PrefillMoE(context: context)
+        self.prefillLayerTail = try PrefillLayerTail(context: context)
         self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(context: context,
                                                                maxD: cfg.hiddenSize,
-                                                               groupSize: int4GroupSize, sourceFP16: sourceFP16)
+                                                               groupSize: int4GroupSize)
 
         // Qwen 3.6 kernels, keyed off the data flags so architectures that
         // never dispatch them pay no PSO compile cost.
@@ -768,9 +654,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.h2Buf         = try buf(D)
         self.routedX       = try buf(D)
         self.denseX        = try buf(D)
-        // Inkling's two leading dense layers run through the shared-expert
-        // kernel at denseIntermediateSize (16 384), so the scratch must cover
-        // the wider of the two FFN widths.
+        // Dense FFN layers run through the shared-expert kernel at
+        // denseIntermediateSize, so the scratch covers the wider of the two
+        // FFN widths.
         let scratchF = max(F, cfg.denseIntermediateSize)
         self.denseScratchGate = try buf(scratchF)
         self.denseScratchUp   = try buf(scratchF)
@@ -790,7 +676,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         memset(self.slotMapAllHit.contents(), 0, self.slotMapAllHit.length)
         self.pilotWeights  = try buf(paddedTopK)
         self.moeActs       = try buf(paddedTopK * cfg.moeIntermediateSize)
-        // Families that route fewer than 8 experts (Inkling: 6) pad the
+        // Families that route fewer than 8 experts pad the
         // streamed-expert list with duplicates carrying weight 0; zeroing the
         // weight buffer once makes those pad slots permanent no-ops.
         memset(self.outWeights.contents(), 0, self.outWeights.length)
@@ -830,58 +716,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1) : nil
 
-        // DeepSeek-V4 kernels + scratch, keyed off the compressed-attention
-        // flag so other architectures pay no PSO compile or allocation cost.
-        if cfg.hasCompressedAttentionLayers {
-            let ca = cfg.compressedAttention
-            let mult = cfg.hyperConnections.mult
-            self.dsv4 = try DSV4Kernels(context: context, config: cfg)
-            self.moeDSV4 = try MoEDeepseekV4(
-                context: context,
-                specializedD: UInt32(cfg.hiddenSize),
-                specializedF: UInt32(cfg.moeIntermediateSize),
-                specializedNumExperts: UInt32(cfg.numExperts),
-                routeScale: Float(cfg.routedScalingFactor),
-                swigluLimit: Float(cfg.swigluLimit))
-            self.dsv4State = try DSV4StateManager(device: device,
-                                                  config: cfg,
-                                                  maxContext: maxContext)
-            self.dsv4Streams = try buf(mult * D)
-            self.dsv4StreamsAlt = try buf(mult * D)
-            self.dsv4QA = try buf(ca.qLoraRank)
-            self.dsv4OGrouped = try buf(ca.oGroups * ca.oLoraRank)
-            self.dsv4HCPreA = try buf(mult, MemoryLayout<Float>.size)
-            self.dsv4HCPostA = try buf(mult, MemoryLayout<Float>.size)
-            self.dsv4HCCombA = try buf(mult * mult, MemoryLayout<Float>.size)
-            self.dsv4HCPreF = try buf(mult, MemoryLayout<Float>.size)
-            self.dsv4HCPostF = try buf(mult, MemoryLayout<Float>.size)
-            self.dsv4HCCombF = try buf(mult * mult, MemoryLayout<Float>.size)
-            self.dsv4IndexerQ = try buf(ca.indexNHeads * ca.indexHeadDim)
-            self.dsv4IndexerW = try buf(ca.indexNHeads)
-            self.dsv4IndexerScores = try buf(
-                max(1, maxContext / max(ca.csaCompressRate, 1)) + 1,
-                MemoryLayout<Float>.size)
-            self.dsv4Selected = try buf(ca.indexTopK, MemoryLayout<UInt32>.size)
-        } else {
-            self.dsv4 = nil
-            self.moeDSV4 = nil
-            self.dsv4State = nil
-            self.dsv4Streams = nil
-            self.dsv4StreamsAlt = nil
-            self.dsv4QA = nil
-            self.dsv4OGrouped = nil
-            self.dsv4HCPreA = nil
-            self.dsv4HCPostA = nil
-            self.dsv4HCCombA = nil
-            self.dsv4HCPreF = nil
-            self.dsv4HCPostF = nil
-            self.dsv4HCCombF = nil
-            self.dsv4IndexerQ = nil
-            self.dsv4IndexerW = nil
-            self.dsv4IndexerScores = nil
-            self.dsv4Selected = nil
-        }
-
         func sharedProj(_ view: TensorView, rows: UInt32, cols: UInt32) -> SharedExpertProjection {
             SharedExpertProjection(weights: view.buffer,
                                  scales: view.buffer,
@@ -894,7 +728,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         var sharedViews: [LayerSharedExpertProjections] = []
         sharedViews.reserveCapacity(cfg.numLayers)
-        for L in 0..<(cfg.family == .inklingSmall ? 0 : cfg.numLayers) {
+        for L in 0..<cfg.numLayers {
             let gate = try model.sharedExpertGate(layer: L)
             let up = try model.sharedExpertUp(layer: L)
             let down = try model.sharedExpertDown(layer: L)
@@ -908,125 +742,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         self.sharedExpertProjections = sharedViews
 
-        if cfg.family == .inklingSmall {
-            self.inklingPrefillGLU = try InklingPrefillExpertGLU(context: context)
-            self.inkling = try InklingKernels(context: context,
-                                              numRouted: cfg.numExperts,
-                                              numShared: cfg.numSharedExperts)
-            let dRelWidth = cfg.relativePosition.projDim
-            self.inklingRelScratch = try buf(dRelWidth)
-            self.inklingHiddenF32 = try buf(D, MemoryLayout<Float>.size)
-            self.inklingDeltaF32 = try buf(D, MemoryLayout<Float>.size)
-            // Sized from the configured prefill chunk, not pinned at 128.
-            // Routed-expert prefill I/O scales with the CHUNK COUNT: a chunk
-            // re-reads every expert its tokens route to, and by ~128 tokens a
-            // chunk already touches ~95% of all 256 experts per layer
-            // (256 * (1 - (1 - 6/256)^128)), so the bytes read are essentially
-            // `ceil(prompt / chunk) * 40 layers * 3.6 GB`. Doubling the chunk
-            // halves the reads; the scratch below is linear in the cap and
-            // costs ~1.3 MB per token of capacity (~168 MB at 4096).
-            let chunkCap = max(1, min(runtimeConfiguration.prefillChunkTokens,
-                                      RuntimeConfiguration.allowedPrefillChunkTokens.last!))
-            self.inklingChunkCapacity = chunkCap
-            self.inklingHiddenChunk = try buf(chunkCap * D, MemoryLayout<Float>.size)
-            self.inklingRoutedXChunk = try buf(chunkCap * D)
-            self.inklingQChunk = try buf(chunkCap * cfg.numHeads * cfg.headDim)
-            self.inklingKChunk = try buf(chunkCap * cfg.numKVHeads * cfg.headDim)
-            self.inklingVChunk = try buf(chunkCap * cfg.numKVHeads * cfg.headDim)
-            self.inklingRelChunk = try buf(chunkCap * dRelWidth)
-            self.inklingAttentionChunk = try buf(chunkCap * cfg.numHeads * cfg.headDim)
-            self.inklingRouterLogitsChunk = try buf(
-                chunkCap * (cfg.numExperts + cfg.numSharedExperts),
-                MemoryLayout<Float>.size)
-            self.inklingIdxChunk = try buf(chunkCap * 8, MemoryLayout<UInt32>.size)
-            self.inklingWChunk = try buf(chunkCap * 8)
-            self.inklingGammaChunk = try buf(chunkCap * 2, MemoryLayout<Float>.size)
-            self.inklingAccChunk = try buf(chunkCap * D, MemoryLayout<Float>.size)
-            self.inklingSharedY0 = try buf(D, MemoryLayout<Float>.size)
-            self.inklingSharedY1 = try buf(D, MemoryLayout<Float>.size)
-            // Pair lists cover top-6 routed + 2 shared per token.
-            self.inklingPairTokens = try buf(chunkCap * 8, MemoryLayout<UInt32>.size)
-            self.inklingPairWeights = try buf(chunkCap * 8, MemoryLayout<Float>.size)
-            self.inklingExpertActScratch = try buf(chunkCap * F)
-            var convStates: [InklingLayerConvState] = []
-            convStates.reserveCapacity(cfg.numLayers)
-            let kvDim = cfg.numKVHeads * cfg.headDim
-            let km1 = cfg.sconvKernelSize - 1
-            for _ in 0..<cfg.numLayers {
-                convStates.append(InklingLayerConvState(
-                    k: try buf(kvDim * km1, MemoryLayout<Float>.size),
-                    v: try buf(kvDim * km1, MemoryLayout<Float>.size),
-                    attn: try buf(D * km1, MemoryLayout<Float>.size),
-                    mlp: try buf(D * km1, MemoryLayout<Float>.size)))
-            }
-            self.inklingConvStates = convStates
-            var sharedPerLayer: [[LayerSharedExpertProjections]] = []
-            var densePerLayer: [LayerSharedExpertProjections?] = []
-            for L in 0..<cfg.numLayers {
-                if L < cfg.numDenseLayers {
-                    sharedPerLayer.append([])
-                    let fd = cfg.denseIntermediateSize
-                    densePerLayer.append(LayerSharedExpertProjections(
-                        gate: sharedProj(try model.inklingDenseGate(layer: L),
-                                         rows: UInt32(fd), cols: UInt32(D)),
-                        up: sharedProj(try model.inklingDenseUp(layer: L),
-                                       rows: UInt32(fd), cols: UInt32(D)),
-                        down: sharedProj(try model.inklingDenseDown(layer: L),
-                                         rows: UInt32(D), cols: UInt32(fd)),
-                        postF1: nil, scalarGate: nil))
-                    continue
-                }
-                densePerLayer.append(nil)
-                var experts: [LayerSharedExpertProjections] = []
-                for e in 0..<cfg.numSharedExperts {
-                    experts.append(LayerSharedExpertProjections(
-                        gate: sharedProj(try model.inklingSharedExpert(
-                            "gate_proj", layer: L, expert: e,
-                            of: cfg.numSharedExperts),
-                            rows: UInt32(F), cols: UInt32(D)),
-                        up: sharedProj(try model.inklingSharedExpert(
-                            "up_proj", layer: L, expert: e,
-                            of: cfg.numSharedExperts),
-                            rows: UInt32(F), cols: UInt32(D)),
-                        down: sharedProj(try model.inklingSharedExpert(
-                            "down_proj", layer: L, expert: e,
-                            of: cfg.numSharedExperts),
-                            rows: UInt32(D), cols: UInt32(F)),
-                        postF1: nil, scalarGate: nil))
-                }
-                sharedPerLayer.append(experts)
-            }
-            self.inklingSharedProjections = sharedPerLayer
-            self.inklingDenseProjections = densePerLayer
-        } else {
-            self.inkling = nil
-            self.inklingPrefillGLU = nil
-            self.inklingConvStates = []
-            self.inklingRelScratch = nil
-            self.inklingHiddenF32 = nil
-            self.inklingDeltaF32 = nil
-            self.inklingHiddenChunk = nil
-            self.inklingRoutedXChunk = nil
-            self.inklingQChunk = nil
-            self.inklingKChunk = nil
-            self.inklingVChunk = nil
-            self.inklingRelChunk = nil
-            self.inklingAttentionChunk = nil
-            self.inklingRouterLogitsChunk = nil
-            self.inklingIdxChunk = nil
-            self.inklingWChunk = nil
-            self.inklingGammaChunk = nil
-            self.inklingAccChunk = nil
-            self.inklingChunkCapacity = 0
-            self.inklingSharedY0 = nil
-            self.inklingSharedY1 = nil
-            self.inklingPairTokens = nil
-            self.inklingPairWeights = nil
-            self.inklingExpertActScratch = nil
-            self.inklingSharedProjections = []
-            self.inklingDenseProjections = []
-        }
-
         func bf16OnesBuffer(count: Int, label: String) throws -> MTLBuffer {
             guard let buf = device.makeBuffer(length: count * MemoryLayout<UInt16>.size,
                                               options: .storageModeShared) else {
@@ -1039,8 +754,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if cfg.routerScaled {
-            // Preserve each checkpoint's scale arithmetic: source FP16 for
-            // QAT, existing BF16 folding for original Gemma. Stored router
+            // Fold `router.scale * D^-0.5` into BF16 once. Stored router
             // weights and scale assets remain untouched.
             var perLayer: [MTLBuffer] = []
             perLayer.reserveCapacity(cfg.numLayers)
@@ -1058,9 +772,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let dst = buf.contents().assumingMemoryBound(to: UInt16.self)
                 for i in 0..<dInts {
                     let scale = Quantization.bf16ToFloat(src[i])
-                    dst[i] = sourceFP16
-                        ? (Float16(scale) * Float16(invSqrtD)).bitPattern
-                        : Quantization.bf16Bits(scale * invSqrtD)
+                    dst[i] = Quantization.bf16Bits(scale * invSqrtD)
                 }
                 buf.label = "effective_scale.L\(L)"
                 perLayer.append(buf)
@@ -1084,16 +796,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public func reset() {
         kv?.reset()
         gdnState?.reset()
-        dsv4State?.reset()
-        // Short-conv history dies with the KV cache, and ONLY with it:
-        // `prepareForContinuation` retains both, so a resumed conversation
-        // keeps the last K-1 conv inputs that match the cached prefix.
-        for state in inklingConvStates {
-            memset(state.k.contents(), 0, state.k.length)
-            memset(state.v.contents(), 0, state.v.length)
-            memset(state.attn.contents(), 0, state.attn.length)
-            memset(state.mlp.contents(), 0, state.mlp.length)
-        }
         resetTransientState()
     }
 
@@ -1112,47 +814,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "continuation expected KV position \(expectedPosition), current \(kv.position)")
         }
         resetTransientState()
-    }
-
-    public var supportsGemmaPrefixRecovery: Bool { model.config.family == .gemma4 && kv != nil }
-    public var gemmaRecoveryBytes: UInt64 { kv?.gemmaRecoveryBytes ?? 0 }
-    // Fault-injection seam, reached only after GPU work completed.
-    var gemmaRecoveryWillCopyLayer: ((GemmaPrefixRecoverySource, Int) throws -> Void)?
-
-    public func gemmaRecoverablePrefix(upTo limit: Int) -> Int {
-        guard supportsGemmaPrefixRecovery, !Task.isCancelled else { return 0 }
-        do { try prefillChunkState.requireClean(operation: "Gemma prefix availability") }
-        catch { return 0 }
-        return kv?.gemmaRecoverablePrefix(upTo: limit) ?? 0
-    }
-
-    public func discardGemmaPrefix() { kv?.discardGemmaRecovery() }
-
-    public func captureGemmaPrefix() throws -> Bool {
-        try Task.checkCancellation()
-        try prefillChunkState.requireClean(operation: "Gemma prefix capture")
-        guard supportsGemmaPrefixRecovery, let kv else { return false }
-        prefillChunkState.markDirty(startPosition: kv.position, tokenCount: 1)
-        let captured = try kv.captureGemmaRecovery { layer in
-            try self.gemmaRecoveryWillCopyLayer?(.current, layer)
-        }
-        prefillChunkState.markCommitted()
-        return captured
-    }
-
-    public func recoverGemmaPrefix(to position: Int) throws -> GemmaPrefixRecoverySource {
-        try Task.checkCancellation()
-        try prefillChunkState.requireClean(operation: "Gemma prefix recovery")
-        guard supportsGemmaPrefixRecovery, let kv,
-              kv.gemmaRecoverablePrefix(upTo: position) == position else {
-            throw PrefillError.prefillCursorMismatch("Gemma prefix state is unavailable")
-        }
-        prefillChunkState.markDirty(startPosition: position, tokenCount: 1)
-        let source = try kv.recoverGemmaPrefix(to: position) { layer in
-            try self.gemmaRecoveryWillCopyLayer?(.snapshot, layer)
-        }
-        resetTransientState()
-        return source
     }
 
     private func resetTransientState() {
@@ -1199,10 +860,94 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalSpecPrefetchIssued: UInt64 = 0
     public private(set) var totalSpecPrefetchConfirmed: UInt64 = 0
     public private(set) var totalSpecPrefetchBytes: UInt64 = 0
+    /// Phase-report expert I/O state. Held behind one optional reference, and
+    /// touched only from non-inlined methods called under
+    /// `phaseInstrumentationEnabled`, so the default decode path carries a
+    /// single nil pointer and none of the recording code.
+    private final class PhaseIOState {
+        var routing: ExpertRoutingCounters
+        var decodeWindowOpen = false
+        var decodeDiskStart: ProcessDiskIO.Counters?
+        var lastPrefillReads: ExpertReadStats.Snapshot?
+        var lastPrefillDiskBytes: UInt64?
+        var prefillDiskStart: ProcessDiskIO.Counters?
+        var prefillWindowOpen = false
 
-    /// Zeroes the per-phase counters. Prompt prefill runs through the same
-    /// per-token code paths (DeepSeek-V4 prefill *is* a decode loop), so
-    /// without a reset at the prefill/decode boundary the phase report prints
+        init(numLayers: Int, numExperts: Int) {
+            routing = ExpertRoutingCounters(numLayers: numLayers, numExperts: numExperts)
+        }
+    }
+    private var phaseIO: PhaseIOState?
+
+    /// Per-(layer, expert) routed hits and misses over the decode window.
+    /// Nil unless `MFERENCE_PHASES=1` and a decode window has opened.
+    public var expertRoutingCounters: ExpertRoutingCounters? {
+        guard let phaseIO, phaseIO.decodeWindowOpen else { return nil }
+        return phaseIO.routing
+    }
+    /// Process storage counters at the start of the decode window, so the
+    /// phase report can print the bytes decode physically read.
+    public var decodeWindowDiskIOStart: ProcessDiskIO.Counters? { phaseIO?.decodeDiskStart }
+    /// Routed-expert reads and physical bytes read during the most recent
+    /// chunked prefill, captured when the decode window opens.
+    public var lastPrefillExpertReads: ExpertReadStats.Snapshot? { phaseIO?.lastPrefillReads }
+    public var lastPrefillDiskBytesRead: UInt64? { phaseIO?.lastPrefillDiskBytes }
+
+    private func phaseIOState() -> PhaseIOState {
+        if let phaseIO { return phaseIO }
+        let state = PhaseIOState(numLayers: cfg.numLayers, numExperts: cfg.numExperts)
+        phaseIO = state
+        return state
+    }
+
+    /// Opens the prefill side of the phase report's I/O counters.
+    @inline(never)
+    private func beginPrefillIOWindow() {
+        let state = phaseIOState()
+        ExpertReadStats.shared?.reset()
+        state.prefillDiskStart = ProcessDiskIO.current()
+        state.prefillWindowOpen = true
+        state.lastPrefillReads = nil
+        state.lastPrefillDiskBytes = nil
+    }
+
+    /// Closes the prefill I/O window (if open) and opens the decode one.
+    @inline(never)
+    private func openDecodeIOWindow() {
+        let state = phaseIOState()
+        let disk = ProcessDiskIO.current()
+        if state.prefillWindowOpen {
+            // Read timing does not depend on rusage; keep it even when the
+            // storage counters were unavailable.
+            state.lastPrefillReads = ExpertReadStats.shared?.snapshot()
+            if let start = state.prefillDiskStart, let disk, disk.bytesRead >= start.bytesRead {
+                state.lastPrefillDiskBytes = disk.bytesRead - start.bytesRead
+            }
+            state.prefillDiskStart = nil
+            state.prefillWindowOpen = false
+        }
+        ExpertReadStats.shared?.reset()
+        state.decodeDiskStart = disk
+        state.routing.reset()
+        state.decodeWindowOpen = true
+    }
+
+    /// Records one routed layer step for the phase report. `misses` nil means
+    /// the experts were loaded without a CPU plan (top-k beyond the planner):
+    /// the cached load decides hits internally, so only the step is counted.
+    @inline(never)
+    private func notePhaseLayerStep(_ layer: Int, _ experts: [Int], misses: [Int]?) {
+        guard let phaseIO, phaseIO.decodeWindowOpen else { return }
+        if let misses {
+            phaseIO.routing.recordLayerStep(layer: layer, experts: experts, missIndices: misses)
+        } else {
+            phaseIO.routing.recordUnplannedLayerStep()
+        }
+    }
+
+    /// Zeroes the per-phase counters. Prompt prefill and decode share these
+    /// counters, so without a reset at the prefill/decode boundary the phase
+    /// report prints
     /// prompt-time nanoseconds against a decode-only wall clock and the
     /// unaccounted remainder goes negative.
     public func beginDecodePhaseWindow() {
@@ -1224,6 +969,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalSpecPrefetchIssued = 0
         totalSpecPrefetchConfirmed = 0
         totalSpecPrefetchBytes = 0
+        if Self.phaseInstrumentationEnabled { openDecodeIOWindow() }
     }
 
     /// One outstanding speculative read set. The runner keeps at most one alive
@@ -1409,79 +1155,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    /// Hash-routed layers select experts as a pure function of the token id, so
-    /// the "prediction" for such a layer is exact and needs no GEMV at all.
-    private func hashRoutedExperts(layer: Int, token: Int32) -> [Int]? {
-        guard cfg.layerIsHashRouted(layer),
-              let table = try? model.dsv4HashTable(layer: layer) else { return nil }
-        let base = table.buffer.contents().advanced(by: Int(table.offset))
-        let row = min(max(Int(token), 0), cfg.vocabSize - 1) * cfg.topKExperts
-        let cap = cfg.numExperts - 1
-        if table.dtype == 4 {
-            let ptr = base.assumingMemoryBound(to: Int64.self)
-            return (0..<cfg.topKExperts).map { min(max(0, Int(ptr[row + $0])), cap) }
-        }
-        let ptr = base.assumingMemoryBound(to: UInt32.self)
-        return (0..<cfg.topKExperts).map { min(Int(ptr[row + $0]), cap) }
-    }
-
-    /// True when a lookahead GEMV should be encoded for `layer` — i.e. pilot is
-    /// on, the layer exists, and its expert set is not already exactly known
-    /// from the hash table.
-    private func shouldEncodePilotGemv(nextLayer: Int) -> Bool {
-        (speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow)
-            && speculativeExpertPredictor == nil
-            && nextLayer < cfg.numLayers
-            && !cfg.layerIsHashRouted(nextLayer)
-    }
-
-    /// Reads the lookahead result at the router wake. Hash-routed next layers
-    /// bypass the GEMV entirely (exact from the token id).
-    private func capturePilotPrediction(nextLayer: Int, token: Int32, gemvEncoded: Bool) {
-        pilotPrediction = nil
-        guard speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow, nextLayer < cfg.numLayers else { return }
-        if let hashed = hashRoutedExperts(layer: nextLayer, token: token) {
-            pilotPrediction = (nextLayer, hashed)
-            return
-        }
-        guard gemvEncoded, let buffer = pilotRouter?.predictedIndices else { return }
-        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-        let cap = cfg.numExperts - 1
-        pilotPrediction = (nextLayer, (0..<cfg.topKExperts).map { min(Int(ptr[$0]), cap) })
-    }
-
-    private func ensurePilotRouter() -> SpeculativeRouterDSV4? {
-        if let pilotRouter { return pilotRouter }
-        pilotRouter = try? SpeculativeRouterDSV4(context: ctx,
-                                                 numExperts: UInt32(cfg.numExperts),
-                                                 d: UInt32(cfg.hiddenSize),
-                                                 topK: UInt32(cfg.topKExperts))
-        return pilotRouter
-    }
-
-    private func ensureInklingPilotRouter() -> SpeculativeRouterInkling? {
-        if let inklingPilotRouter { return inklingPilotRouter }
-        inklingPilotRouter = try? SpeculativeRouterInkling(
-            context: ctx,
-            numRouted: cfg.numExperts,
-            numShared: cfg.numSharedExperts,
-            topK: cfg.topKExperts)
-        return inklingPilotRouter
-    }
-
-    /// Inkling wake-side twin of `capturePilotPrediction`: no hash-routed
-    /// layers exist in this family, so the prediction comes only from the
-    /// pilot GEMV.
-    private func captureInklingPilotPrediction(nextLayer: Int, gemvEncoded: Bool) {
-        pilotPrediction = nil
-        guard speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow,
-              nextLayer < cfg.numLayers, gemvEncoded,
-              let buffer = inklingPilotRouter?.predictedIndices else { return }
-        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-        let cap = cfg.numExperts - 1
-        pilotPrediction = (nextLayer, (0..<cfg.topKExperts).map { min(Int(ptr[$0]), cap) })
-    }
-
     /// Records this layer's routing for the next token's predictor.
     private func recordRoutedExperts(_ experts: [Int], layer: Int) {
         if previousTokenExperts.count != cfg.numLayers {
@@ -1592,6 +1265,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        if Self.phaseInstrumentationEnabled { beginPrefillIOWindow() }
         // Prompt prefill and decode share these counters; drop the prompt's
         // contribution on the way out so the phase report describes decode.
         defer { beginDecodePhaseWindow() }
@@ -1617,166 +1291,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         // A prompt gets one full growth step past its end to answer into.
         try ensureKVCapacity(for: startPosition + tokens.count)
-
-        if cfg.family == .inklingSmall {
-            // Layer-major chunked prefill with expert-major streaming (each
-            // unique routed expert read once per chunk-layer). The sequential
-            // decode replay remains as the correctness reference behind
-            // MFERENCE_INKLING_PREFILL=seq.
-            let sequential = ProcessInfo.processInfo
-                .environment["MFERENCE_INKLING_PREFILL"] == "seq"
-            var pos = startPosition
-            if sequential {
-                var index = 0
-                for t in tokens {
-                    let isLast = index == tokens.count - 1
-                    try await produceTokenInkling(token: t, position: pos,
-                                                  into: logits,
-                                                  emitHead: isLast,
-                                                  outputMode: outputMode)
-                    execution.recordReplay(1, reason: "inkling_reference_override")
-                    pos += 1
-                    index += 1
-                    if index % 16 == 0 { onProgress(index) }
-                }
-            } else {
-                // Simple contiguous spans capped by the chunk buffers (the
-                // KV ring also assumes writes at most maxPrefillChunkTokens
-                // ahead of the cursor).
-                let step = max(1, min(config.chunkTokens, inklingChunkCapacity))
-                var offset = 0
-                while offset < tokens.count {
-                    try Task.checkCancellation()
-                    let count = min(step, tokens.count - offset)
-                    let lower = tokens.index(tokens.startIndex, offsetBy: offset)
-                    let upper = tokens.index(lower, offsetBy: count)
-                    prefillChunkState.markDirty(startPosition: pos,
-                                                tokenCount: count)
-                    try await prefillInklingChunk(
-                        tokens: tokens[lower..<upper],
-                        startPosition: pos,
-                        emitHead: offset + count == tokens.count,
-                        outputMode: outputMode,
-                        into: logits)
-                    prefillChunkState.markCommitted()
-                    execution.recordBatch(count)
-                    pos += count
-                    offset += count
-                    onProgress(offset)
-                }
-            }
-            onProgress(tokens.count)
-            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
-                return PrefillResult(newPosition: pos,
-                                     seed: .greedyToken(lastGreedyToken), execution: execution)
-            }
-            return PrefillResult(newPosition: pos, seed: .logitsWritten, execution: execution)
-        }
-
-        if cfg.hasCompressedAttentionLayers {
-            // DeepSeek-V4 prefill runs layer-major over each chunk (see
-            // `RealForwardRunner+DSV4Prefill.swift`), which amortizes the
-            // routed-expert reads over the chunk instead of paying them per
-            // token. GPU sparse selection keeps long prompts on this path;
-            // explicit reference and unsupported geometry controls retain
-            // truthful decode-replay diagnostics.
-            let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
-                                                  startPosition: startPosition,
-                                                  config: config)
-            let expertSlots = model.routedExpertCacheSlotCount(layer: 0)
-            var pos = startPosition
-            var done = 0
-            for (spanIndex, span) in spans.enumerated() {
-                let isLastSpan = spanIndex == spans.count - 1
-                try Task.checkCancellation()
-                var batchedCount = DSV4ChunkedPrefill.batchedTokenPrefix(
-                    config: cfg,
-                    startPosition: span.startPosition,
-                    tokenCount: span.tokenCount,
-                    expertCacheSlots: expertSlots)
-                if dsv4 == nil || moeDSV4 == nil || dsv4State == nil {
-                    batchedCount = 0
-                }
-                if batchedCount > 0, let dsv4, let moeDSV4, let dsv4State {
-                    let bindings = DSV4PrefillBindings(
-                        model: model, ctx: ctx, cfg: cfg,
-                        dsv4: dsv4, moeDSV4: moeDSV4, state: dsv4State,
-                        int4: int4, rms: rms, embed: embedInt4,
-                        fusionHead: fusionHead,
-                        sharedExperts: sharedExpertProjections.map {
-                            DSV4PrefillSharedExpert(gate: $0.gate, up: $0.up, down: $0.down)
-                        },
-                        effectiveScales: effectiveScaleBuffers,
-                        useFusedGreedyHead: useFusedGreedyHead)
-                    let runner: DSV4ChunkedPrefill
-                    if let cached = dsv4Prefill, cached.chunkCapacity >= batchedCount {
-                        runner = cached
-                    } else {
-                        runner = try DSV4ChunkedPrefill(
-                            bindings: bindings,
-                            chunkTokens: max(config.chunkTokens, batchedCount))
-                        dsv4Prefill = runner
-                    }
-                    let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
-                    let upper = tokens.index(lower, offsetBy: batchedCount)
-                    // The batched runner advances DSV4 layer state as it
-                    // encodes; if it throws partway the layer state is ahead
-                    // of the KV cursor, so the runner must reject further use
-                    // until reset() — same discipline as executePrefillChunk.
-                    prefillChunkState.markDirty(startPosition: span.startPosition,
-                                                tokenCount: batchedCount)
-                    let greedy = try await runner.run(tokens: tokens[lower..<upper],
-                                                      startPosition: span.startPosition,
-                                                      emitHead: isLastSpan && batchedCount == span.tokenCount,
-                                                      outputMode: outputMode,
-                                                      logits: logits,
-                                                      didCompleteLayer: dsv4PrefillDidCompleteLayer)
-                    if let greedy { lastGreedyToken = greedy }
-                    for _ in 0..<batchedCount { kv?.advance() }
-                    execution.recordBatch(batchedCount)
-                    pos += batchedCount
-                    prefillChunkState.markCommitted()
-                }
-                if batchedCount < span.tokenCount {
-                    let replayReason: String
-                    if !DSV4ChunkedPrefill.batchedPathEnabled {
-                        replayReason = "deepseek_batched_prefill_disabled"
-                    } else if dsv4 == nil || moeDSV4 == nil || dsv4State == nil {
-                        replayReason = "deepseek_batched_engine_unavailable"
-                    } else if let expertSlots, expertSlots < 1 {
-                        replayReason = "deepseek_expert_slots_unavailable"
-                    } else if cfg.routerScoringFunc != "sqrtsoftplus"
-                                || cfg.topKExperts != MoEDeepseekV4.topK
-                                || cfg.compressedAttention.csaCompressRate <= 0 {
-                        replayReason = "deepseek_unsupported_geometry"
-                    } else {
-                        replayReason = "deepseek_unsupported_geometry"
-                    }
-                    let remainder = span.tokenCount - batchedCount
-                    let lower = tokens.index(tokens.startIndex,
-                                             offsetBy: span.tokenOffset + batchedCount)
-                    let upper = tokens.index(lower, offsetBy: remainder)
-                    var index = 0
-                    for t in tokens[lower..<upper] {
-                        let isLast = isLastSpan && index == remainder - 1
-                        try await produceTokenDSV4(token: t, position: pos,
-                                                   into: logits,
-                                                   emitHead: isLast,
-                                                   outputMode: outputMode)
-                        execution.recordReplay(1, reason: replayReason)
-                        pos += 1
-                        index += 1
-                    }
-                }
-                done += span.tokenCount
-                onProgress(done)
-            }
-            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
-                return PrefillResult(newPosition: pos,
-                                     seed: .greedyToken(lastGreedyToken), execution: execution)
-            }
-            return PrefillResult(newPosition: pos, seed: .logitsWritten, execution: execution)
-        }
 
         let scratch = try ensurePrefillScratch(config: config)
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
@@ -1809,9 +1323,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillChunkScratchBuffers {
         let layout = PrefillChunkScratchLayout(
             config: cfg, runtime: config,
-            batchedSharedExpert: cfg.family == .gemma4 && gemmaPrefillPolicy.batchedExperts
-                && model.sharedExpertWeightBits == 4,
-            groupedExperts: prefillGroupedGEMM?.isAvailable == true)
+            groupedExperts: prefillGroupedGEMM?.isAvailable == true || prefillSimdGroupedGEMM != nil)
         if let scratch = prefillScratch, scratch.layout == layout {
             return scratch
         }
@@ -1866,7 +1378,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let o: TensorView?
             let qNorm: TensorView?
             let kNorm: TensorView?
-            // Gemma FFN sandwich only.
+            // FFN sandwich norms only.
             let preFFN: TensorView?
             let preFFN2: TensorView?
             let postFFN2: TensorView?
@@ -1933,40 +1445,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             : 1.0
         let t = tokens.count
         let emb = model.embedding
-
-        func trace(_ layer: Int, _ stages: [(String, MTLBuffer, Int)]) throws {
-            guard cfg.family == .gemma4, let observer = gemmaPrefillTrace else { return }
-            guard let copy = ctx.queue.makeCommandBuffer(),
-                  let blit = copy.makeBlitCommandEncoder() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            var snapshots: [(String, MTLBuffer, Int)] = []
-            for (stage, buffer, width) in stages {
-                let bytes = t * width * MemoryLayout<Float16>.stride
-                precondition(bytes <= buffer.length)
-                if buffer.storageMode == .private {
-                    guard let readable = ctx.device.makeBuffer(length: bytes, options: .storageModeShared) else {
-                        throw ModelError.residentBufferWrapFailed
-                    }
-                    blit.copy(from: buffer, sourceOffset: 0, to: readable, destinationOffset: 0, size: bytes)
-                    snapshots.append((stage, readable, width))
-                } else {
-                    snapshots.append((stage, buffer, width))
-                }
-            }
-            blit.endEncoding()
-            copy.commit()
-            waitForCompletion(copy)
-            if let error = copy.error { throw error }
-            for (stage, buffer, width) in snapshots {
-                for row in 0..<t {
-                    let values = UnsafeBufferPointer(
-                        start: buffer.contents().advanced(by: row * width * MemoryLayout<Float16>.stride)
-                            .assumingMemoryBound(to: Float16.self), count: width)
-                    observer(startPosition + row, layer, stage, values.map(Float.init))
-                }
-            }
-        }
 
         func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
                                   family: PrefillProjectionFamily,
@@ -2099,6 +1577,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard var cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        // Diagnostic (`MFERENCE_PREFILL_BREAKDOWN=1`): read once per chunk; with
+        // it off every site below is a branch on `breakdownOn`.
+        let stageBreakdown = prefillStageBreakdown
+        let breakdownOn = stageBreakdown != nil
+        let chunkStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
+        // Diagnostic only: ends the current command buffer at a stage boundary so
+        // the stage gets its own GPU span. Same kernels, inputs and queue order.
+        func endStage(_ stage: PrefillStage) throws {
+            if breakdownOn, let stageBreakdown {
+                try splitPrefillStage(&cb, stage: stage, into: stageBreakdown)
+            }
+        }
         prefillEmbed.encode(commandBuffer: cb,
                             table: emb.buffer,
                             tableOffset: Int(emb.offset),
@@ -2112,7 +1602,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             d: UInt32(D),
                             outScale: embedOutScale)
 
+        var prefillLookahead: SpeculativeExpertPrefetch?
         for L in 0..<cfg.numLayers {
+            let layerStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
             try prefillWillEncodeLayer?(L)
             try Task.checkCancellation()
             cb.label = "prefill start=\(startPosition) count=\(t) layer=\(L) phase="
@@ -2183,6 +1675,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: la.numVHeads)
+                try endStage(.gdnInputProjections)
                 let convW = views.linConv!
                 let tail = gdnState.convTailBuffer(layer: L)
                 gdn.encodeConvPrefill(commandBuffer: cb,
@@ -2220,6 +1713,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     weightOffset: Int(gatedNormW.offset),
                                     out: scratch.attentionOutput,
                                     rows: t)
+                try endStage(.gdnCore)
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .o,
                                      weights: views.linOut!,
@@ -2323,6 +1817,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                eps: eps)
                 }
 
+                try endStage(.attentionInputProjections)
                 if let kv {
                     let bytes = t * kvDim * MemoryLayout<Float16>.stride
                     try copyPrefillKVToCache(commandBuffer: cb,
@@ -2367,6 +1862,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     throw PrefillError.chunkedUnsupported(
                         "chunked prefill attention requires FP16 KV")
                 }
+                try endStage(.attentionCore)
                 if cfg.attnOutputGate {
                     elementwise!.encodeSigmoidGateMul(commandBuffer: cb,
                                                       out: scratch.attentionOutput,
@@ -2384,6 +1880,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          xStrideElements: qDim,
                                          yStrideElements: D)
             }
+            try endStage(isLinear ? .gdnOutputProjection : .attentionOutputProjection)
             if cfg.ffnSandwichNorms {
                 prefillPostAttention.encode(commandBuffer: cb,
                                                 hidden: scratch.hidden,
@@ -2452,17 +1949,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     cb.commit()
                     waitForCompletion(cb)
                     try checkCommandBufferError(cb)
-
-                    if gemmaPrefillTrace != nil {
-                        try trace(L, [
-                            ("input_norm", scratch.normed, D), ("query", scratch.q, qDim),
-                            ("key", scratch.kStage, kvDim), ("value", scratch.vStage, kvDim),
-                            ("attention", scratch.attentionOutput, qDim), ("attention_projection", scratch.h1, D),
-                            ("post_attention", scratch.hidden, D), ("dense_input", scratch.denseX, D),
-                            ("routed_input", scratch.routedX, D), ("router_input", scratch.routerX, D),
-                            ("routing_weights", scratch.routeWeights, cfg.topKExperts),
-                        ])
-                    }
+                    stageBreakdown?.addGPU(.postAttentionAndRouter, cb)
+                    let routePlanStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
 
                     // The shared branch depends only on routedX, which the
                     // completed attention/router command has already
@@ -2580,11 +2068,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             waitForCompletion(pending.commandBuffer)
                         }
                         try checkCommandBufferError(pending.commandBuffer)
+                        stageBreakdown?.addGPU(.routedTiles, pending.commandBuffer)
                         if !pending.fetch.plannedMissSlots.isEmpty {
                             try tileLifetime.complete(tileIndex: pending.tileIndex)
                         }
                     }
 
+                    if let streamer = try? model.routedExpertStreamer(layer: L) {
+                        var routeCounts = [Int](repeating: 0, count: cfg.numExperts)
+                        for id in routeIDs { routeCounts[Int(id)] += 1 }
+                        streamer.noteRouteCounts(routeCounts)
+                    }
+                    if let stageBreakdown {
+                        stageBreakdown.addRoutedPlan(nanos: PrefillStageBreakdown.now() - routePlanStartNanos)
+                    }
+                    // Join the previous layer's lookahead before planning, so
+                    // the tile plans see its slots as hits.
+                    if let lookahead = prefillLookahead, lookahead.layer == L {
+                        _ = lookahead.join()
+                        prefillLookahead = nil
+                    }
                     let routedTileScheduler = PrefillRoutedTileScheduler(config: schedulerConfig)
                     for (tileIndex, tile) in routes.tiles.enumerated() {
                         let expertIDs = try PrefillStreamedTileBinding.expertIDs(
@@ -2647,6 +2150,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     detail: "routed tile scheduler requested pending action without pending tile")
                             }
                         }
+                        let fetchStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
                         let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
                             model: model,
                             layer: L,
@@ -2654,6 +2158,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             routes: routes,
                             plannedFetch: plannedFetch,
                             avoidingSlots: Set(pendingTiles.flatMap(\.fetch.plannedAssignedSlots)))
+                        if let stageBreakdown {
+                            stageBreakdown.addRoutedFetchWait(nanos: PrefillStageBreakdown.now() - fetchStartNanos)
+                        }
                         try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                               pairStart: Int(tile.pairStart),
                                                               pairCount: Int(tile.pairCount))
@@ -2679,7 +2186,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
                             .map { Int($0.pairCount) }
                         let argumentBuffer: PrefillStreamedTileArgumentBuffer
-                        if let grouped = prefillGroupedGEMM, grouped.isAvailable,
+                        if prefillSimdGroupedGEMMEnabled, prefillGroupedGEMMEnabled,
+                           let simd = prefillSimdGroupedGEMM,
+                           let activation = scratch.groupedExpertActivation,
+                           SimdgroupGroupedRoutedMoE.supportsOffsets(streamedParams),
+                           PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: tilePairCounts) {
+                            // Same group-range contract as the MPP branch below.
+                            argumentBuffer = try simd.makeArgumentBuffer(device: ctx.device,
+                                                                         binding: fetch.binding)
+                            var groupedParams = streamedParams
+                            groupedParams.pairStart = tile.groupStart
+                            groupedParams.pairCount = tile.groupCount
+                            let encoded = simd.encode(
+                                commandBuffer: tileCB,
+                                hidden: scratch.routedX,
+                                sortedPairs: metadata.sortedPairs,
+                                groups: metadata.groups,
+                                activation: activation,
+                                routePartials: scratch.routePartials,
+                                argumentBuffer: argumentBuffer,
+                                binding: fetch.binding,
+                                params: groupedParams,
+                                maxPairsPerGroup: tilePairCounts.max() ?? 0)
+                            guard encoded else { throw ModelError.residentBufferWrapFailed }
+                            prefillSimdGroupedExpertTiles += 1
+                        } else if prefillGroupedGEMMEnabled,
+                           let grouped = prefillGroupedGEMM, grouped.isAvailable,
                            let activation = scratch.groupedExpertActivation,
                            PrefillGroupedExpertGate.usesGroupedGEMM(pairCounts: tilePairCounts) {
                             // Whole 64-row matrix tiles per expert; its group
@@ -2726,6 +2258,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                                argumentBuffer: argumentBuffer))
                         while pendingTiles.count > schedulerConfig.maxPendingDepth {
                             try drainOldestPendingTile()
+                        }
+                    }
+                    // The SSD idles from here through the next layer's
+                    // attention and router. Tiles sweep experts in file order
+                    // and a prompt routes to most of a layer's experts, so read
+                    // the next layer's first experts by offset into its free
+                    // slots now; its tile plans then find them as hits.
+                    if L + 1 < cfg.numLayers,
+                       let slotCount = model.routedExpertCacheSlotCount(layer: L + 1),
+                       let streamer = try? model.routedExpertStreamer(layer: L + 1) {
+                        let tileSlots = (schedulerConfig.maxPendingDepth + 1) * schedulerConfig.tileExperts
+                        let offsets = model.routedExpertPhysicalOffsets(layer: L + 1)
+                        let firstByOffset = offsets.indices.sorted { offsets[$0] < offsets[$1] }
+                            .prefix(max(0, slotCount - tileSlots))
+                        let ahead = streamer.nonResidentExperts(Array(firstByOffset))
+                        let reservation = streamer.reserveSpeculativeSlots(experts: ahead,
+                                                                           keepEvictable: tileSlots)
+                        if !reservation.isEmpty {
+                            let record = SpeculativeExpertPrefetch(layer: L + 1, predicted: Set(ahead))
+                            prefillLookahead = record
+                            // Part of the sweep: unbuffered wherever the
+                            // model's regime rule made the sweep unbuffered.
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                record.complete(bytes: streamer.executeSpeculativeReservation(
+                                    reservation, sweep: true))
+                            }
                         }
                     }
                     while !pendingTiles.isEmpty {
@@ -2779,19 +2337,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         waitForCompletion(tailCB)
                     }
                     try checkCommandBufferError(tailCB)
+                    stageBreakdown?.addGPU(.moeTail, tailCB)
                     // Complete already: the tail read the shared branch's
                     // output. The wait only makes the status check exact.
                     waitForCompletion(sharedCB)
                     try checkCommandBufferError(sharedCB)
-                    if gemmaPrefillTrace != nil {
-                        try trace(L, [("shared_output", scratch.h1, D), ("routed_output", scratch.h2, D),
-                                      ("layer_output", scratch.hidden, D)])
-                    }
+                    stageBreakdown?.addGPU(.sharedExpert, sharedCB)
                     if L + 1 < cfg.numLayers {
                         guard let nextCB = ctx.queue.makeCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
                         }
                         cb = nextCB
+                    }
+                    if let stageBreakdown {
+                        stageBreakdown.addLayerWall(nanos: PrefillStageBreakdown.now() - layerStartNanos)
                     }
                     continue
         }
@@ -2841,11 +2400,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             finalCB.commit()
             waitForCompletion(finalCB)
             try checkCommandBufferError(finalCB)
+            stageBreakdown?.addGPU(.head, finalCB)
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             }
         }
 
+        if let stageBreakdown {
+            stageBreakdown.addChunk(wallNanos: PrefillStageBreakdown.now() - chunkStartNanos,
+                                    tokens: tokens.count)
+        }
         kv?.advance(by: tokens.count)
         prefillChunkState.markCommitted()
     }
@@ -2867,30 +2431,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         // An answer that outgrows that room grows by half a step at a time.
         try ensureKVCapacity(for: position + 1, headroom: kv?.fullAttentionGrowthStep.map { $0 / 2 })
-        if cfg.hasCompressedAttentionLayers {
-            try await produceTokenDSV4(token: token, position: position,
-                                       into: logits, emitHead: emitHead,
-                                       outputMode: outputMode)
-            return
-        }
-        if cfg.family == .inklingSmall {
-            try await produceTokenInkling(token: token, position: position,
-                                          into: logits, emitHead: emitHead,
-                                          outputMode: outputMode)
-            return
-        }
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
-        func trace(_ layer: Int, _ stage: String, _ buffer: MTLBuffer, _ count: Int, offset: Int = 0) {
-            guard let observer = gemmaDecodeTrace else { return }
-            let values = UnsafeBufferPointer(start: buffer.contents().advanced(by: offset).assumingMemoryBound(to: Float16.self),
-                                             count: count)
-            observer(position, layer, stage, values.map(Float.init))
-        }
         struct PendingRoutedCommand {
             let cb: MTLCommandBuffer
             /// The layer's attention+router+shared-expert buffer. Always
@@ -3167,7 +2713,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if slotMapEnabled,
                Self.slotMapOnlyLayer == nil || Self.slotMapOnlyLayer == L,
                !cfg.ffnSandwichNorms,
-               !isLinear,
                model.config.family == .qwen36,
                cfg.topKExperts == MoE.maxStreamedExperts,
                let binding = try? model.routedSlotMapBinding(layer: L) {
@@ -3257,26 +2802,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForRouterSignal(routerSignal, fallback: cb)
-            if gemmaDecodeTrace != nil, cfg.family == .gemma4 {
-                waitForCompletion(cb)
-                trace(L, "input_norm", normed, cfg.hiddenSize)
-                trace(L, "query", qScratch, Int(qDim))
-                if let key = kv?.kSlot(layer: L, position: position),
-                   let value = kv?.vSlot(layer: L, position: position) {
-                    trace(L, "key", key.buffer, Int(kvDim), offset: key.offset)
-                    trace(L, "value", value.buffer, Int(kvDim), offset: value.offset)
-                }
-                trace(L, "attention", attnOut, Int(qDim))
-                trace(L, "attention_projection", oOut, cfg.hiddenSize)
-                trace(L, "post_attention", hidden, cfg.hiddenSize)
-                trace(L, "dense_input", denseX, cfg.hiddenSize)
-                trace(L, "routed_input", routedX, cfg.hiddenSize)
-                trace(L, "router_input", routerInput, cfg.hiddenSize)
-                trace(L, "shared_output", h1Buf, cfg.hiddenSize)
-                trace(L, "shared_activations", denseScratchAct, Int(sharedProj.gate.rows))
-                gemmaDecodeTrace?(position, L, "router_logits", moe.routerLogitSnapshot)
-                trace(L, "routing_weights", outWeights, cfg.topKExperts)
-            }
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRoutedCommand {
                 finishPendingRoutedCommand(pending, waitIfNeeded: false)
@@ -3322,6 +2847,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if Self.phaseInstrumentationEnabled {
                     totalRoutedLayerSteps &+= 1
                     totalAllHitLayerSteps &+= 1
+                    notePhaseLayerStep(L, experts, misses: [])
                 }
                 issueSpeculativePrefetch(layer: L + 1)
                 continue
@@ -3339,6 +2865,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if let plannedFetch, plannedFetch.misses.isEmpty {
                     totalAllHitLayerSteps &+= 1
                 }
+                notePhaseLayerStep(L, experts, misses: plannedFetch?.misses)
             }
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?
@@ -3549,12 +3076,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     self?.eagerFetchCompleted(seq, success: success, layer: layer)
                 }
             }
-            if gemmaDecodeTrace != nil, cfg.family == .gemma4 {
-                waitForCompletion(routedCB)
-                trace(L, "routed_activations", moeActs, Int(topK * FmoE))
-                trace(L, "routed_output", h2Buf, cfg.hiddenSize)
-                trace(L, "layer_output", hidden, cfg.hiddenSize)
-            }
             if Self.slotMapDebugCompare, slotMapArmed,
                slotMapAllHit.contents().load(as: UInt32.self) == 1 {
                 while routedCB.status != .completed { usleep(200) }
@@ -3638,1308 +3159,64 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         kv?.advance()
     }
 
-    /// Env-gated numeric probe for the Inkling bring-up: prints value stats
-    /// of a buffer after forcing the queue to drain. Debug only — the extra
-    /// waits serialize the pipeline.
-    private static let inklingDebugEnabled =
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING_DEBUG"] == "1"
-    private func inklingDebugStats(_ label: String, _ buf: MTLBuffer,
-                                   count: Int, fp32: Bool = false) {
-        guard Self.inklingDebugEnabled else { return }
-        let cb = ctx.queue.makeCommandBuffer()!
-        trackGpuInterval(cb)
-        cb.commit()
-        cb.waitUntilCompleted()
-        var mn = Float.greatestFiniteMagnitude
-        var mx = -Float.greatestFiniteMagnitude
-        var sum: Double = 0
-        var bad = 0
-        if fp32 {
-            let p = buf.contents().bindMemory(to: Float.self, capacity: count)
-            for i in 0..<count {
-                let v = p[i]
-                if !v.isFinite { bad += 1; continue }
-                mn = min(mn, v); mx = max(mx, v); sum += Double(v)
-            }
-        } else {
-            let p = buf.contents().bindMemory(to: Float16.self, capacity: count)
-            for i in 0..<count {
-                let v = Float(p[i])
-                if !v.isFinite { bad += 1; continue }
-                mn = min(mn, v); mx = max(mx, v); sum += Double(v)
-            }
-        }
-        let mean = sum / Double(max(count - bad, 1))
-        print("[inkling] \(label) n=\(count) "
-              + String(format: "min=%.4f max=%.4f mean=%.5f", mn, mx, mean)
-              + " nonfinite=\(bad)")
+    /// The chunked-prefill attention kernels, for the tolerance gate's control
+    /// arm (`PrefillAttention.useTiledKernelForGQAShapes()`) and its counters.
+    var prefillAttentionKernels: PrefillAttention { prefillAttention }
+
+    /// Whether chunked prefill's full-attention layers use the GQA-shared
+    /// simdgroup kernel (`attention_prefill_gqa8_d256_simd`). Only Qwen 3.6,
+    /// and only where the Apple10 TensorOps path is absent; it changes output
+    /// within tolerance, so every other family and M5-class host keeps its bytes.
+    static func usesQwenGQASimdAttention(family: ModelFamily,
+                                         supportsApple10TensorOps: Bool) -> Bool {
+        family == .qwen36 && !supportsApple10TensorOps
     }
 
-    /// Throws if the head epilogue counted any non-finite real-vocabulary
-    /// logit. A NaN or infinity in the logit row is always an engine fault
-    /// upstream (an overflowed intermediate, a poisoned cache entry), never a
-    /// model output — and left unchecked it does not look like a fault: the
-    /// argmax and the sampler both fall through to a low token id, which in
-    /// this vocabulary is `!`. Failing here turns silent mid-word corruption
-    /// into a report that names the position.
-    private func checkFiniteLogits(_ inkling: InklingKernels,
-                                   position: Int) throws {
-        let bad = inkling.nonFiniteLogits
-        guard bad == 0 else {
-            throw InklingHeadError.nonFiniteLogits(position: position, count: bad)
-        }
+    /// Whether chunked prefill's routed experts may take the grouped-GEMM
+    /// kernel (`MPPGroupedRoutedMoE`) for tiles that pass
+    /// `PrefillGroupedExpertGate`. Only Qwen 3.6, and only where the Apple10
+    /// TensorOps path is absent, the hardware it was measured on; it changes
+    /// output within tolerance, so every other family and M5-class host keeps
+    /// its bytes. Where the `tensorops` module does not build the kernel is
+    /// unavailable and the row kernel runs.
+    static func usesGroupedRoutedExpertGEMM(family: ModelFamily,
+                                            supportsApple10TensorOps: Bool) -> Bool {
+        family == .qwen36 && !supportsApple10TensorOps
     }
 
-    /// FFN output pre-scale for the Inkling MoE path: router weights and
-    /// shared-expert gammas are divided by this before the FP16 expert
-    /// pipeline, and the residual add multiplies it back (linear, exact).
-    /// Keeps BF16-magnitude outlier channels (observed > 65k at layer 41)
-    /// inside half range through h1/h2 and the phase-2 reduce.
-    static let inklingFFNPrescale: Float = 32.0
+    /// Whether chunked prefill's routed experts may take the simdgroup-matrix
+    /// grouped kernel (`SimdgroupGroupedRoutedMoE`) for tiles that pass
+    /// `PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM`. Only Qwen 3.6, and
+    /// only where the Apple10 TensorOps path is absent, the hardware it was
+    /// measured on; it changes output within tolerance, so every other family
+    /// and M5-class host keeps its bytes. Ahead of the MPP kernel, which stays
+    /// the fallback for tiles this one skips.
+    static func usesSimdgroupGroupedRoutedExperts(family: ModelFamily,
+                                                  supportsApple10TensorOps: Bool) -> Bool {
+        family == .qwen36 && !supportsApple10TensorOps
+    }
 
-    /// Splits Inkling prefill's routed-expert loop into fetch / encode / drain,
-    /// the prefill counterpart to `MFERENCE_PHASES` for decode. Off by default:
-    /// when disabled the loop skips the clock reads entirely.
-    ///
-    /// Worth keeping because the shape it revealed is counter-intuitive. On a
-    /// 2 785-token prompt the whole expert path — streaming *and* compute — is
-    /// ~15 % of prefill; the other ~85 % is the per-token attention / norm /
-    /// short-conv replay outside this loop, and it grows superlinearly with
-    /// context (13.3x for 6.6x the tokens) because 7 of 42 layers are global.
-    /// Optimize against a measurement from this, not against dispatch counts.
+    /// Test-only: routes every prefill tile to the row kernel.
+    func useRowKernelForRoutedExperts() {
+        prefillGroupedGEMMEnabled = false
+        prefillSimdGroupedGEMMEnabled = false
+    }
+
+    /// Test-only: leaves routed tiles to the MPP grouped kernel and the row
+    /// kernel, the selection before the simdgroup kernel.
+    func useMPPOrRowKernelForRoutedExperts() { prefillSimdGroupedGEMMEnabled = false }
+
+    /// Test-only: decode full attention goes back to the per-component
+    /// grouped kernel at a fixed 16 chunks.
+    func usePerComponentDecodeAttention() { attention.groupedFull256Batched = false }
+
+    /// Whether decode full attention runs the batched grouped kernel (Qwen 3.6 default).
+    var decodeAttentionIsBatched: Bool { attention.groupedFull256Batched }
+
+    /// Chunked-prefill stage timing (`PrefillStageBreakdown`), the prefill
+    /// counterpart to `MFERENCE_PHASES` for decode. Off by default.
     static let prefillBreakdownEnabled =
         ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1"
-    nonisolated(unsafe) static var prefillFetchNanos: UInt64 = 0
-    nonisolated(unsafe) static var prefillEncodeNanos: UInt64 = 0
-    nonisolated(unsafe) static var prefillDrainNanos: UInt64 = 0
-    nonisolated(unsafe) static var prefillExpertCount: UInt64 = 0
-    public static func dumpPrefillBreakdown() {
-        let f = Double(prefillFetchNanos) / 1e9
-        let e = Double(prefillEncodeNanos) / 1e9
-        let d = Double(prefillDrainNanos) / 1e9
-        FileHandle.standardError.write(Data(
-            ("[prefill] experts=\(prefillExpertCount) fetch=\(String(format: "%.1f", f))s " +
-             "encode=\(String(format: "%.1f", e))s drain=\(String(format: "%.1f", d))s " +
-             "perExpert: fetch=\(String(format: "%.2f", f*1000/Double(max(1,prefillExpertCount))))ms " +
-             "drain=\(String(format: "%.2f", d*1000/Double(max(1,prefillExpertCount))))ms\n").utf8))
-    }
-
-    /// Non-finite real logits counted by the last head dispatch. Zero on every
-    /// healthy step; a regression test asserts that directly.
-    var inklingNonFiniteLogitCount: Int { inkling?.nonFiniteLogits ?? 0 }
-
-    /// Parity-test helper: advance the KV cursor after a stop-layer run so a
-    /// following produce() at the next position lands in the right slot.
-    func inklingParityAdvanceKV() { kv?.advance() }
-    func inklingParityKSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
-        kv!.kSlot(layer: layer, position: position)
-    }
-    func inklingParityVSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
-        kv!.vSlot(layer: layer, position: position)
-    }
-
-    /// Debug-only early exit: stop after this layer completes, leaving the
-    /// scratch buffers inspectable (CPU parity tests). -1 = disabled.
-    static let inklingStopLayer: Int =
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING_STOP_LAYER"]
-            .flatMap(Int.init) ?? -1
-    /// Restricts the stop layer to one position so multi-token composition
-    /// tests can run earlier tokens through all 42 layers. -1 = any position.
-    static let inklingStopPosition: Int =
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING_STOP_POSITION"]
-            .flatMap(Int.init) ?? -1
-    /// Forces a full GPU drain after every layer (disables the routed-CB
-    /// pipelining). Debug aid to discriminate ordering hazards.
-    static let inklingSyncMode: Bool =
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING_SYNC"] == "1"
-    /// When set (with MFERENCE_INKLING_DEBUG=1), per-layer FP32 hidden rows
-    /// are dumped as raw f32 files for cross-checking against the reference.
-    static let inklingDumpDir: String? =
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING_DUMP_DIR"]
-
-    /// Inkling-Small decode step. Semantics per docs/INKLING_SMALL.md
-    /// "Forward-pass contract": no RoPE (learned relative-position bias),
-    /// depthwise short convs on K/V and on both sublayer outputs (inside the
-    /// residual), sigmoid router with 2 shared-expert sinks, 2 leading dense
-    /// layers, muP logit scaling, and vocab truncation to the unpadded size.
-    private func produceTokenInkling(token: Int32,
-                                     position: Int,
-                                     into logits: MTLBuffer,
-                                     emitHead: Bool,
-                                     outputMode: PrefillOutputMode) async throws {
-        guard let inkling, let relScratch = inklingRelScratch,
-              let hiddenF32 = inklingHiddenF32,
-              let deltaF32 = inklingDeltaF32,
-              let sharedY0 = inklingSharedY0, let sharedY1 = inklingSharedY1,
-              let kv else {
-            preconditionFailure("Inkling runtime state missing")
-        }
-        let D = UInt32(cfg.hiddenSize)
-        let FmoE = UInt32(cfg.moeIntermediateSize)
-        let eps: Float = Float(1e-6)
-        let qDim = UInt32(cfg.numHeads * cfg.headDim)
-        let kvDim = UInt32(cfg.numKVHeads * cfg.headDim)
-        let seqLen = UInt32(position + 1)
-        let sconvK = UInt32(cfg.sconvKernelSize)
-        let rel = cfg.relativePosition
-
-        struct PendingInkling {
-            let cb: MTLCommandBuffer
-            let attentionCB: MTLCommandBuffer
-            let phase1HitCB: MTLCommandBuffer?
-        }
-        var pending: PendingInkling?
-        func finishPending(_ p: PendingInkling, waitIfNeeded: Bool) {
-            if waitIfNeeded {
-                waitForCompletion(p.attentionCB)
-                if let hitCB = p.phase1HitCB { waitForCompletion(hitCB) }
-                waitForCompletion(p.cb)
-            } else {
-                if let err = p.cb.error { print("CB error: \(err)") }
-                if let err = p.attentionCB.error { print("CB error: \(err)") }
-                if let err = p.phase1HitCB?.error { print("CB error: \(err)") }
-            }
-        }
-        func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
-            let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-            for i in 0..<slots.count { ptr[i] = slots[i] }
-        }
-
-        // Embed lookup, then the family's embed norm (in place).
-        let emb = model.embedding
-        let embedNorm = model.embedNorm
-        runSync { cb in
-            embedInt4.encode(commandBuffer: cb,
-                             table:  emb.buffer, tableOffset:  Int(emb.offset),
-                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                             out: hidden,
-                             tokenId: UInt32(bitPattern: token),
-                             d: D,
-                             outScale: 1.0)
-            // The embed norm is part of the stream seed itself
-            // (`embed_tokens = embed_norm(embed(ids))`), then the stream
-            // widens to FP32 for the residual accumulation.
-            rms.encodeBF16W(commandBuffer: cb, x: hidden,
-                            weight: embedNorm.buffer,
-                            weightOffset: Int(embedNorm.offset),
-                            out: hidden, d: D, eps: eps)
-            inkling.encodeF16ToF32(commandBuffer: cb, src: hidden,
-                                   dst: hiddenF32, count: D)
-        }
-        inklingDebugStats("embed f32", hiddenF32, count: cfg.hiddenSize, fp32: true)
-
-        for L in 0..<cfg.numLayers {
-            let isFull = cfg.fullAttentionLayerMask[L] == 1
-            let isDense = L < cfg.numDenseLayers
-            let conv = inklingConvStates[L]
-
-            let inNorm = try model.inputNorm(layer: L)
-            let mlpNorm = try model.postAttnNorm(layer: L)
-            let q = try model.inklingWqDu(layer: L)
-            let k = try model.inklingWkDv(layer: L)
-            let v = try model.inklingWvDv(layer: L)
-            let o = try model.inklingWoUd(layer: L)
-            let wr = try model.inklingWrDu(layer: L)
-            let relProj = try model.inklingRelProj(layer: L)
-            let qNorm = try model.inklingQNorm(layer: L)
-            let kNorm = try model.inklingKNorm(layer: L)
-            let kSconvW = try model.inklingKSconv(layer: L)
-            let vSconvW = try model.inklingVSconv(layer: L)
-            let attnSconvW = try model.inklingAttnSconv(layer: L)
-            let mlpSconvW = try model.inklingMlpSconv(layer: L)
-
-            let kSlot = kv.kSlot(layer: L, position: position)
-            let vSlot = kv.vSlot(layer: L, position: position)
-
-            var cb = ctx.queue.makeCommandBuffer()!
-            // Debug-only pipeline cut: drain, probe, continue in a fresh CB.
-            func dbgCut(_ probes: [(String, MTLBuffer, Int)]) {
-                guard Self.inklingDebugEnabled, L == 2 else { return }
-                cb.commit()
-                waitForCompletion(cb)
-                for (label, buffer, count) in probes {
-                    inklingDebugStats("L\(L)* \(label)", buffer, count: count)
-                }
-                cb = ctx.queue.makeCommandBuffer()!
-            }
-            inkling.encodeRMSF32(commandBuffer: cb, x: hiddenF32,
-                                 weight: inNorm.buffer,
-                                 weightOffset: Int(inNorm.offset),
-                                 out: normed, d: D, eps: eps)
-
-            // Q/K/V projections into scratch; K and V then pass through their
-            // short convolutions on the way into the KV slot (the cache stores
-            // the convolved, K-normed values, exactly like the reference's
-            // post-norm cache). The fused kernel was briefly suspected during
-            // the corrupt-shard incident and later exonerated (the NaNs were
-            // bad wq_du bytes); its generic path is A/B-verified against the
-            // three plain GEMVs at this family's (4096, 1024, 4096) shape.
-            fusedQKVGEMV.encode(commandBuffer: cb,
-                                qWeights: q.buffer, qWeightsOffset: Int(q.offset),
-                                qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
-                                qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
-                                kWeights: k.buffer, kWeightsOffset: Int(k.offset),
-                                kScales: k.buffer, kScalesOffset: Int(k.scaleOffset),
-                                kBiases: k.buffer, kBiasesOffset: Int(k.biasOffset),
-                                vWeights: v.buffer, vWeightsOffset: Int(v.offset),
-                                vScales: v.buffer, vScalesOffset: Int(v.scaleOffset),
-                                vBiases: v.buffer, vBiasesOffset: Int(v.biasOffset),
-                                x: normed,
-                                qOut: qScratch,
-                                kOut: kStage, kOutOffset: 0,
-                                vOut: vStage, vOutOffset: 0,
-                                qRows: qDim,
-                                kvRows: kvDim,
-                                n: D)
-            dbgCut([("post-qkv qScratch", qScratch, Int(qDim)),
-                    ("post-qkv kStage", kStage, Int(kvDim)),
-                    ("post-qkv vStage", vStage, Int(kvDim))])
-            int4.encode(commandBuffer: cb,
-                        weights: wr.buffer, weightsOffset: Int(wr.offset),
-                        scales:  wr.buffer, scalesOffset:  Int(wr.scaleOffset),
-                        biases:  wr.buffer, biasesOffset:  Int(wr.biasOffset),
-                        x: normed, y: relScratch,
-                        m: UInt32(rel.projDim), n: D)
-            inkling.encodeSconvStep(commandBuffer: cb,
-                                    x: kStage, state: conv.k,
-                                    weight: kSconvW.buffer,
-                                    weightOffset: Int(kSconvW.offset),
-                                    out: kSlot.buffer, outOffset: kSlot.offset,
-                                    channels: kvDim, kernelSize: sconvK)
-            inkling.encodeSconvStep(commandBuffer: cb,
-                                    x: vStage, state: conv.v,
-                                    weight: vSconvW.buffer,
-                                    weightOffset: Int(vSconvW.offset),
-                                    out: vSlot.buffer, outOffset: vSlot.offset,
-                                    channels: kvDim, kernelSize: sconvK)
-            dbgCut([("post-sconv kSlot", kSlot.buffer, Int(kvDim)),
-                    ("post-sconv rel", relScratch, rel.projDim)])
-            inkling.encodeQKNorm(commandBuffer: cb,
-                                 q: qScratch,
-                                 k: kSlot.buffer, kOffset: kSlot.offset,
-                                 qWeight: qNorm.buffer, qWeightOffset: Int(qNorm.offset),
-                                 kWeight: kNorm.buffer, kWeightOffset: Int(kNorm.offset),
-                                 headDim: UInt32(cfg.headDim),
-                                 numQHeads: UInt32(cfg.numHeads),
-                                 numKVHeads: UInt32(cfg.numKVHeads),
-                                 eps: eps)
-            dbgCut([("post-norm qScratch", qScratch, Int(qDim)),
-                    ("post-norm kSlot", kSlot.buffer, Int(kvDim))])
-
-            let window = UInt32(cfg.slidingWindow)
-            let kvStart: UInt32 = isFull ? 0 : (seqLen > window ? seqLen - window : 0)
-            let ringCapacity = kv.ringCapacity(layer: L)
-            let activeRing: UInt32 = (!isFull && ringCapacity > 0 && Int(seqLen) > ringCapacity)
-                ? UInt32(ringCapacity) : 0
-            let relExtent = UInt32(isFull ? rel.extent : cfg.slidingWindow)
-            var tau: Float = 1.0
-            if isFull && rel.logScalingFloor > 0 {
-                let n = Float(position + 1)
-                let floorN = Float(rel.logScalingFloor)
-                if n > floorN {
-                    tau = 1.0 + Float(rel.logScalingAlpha) * log(n / floorN)
-                }
-            }
-            inkling.encodeAttentionDecode(commandBuffer: cb,
-                                          q: qScratch,
-                                          k: kSlot.buffer,
-                                          v: vSlot.buffer,
-                                          rel: relScratch,
-                                          proj: relProj.buffer,
-                                          projOffset: Int(relProj.offset),
-                                          out: attnOut,
-                                          headDim: UInt32(cfg.headDim),
-                                          numQHeads: UInt32(cfg.numHeads),
-                                          numKVHeads: UInt32(cfg.numKVHeads),
-                                          seqLen: seqLen, kvStart: kvStart,
-                                          relExtent: relExtent,
-                                          dRel: UInt32(rel.dRel),
-                                          ringCapacity: activeRing,
-                                          scale: Float(cfg.attentionScale),
-                                          tau: tau)
-            int4.encode(commandBuffer: cb,
-                        weights: o.buffer, weightsOffset: Int(o.offset),
-                        scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
-                        biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
-                        x: attnOut, y: oOut, m: D, n: qDim)
-            // attn_sconv sits on the attention OUTPUT, inside the residual.
-            // FP32 out: deltas exceed FP16 range deep in the stack.
-            inkling.encodeSconvStepF32Out(commandBuffer: cb,
-                                          x: oOut, state: conv.attn,
-                                          weight: attnSconvW.buffer,
-                                          weightOffset: Int(attnSconvW.offset),
-                                          out: deltaF32,
-                                          channels: D, kernelSize: sconvK)
-            inkling.encodeResidualAddF32Delta(commandBuffer: cb,
-                                              hidden: hiddenF32, delta: deltaF32,
-                                              count: D)
-            inkling.encodeRMSF32(commandBuffer: cb, x: hiddenF32,
-                                 weight: mlpNorm.buffer,
-                                 weightOffset: Int(mlpNorm.offset),
-                                 out: routedX, d: D, eps: eps)
-
-            if isDense {
-                // Dense SwiGLU with a learned scalar output gain, then the
-                // mlp short conv, then the residual.
-                let proj = inklingDenseProjections[L]!
-                let gain = model.inklingScalar(
-                    try model.inklingDenseGlobalScale(layer: L))
-                try! shared.encode(commandBuffer: cb,
-                                   x: routedX,
-                                   gate: proj.gate, up: proj.up, down: proj.down,
-                                   y: h2Buf,
-                                   scratchGate: denseScratchGate,
-                                   scratchUp: denseScratchUp,
-                                   scratchAct: denseScratchAct)
-                inkling.encodeScale(commandBuffer: cb, x: h2Buf,
-                                    by: gain, count: D)
-                inkling.encodeSconvStepF32Out(commandBuffer: cb,
-                                              x: h2Buf, state: conv.mlp,
-                                              weight: mlpSconvW.buffer,
-                                              weightOffset: Int(mlpSconvW.offset),
-                                              out: deltaF32,
-                                              channels: D, kernelSize: sconvK)
-                inkling.encodeResidualAddF32Delta(commandBuffer: cb,
-                                                  hidden: hiddenF32, delta: deltaF32,
-                                                  count: D)
-                cb.commit()
-                if let p = pending { finishPending(p, waitIfNeeded: false); pending = nil }
-                waitForCompletion(cb)
-                inklingDebugStats("L\(L) dense out", hiddenF32, count: cfg.hiddenSize, fp32: true)
-                if let dir = Self.inklingDumpDir, Self.inklingDebugEnabled {
-                    let data = Data(bytes: hiddenF32.contents(),
-                                    count: cfg.hiddenSize * 4)
-                    try? data.write(to: URL(fileURLWithPath:
-                        "\(dir)/pos\(position)_L\(L).f32"))
-                }
-                if L == Self.inklingStopLayer,
-                   Self.inklingStopPosition < 0 || Self.inklingStopPosition == position {
-                    return
-                }
-                continue
-            }
-
-            // MoE layer: sigmoid router (+ signal for the CPU expert fetch),
-            // then both shared experts weighted by their sink gammas while the
-            // routed blobs stream in.
-            let routerW = try model.router(layer: L)
-            let gateBias = try model.inklingGateBias(layer: L)
-            let gateScale = try model.inklingGateGlobalScale(layer: L)
-            inkling.encodeRouter(commandBuffer: cb,
-                                 weights: routerW.buffer,
-                                 weightsOffset: Int(routerW.offset),
-                                 hidden: routedX,
-                                 onesScale: effectiveScaleBuffers[L],
-                                 gateBias: gateBias.buffer,
-                                 gateBiasOffset: Int(gateBias.offset),
-                                 globalScale: gateScale.buffer,
-                                 globalScaleOffset: Int(gateScale.offset),
-                                 outIndices: outIndices,
-                                 outWeights: outWeights,
-                                 numRouted: UInt32(cfg.numExperts),
-                                 numShared: UInt32(cfg.numSharedExperts),
-                                 topK: UInt32(cfg.topKExperts),
-                                 routeScale: Float(cfg.routedScalingFactor)
-                                     / Self.inklingFFNPrescale,
-                                 d: D)
-            // PILOT lookahead: layer L+1's router against *this* layer's
-            // post-attention state, into private buffers, before the signal —
-            // the CPU reads real L indices and speculative L+1 indices at one
-            // wake. Dense layers all precede the MoE layers in this family,
-            // so L+1 here is always routed (or past the last layer, which
-            // `shouldEncodePilotGemv` rejects).
-            var pilotGemvEncoded = false
-            if shouldEncodePilotGemv(nextLayer: L + 1),
-               let pilot = ensureInklingPilotRouter(),
-               let nextRouter = try? model.router(layer: L + 1),
-               let nextGateBias = try? model.inklingGateBias(layer: L + 1),
-               let nextGateScale = try? model.inklingGateGlobalScale(layer: L + 1) {
-                pilot.encodePrediction(
-                    commandBuffer: cb,
-                    weights: nextRouter.buffer,
-                    weightsOffset: Int(nextRouter.offset),
-                    hidden: routedX,
-                    onesScale: effectiveScaleBuffers[L + 1],
-                    gateBias: nextGateBias.buffer,
-                    gateBiasOffset: Int(nextGateBias.offset),
-                    globalScale: nextGateScale.buffer,
-                    globalScaleOffset: Int(nextGateScale.offset),
-                    numRouted: UInt32(cfg.numExperts),
-                    numShared: UInt32(cfg.numSharedExperts),
-                    topK: UInt32(cfg.topKExperts),
-                    routeScale: Float(cfg.routedScalingFactor)
-                        / Self.inklingFFNPrescale,
-                    d: D)
-                pilotGemvEncoded = true
-            }
-            let routerSignal = encodeRouterSignal(cb)
-            let sharedProjs = inklingSharedProjections[L]
-            try! shared.encode(commandBuffer: cb,
-                               x: routedX,
-                               gate: sharedProjs[0].gate,
-                               up: sharedProjs[0].up,
-                               down: sharedProjs[0].down,
-                               y: sharedY0,
-                               scratchGate: denseScratchGate,
-                               scratchUp: denseScratchUp,
-                               scratchAct: denseScratchAct,
-                               outputFloat32: true)
-            try! shared.encode(commandBuffer: cb,
-                               x: routedX,
-                               gate: sharedProjs[1].gate,
-                               up: sharedProjs[1].up,
-                               down: sharedProjs[1].down,
-                               y: sharedY1,
-                               scratchGate: denseScratchGate,
-                               scratchUp: denseScratchUp,
-                               scratchAct: denseScratchAct,
-                               outputFloat32: true)
-            // Gammas carry the 1/32 prescale, so h1Buf is back in FP16 range.
-            inkling.encodeGammaCombine(commandBuffer: cb,
-                                       a: sharedY0, b: sharedY1,
-                                       y: h1Buf, count: D,
-                                       inputsAreFloat32: true)
-            cb.commit()
-            waitForRouterSignal(routerSignal, fallback: cb)
-            if let p = pending { finishPending(p, waitIfNeeded: false); pending = nil }
-
-            // CPU readback of the six routed experts. A mixed cache plan sends
-            // the resident subset to Metal immediately, then preads only the
-            // misses while the shared branch and resident phase 1 execute.
-            let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
-                                                          capacity: cfg.topKExperts)
-            var experts = [Int](repeating: 0, count: cfg.topKExperts)
-            for i in 0..<cfg.topKExperts {
-                experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
-            }
-            // Join any speculative read aimed at this layer before planning —
-            // the plan must not evict a slot a background pread is filling —
-            // and score the prediction. Then this layer's routing becomes the
-            // next token's prediction for the same layer.
-            settleSpeculation(layer: L, actualExperts: experts)
-            recordRoutedExperts(experts, layer: L)
-            captureInklingPilotPrediction(nextLayer: L + 1,
-                                          gemvEncoded: pilotGemvEncoded)
-            let topK = UInt32(cfg.topKExperts)
-            let routedOffsets = model.routedExpertOffsets(layer: L)
-            let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
-            let missSet = Set(plannedFetch?.misses ?? [])
-            let phase1HitSlots = (0..<cfg.topKExperts)
-                .filter { !missSet.contains($0) }
-                .map { UInt32($0) }
-            let phase1MissSlots = (plannedFetch?.misses ?? []).map { UInt32($0) }
-            var phase1HitCB: MTLCommandBuffer?
-            var splitArgBuf: MTLBuffer?
-            var splitRoutedBufs: [(buffer: MTLBuffer, offset: Int)] = []
-
-            if let plan = plannedFetch,
-               plan.hits > 0,
-               !plan.misses.isEmpty {
-                splitRoutedBufs = try model.routedExpertBuffers(for: plan)
-                    .map { (buffer: $0.buffer, offset: Int($0.offset)) }
-                // Router readback is a same-queue fence for the prior layer,
-                // so MoE's preallocated argument storage is no longer in use.
-                splitArgBuf = moe.makeRoutedArgumentBuffer(
-                    routedBlobs: splitRoutedBufs, topK: topK)
-                if let argBuf = splitArgBuf {
-                    writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                    let hitCB = ctx.queue.makeCommandBuffer()!
-                    moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                        commandBuffer: hitCB,
-                        routedArgBuffer: argBuf,
-                        routedBlobs: splitRoutedBufs,
-                        routedOffsets: routedOffsets,
-                        x: routedX,
-                        acts: moeActs,
-                        activeSlots: moeHitActiveSlots,
-                        activeSlotIndices: phase1HitSlots,
-                        activeCount: UInt32(phase1HitSlots.count),
-                        d: D,
-                        f: FmoE,
-                        topK: topK)
-                    hitCB.commit()
-                    phase1HitCB = hitCB
-                }
-            }
-
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs: [TensorView]
-            if let plannedFetch {
-                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
-            } else {
-                blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
-            }
-            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
-
-            let routedCB = ctx.queue.makeCommandBuffer()!
-            let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
-                routedBlobs: routedBufs, topK: topK)
-            if splitArgBuf != nil {
-                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-                moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                    commandBuffer: routedCB,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: routedBufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX,
-                    acts: moeActs,
-                    activeSlots: moeMissActiveSlots,
-                    activeSlotIndices: phase1MissSlots,
-                    activeCount: UInt32(phase1MissSlots.count),
-                    d: D,
-                    f: FmoE,
-                    topK: topK)
-            } else {
-                moe.encodeRoutedPersistentPhase1U16Load(
-                    commandBuffer: routedCB,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: routedBufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX,
-                    acts: moeActs,
-                    d: D,
-                    f: FmoE,
-                    topK: topK)
-            }
-            // Phase 2 seeds y with the shared-expert branch, so the sum is
-            // routed + shared exactly as the reference computes it.
-            moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
-                                                   routedArgBuffer: argBuf,
-                                                   routedBlobs: routedBufs,
-                                                   routedOffsets: routedOffsets,
-                                                   acts: moeActs,
-                                                   routingWeights: outWeights,
-                                                   residual: h1Buf,
-                                                   y: h2Buf,
-                                                   d: D, f: FmoE,
-                                                   topK: topK)
-            inkling.encodeSconvStepF32Out(commandBuffer: routedCB,
-                                          x: h2Buf, state: conv.mlp,
-                                          weight: mlpSconvW.buffer,
-                                          weightOffset: Int(mlpSconvW.offset),
-                                          out: deltaF32,
-                                          channels: D, kernelSize: sconvK)
-            inkling.encodeResidualAddF32Delta(commandBuffer: routedCB,
-                                              hidden: hiddenF32, delta: deltaF32,
-                                              count: D,
-                                              scale: Self.inklingFFNPrescale)
-            routedCB.commit()
-            // The GPU is now busy with routed work; the CPU is free until the
-            // next layer's router wake — the window where a speculative read
-            // never competes with a critical-path pread.
-            issueSpeculativePrefetch(layer: L + 1)
-            if Self.inklingDebugEnabled {
-                waitForCompletion(routedCB)
-                if !(L <= 6 || L == 41) {
-                    inklingDebugStats("L\(L) hidden", hiddenF32, count: cfg.hiddenSize, fp32: true)
-                }
-                if let dir = Self.inklingDumpDir {
-                    let data = Data(bytes: hiddenF32.contents(),
-                                    count: cfg.hiddenSize * 4)
-                    try? data.write(to: URL(fileURLWithPath:
-                        "\(dir)/pos\(position)_L\(L).f32"))
-                }
-            }
-            if Self.inklingDebugEnabled, (18...21).contains(L) {
-                inklingDebugStats("L\(L) normed", normed, count: cfg.hiddenSize)
-                inklingDebugStats("L\(L) oOut", oOut, count: cfg.hiddenSize)
-                inklingDebugStats("L\(L) attn delta", deltaF32, count: cfg.hiddenSize, fp32: true)
-                inklingDebugStats("L\(L) routedX", routedX, count: cfg.hiddenSize)
-            }
-            if Self.inklingDebugEnabled, L <= 6 || L == 41 {
-                inklingDebugStats("L\(L) normed", normed, count: cfg.hiddenSize)
-                inklingDebugStats("L\(L) qScratch", qScratch, count: Int(qDim))
-                inklingDebugStats("L\(L) kStage", kStage, count: Int(kvDim))
-                inklingDebugStats("L\(L) kSlot", kSlot.buffer, count: Int(kvDim))
-                inklingDebugStats("L\(L) relScratch", relScratch, count: rel.projDim)
-                inklingDebugStats("L\(L) moeActs", moeActs, count: 8 * Int(FmoE))
-                inklingDebugStats("L\(L) attnOut", attnOut, count: Int(qDim))
-                inklingDebugStats("L\(L) oOut", oOut, count: cfg.hiddenSize)
-                inklingDebugStats("L\(L) sharedY", h1Buf, count: cfg.hiddenSize)
-                inklingDebugStats("L\(L) moe h2", h2Buf, count: cfg.hiddenSize)
-                inklingDebugStats("L\(L) hidden", hiddenF32, count: cfg.hiddenSize, fp32: true)
-                let g = inkling.sharedGammas.contents()
-                    .bindMemory(to: Float.self, capacity: 2)
-                let w = outWeights.contents()
-                    .bindMemory(to: Float16.self, capacity: 8)
-                let idx = outIndices.contents()
-                    .bindMemory(to: UInt32.self, capacity: 6)
-                print("[inkling] L\(L) gammas=(\(g[0]), \(g[1])) " +
-                      "w=\((0..<8).map { Float(w[$0]) }) " +
-                      "idx=\((0..<6).map { idx[$0] })")
-            }
-            pending = PendingInkling(cb: routedCB,
-                                     attentionCB: cb,
-                                     phase1HitCB: phase1HitCB)
-            if Self.inklingSyncMode {
-                finishPending(pending!, waitIfNeeded: true)
-                pending = nil
-            }
-            if L == Self.inklingStopLayer,
-               Self.inklingStopPosition < 0 || Self.inklingStopPosition == position {
-                finishPending(pending!, waitIfNeeded: true)
-                return
-            }
-        }
-        if let p = pending { finishPending(p, waitIfNeeded: true); pending = nil }
-
-        if emitHead {
-            let fNorm = model.finalNorm
-            let lm = model.lmHead
-            let validVocab = UInt32(cfg.unpaddedVocabSize > 0
-                ? cfg.unpaddedVocabSize : cfg.vocabSize)
-            let muP = Float(1.0 / cfg.logitsWidthMultiplier)
-            if useFusedGreedyHead && outputMode == .greedyIfAvailable {
-                // Greedy argmax is invariant to the positive muP scale, so
-                // only the vocab truncation matters. The final norm runs from
-                // the FP32 stream first; the fused chain then consumes the
-                // pre-normed row via unit gains (fNorm already applied).
-                inkling.resetNonFiniteLogitCount()
-                runSync { cb in
-                    inkling.encodeRMSF32(commandBuffer: cb, x: hiddenF32,
-                                         weight: fNorm.buffer,
-                                         weightOffset: Int(fNorm.offset),
-                                         out: self.normed, d: D, eps: eps)
-                    self.int4.encode(commandBuffer: cb,
-                                     weights: lm.buffer, weightsOffset: Int(lm.offset),
-                                     scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
-                                     biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
-                                     x: self.normed, y: logits,
-                                     m: validVocab, n: D)
-                    inkling.encodeHeadEpilogue(commandBuffer: cb,
-                                               logits: logits,
-                                               scale: muP,
-                                               validVocab: validVocab,
-                                               totalVocab: UInt32(self.cfg.vocabSize))
-                }
-                try checkFiniteLogits(inkling, position: position)
-                // Argmax on CPU over the truncated logits (bring-up path;
-                // the fused-head chain is FP16-hidden and not yet FP32-aware).
-                //
-                // `best` starts at index -1, not 0: a NaN fails every `>`
-                // comparison, so seeding at index 0 made an all-NaN row return
-                // token 0 ("!") as if it had won. The guard above already
-                // throws on that row; this keeps the invariant local.
-                let lp = logits.contents()
-                    .bindMemory(to: Float16.self, capacity: Int(validVocab))
-                var best: (Int, Float) = (-1, -.infinity)
-                for i in 0..<Int(validVocab) {
-                    let v = Float(lp[i])
-                    if v > best.1 { best = (i, v) }
-                }
-                guard best.0 >= 0 else {
-                    throw InklingHeadError.noFiniteLogit(position: position)
-                }
-                lastGreedyToken = UInt32(best.0)
-            } else {
-                inkling.resetNonFiniteLogitCount()
-                runSync { cb in
-                    inkling.encodeRMSF32(commandBuffer: cb, x: hiddenF32,
-                                         weight: fNorm.buffer,
-                                         weightOffset: Int(fNorm.offset),
-                                         out: self.normed, d: D, eps: eps)
-                    self.int4.encode(commandBuffer: cb,
-                                     weights: lm.buffer, weightsOffset: Int(lm.offset),
-                                     scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
-                                     biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
-                                     x: self.normed, y: logits,
-                                     m: validVocab, n: D)
-                    inkling.encodeHeadEpilogue(commandBuffer: cb,
-                                               logits: logits,
-                                               scale: muP,
-                                               validVocab: validVocab,
-                                               totalVocab: UInt32(self.cfg.vocabSize))
-                }
-                try checkFiniteLogits(inkling, position: position)
-                if Self.inklingDebugEnabled {
-                    inklingDebugStats("head normed", normed, count: cfg.hiddenSize)
-                    let lp = logits.contents()
-                        .bindMemory(to: Float16.self, capacity: Int(validVocab))
-                    var top: [(Int, Float)] = []
-                    for i in 0..<Int(validVocab) {
-                        let v = Float(lp[i])
-                        if top.count < 8 {
-                            top.append((i, v)); top.sort { $0.1 > $1.1 }
-                        } else if v > top[7].1 {
-                            top[7] = (i, v); top.sort { $0.1 > $1.1 }
-                        }
-                    }
-                    print("[inkling] head top8 = \(top)")
-                }
-            }
-        }
-
-        kv.advance()
-    }
-
-    /// Layer-major batched prefill for Inkling. The chunk's tokens advance
-    /// through one layer at a time; within a MoE layer the routed experts are
-    /// processed EXPERT-major — each unique expert in the chunk's routing is
-    /// streamed once and applied to every token routed to it — so cold-cache
-    /// expert I/O amortizes over the chunk instead of being paid per token
-    /// (~3.4 GB/token when sequential). Attention, projections, norms, routing,
-    /// and fixed-width short convolutions operate on whole chunks; Apple10
-    /// attention switches to cooperative QK/PV tiles after the 512-token
-    /// crossover while preserving both linear and wrapped-ring KV layouts.
-    private func prefillInklingChunk(tokens: ArraySlice<Int32>,
-                                     startPosition: Int,
-                                     emitHead: Bool,
-                                     outputMode: PrefillOutputMode,
-                                     into logits: MTLBuffer) async throws {
-        guard let inkling,
-              let hiddenChunk = inklingHiddenChunk,
-              let routedXChunk = inklingRoutedXChunk,
-              let qChunk = inklingQChunk,
-              let kChunk = inklingKChunk,
-              let vChunk = inklingVChunk,
-              let relChunk = inklingRelChunk,
-              let attentionChunk = inklingAttentionChunk,
-              let routerLogitsChunk = inklingRouterLogitsChunk,
-              let idxChunk = inklingIdxChunk,
-              let wChunk = inklingWChunk,
-              let gammaChunk = inklingGammaChunk,
-              let accChunk = inklingAccChunk,
-              let pairTokens = inklingPairTokens,
-              let pairWeights = inklingPairWeights,
-              let actScratch = inklingExpertActScratch,
-              let prefillGLU = inklingPrefillGLU,
-              let kv else {
-            preconditionFailure("Inkling prefill state missing")
-        }
-        let N = tokens.count
-        precondition(N <= inklingChunkCapacity,
-                     "chunk \(N) exceeds capacity \(inklingChunkCapacity)")
-        let D = UInt32(cfg.hiddenSize)
-        let Dh = cfg.hiddenSize
-        let eps: Float = 1e-6
-        let qDim = UInt32(cfg.numHeads * cfg.headDim)
-        let kvDim = UInt32(cfg.numKVHeads * cfg.headDim)
-        let sconvK = UInt32(cfg.sconvKernelSize)
-        let rel = cfg.relativePosition
-        let toks = Array(tokens)
-
-        func hOff(_ i: Int) -> Int { i * Dh * 4 }
-        func xOff(_ i: Int) -> Int { i * Dh * 2 }
-
-        // Inkling's prefill projections are contiguous `[token, output]`
-        // matrices. Their shapes favor the packed block QMM in the measured
-        // Inkling path. This replaces N decode GEMV dispatches with one matrix
-        // dispatch.
-        func encodeProjection(_ cb: MTLCommandBuffer,
-                              _ view: TensorView,
-                              x: MTLBuffer,
-                              y: MTLBuffer,
-                              rows: Int,
-                              columns: Int) {
-            prefillQMM.encode(commandBuffer: cb,
-                              weights: view.buffer,
-                              weightsOffset: Int(view.offset),
-                              scales: view.buffer,
-                              scalesOffset: Int(view.scaleOffset),
-                              biases: view.buffer,
-                              biasesOffset: Int(view.biasOffset),
-                              x: x,
-                              y: y,
-                              t: N,
-                              n: rows,
-                              k: columns)
-        }
-
-        func encodeKVWrite(_ cb: MTLCommandBuffer,
-                           layer: Int,
-                           key: MTLBuffer,
-                           value: MTLBuffer) {
-            let capacity = kv.capacity(layer: layer)
-            let physicalStart = startPosition % capacity
-            let firstCount = min(N, capacity - physicalStart)
-            let bytesPerRow = Int(kvDim) * MemoryLayout<Float16>.stride
-            guard let blit = cb.makeBlitCommandEncoder() else {
-                preconditionFailure("Inkling prefill KV blit encoder unavailable")
-            }
-            let keyFirst = kv.kRange(layer: layer,
-                                     start: startPosition,
-                                     count: firstCount)
-            let valueFirst = kv.vRange(layer: layer,
-                                       start: startPosition,
-                                       count: firstCount)
-            blit.copy(from: key, sourceOffset: 0,
-                      to: keyFirst.buffer, destinationOffset: keyFirst.offset,
-                      size: firstCount * bytesPerRow)
-            blit.copy(from: value, sourceOffset: 0,
-                      to: valueFirst.buffer, destinationOffset: valueFirst.offset,
-                      size: firstCount * bytesPerRow)
-            if firstCount < N {
-                let secondCount = N - firstCount
-                let secondStart = startPosition + firstCount
-                let keySecond = kv.kRange(layer: layer,
-                                          start: secondStart,
-                                          count: secondCount)
-                let valueSecond = kv.vRange(layer: layer,
-                                            start: secondStart,
-                                            count: secondCount)
-                blit.copy(from: key, sourceOffset: firstCount * bytesPerRow,
-                          to: keySecond.buffer, destinationOffset: keySecond.offset,
-                          size: secondCount * bytesPerRow)
-                blit.copy(from: value, sourceOffset: firstCount * bytesPerRow,
-                          to: valueSecond.buffer, destinationOffset: valueSecond.offset,
-                          size: secondCount * bytesPerRow)
-            }
-            blit.endEncoding()
-        }
-
-        // Seed the chunk's FP32 hidden rows: embed + embed_norm per token.
-        let emb = model.embedding
-        let embedNorm = model.embedNorm
-        runSync { cb in
-            for (i, t) in toks.enumerated() {
-                embedInt4.encode(commandBuffer: cb,
-                                 table:  emb.buffer, tableOffset:  Int(emb.offset),
-                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                                 out: hidden,
-                                 tokenId: UInt32(bitPattern: t),
-                                 d: D, outScale: 1.0)
-                rms.encodeBF16W(commandBuffer: cb, x: hidden,
-                                weight: embedNorm.buffer,
-                                weightOffset: Int(embedNorm.offset),
-                                out: hidden, d: D, eps: eps)
-                inkling.encodeF16ToF32(commandBuffer: cb, src: hidden,
-                                       dst: hiddenChunk, dstOffset: hOff(i),
-                                       count: D)
-            }
-        }
-
-        for L in 0..<cfg.numLayers {
-            let isFull = cfg.fullAttentionLayerMask[L] == 1
-            let isDense = L < cfg.numDenseLayers
-            let conv = inklingConvStates[L]
-            let inNorm = try model.inputNorm(layer: L)
-            try prefillWillEncodeLayer?(L)
-            try Task.checkCancellation()
-            let mlpNorm = try model.postAttnNorm(layer: L)
-            let q = try model.inklingWqDu(layer: L)
-            let k = try model.inklingWkDv(layer: L)
-            let v = try model.inklingWvDv(layer: L)
-            let o = try model.inklingWoUd(layer: L)
-            let wr = try model.inklingWrDu(layer: L)
-            let relProj = try model.inklingRelProj(layer: L)
-            let qNorm = try model.inklingQNorm(layer: L)
-            let kNorm = try model.inklingKNorm(layer: L)
-            let kSconvW = try model.inklingKSconv(layer: L)
-            let vSconvW = try model.inklingVSconv(layer: L)
-            let attnSconvW = try model.inklingAttnSconv(layer: L)
-            let mlpSconvW = try model.inklingMlpSconv(layer: L)
-
-            let cbA = ctx.queue.makeCommandBuffer()!
-            if !isDense, let blit = cbA.makeBlitCommandEncoder() {
-                blit.fill(buffer: accChunk, range: 0..<(N * Dh * 4), value: 0)
-                blit.endEncoding()
-            }
-            inkling.encodeRMSF32Prefill(commandBuffer: cbA,
-                                        x: hiddenChunk,
-                                        weight: inNorm.buffer,
-                                        weightOffset: Int(inNorm.offset),
-                                        out: routedXChunk,
-                                        d: D, rows: UInt32(N), eps: eps)
-            encodeProjection(cbA, q, x: routedXChunk, y: qChunk,
-                             rows: Int(qDim), columns: Dh)
-            encodeProjection(cbA, k, x: routedXChunk, y: kChunk,
-                             rows: Int(kvDim), columns: Dh)
-            encodeProjection(cbA, v, x: routedXChunk, y: vChunk,
-                             rows: Int(kvDim), columns: Dh)
-            encodeProjection(cbA, wr, x: routedXChunk, y: relChunk,
-                             rows: rel.projDim, columns: Dh)
-            inkling.encodeSconvPrefill(commandBuffer: cbA,
-                                       x: kChunk, state: conv.k,
-                                       weight: kSconvW.buffer,
-                                       weightOffset: Int(kSconvW.offset),
-                                       out: kChunk,
-                                       channels: kvDim, rows: UInt32(N))
-            inkling.encodeSconvPrefill(commandBuffer: cbA,
-                                       x: vChunk, state: conv.v,
-                                       weight: vSconvW.buffer,
-                                       weightOffset: Int(vSconvW.offset),
-                                       out: vChunk,
-                                       channels: kvDim, rows: UInt32(N))
-            inkling.encodeQKNormPrefill(
-                commandBuffer: cbA,
-                q: qChunk, k: kChunk,
-                qWeight: qNorm.buffer, qWeightOffset: Int(qNorm.offset),
-                kWeight: kNorm.buffer, kWeightOffset: Int(kNorm.offset),
-                headDim: UInt32(cfg.headDim),
-                numQHeads: UInt32(cfg.numHeads),
-                numKVHeads: UInt32(cfg.numKVHeads),
-                rows: UInt32(N), eps: eps)
-            encodeKVWrite(cbA, layer: L, key: kChunk, value: vChunk)
-            let ringCapacity = kv.ringCapacity(layer: L)
-            let validCount = startPosition + N
-            let activeRing = !isFull && ringCapacity > 0 && validCount > ringCapacity
-                ? UInt32(ringCapacity) : 0
-            inkling.encodeAttentionPrefill(
-                commandBuffer: cbA,
-                q: qChunk,
-                k: kv.keyBuffer(layer: L, validTokenCount: validCount),
-                v: kv.valueBuffer(layer: L, validTokenCount: validCount),
-                rel: relChunk,
-                proj: relProj.buffer, projOffset: Int(relProj.offset),
-                out: attentionChunk,
-                headDim: UInt32(cfg.headDim),
-                numQHeads: UInt32(cfg.numHeads),
-                numKVHeads: UInt32(cfg.numKVHeads),
-                startPosition: UInt32(startPosition),
-                rows: UInt32(N),
-                slidingWindow: isFull ? 0 : UInt32(cfg.slidingWindow),
-                relExtent: UInt32(isFull ? rel.extent : cfg.slidingWindow),
-                dRel: UInt32(rel.dRel),
-                ringCapacity: activeRing,
-                logScalingFloor: UInt32(rel.logScalingFloor),
-                scale: Float(cfg.attentionScale),
-                logScalingAlpha: Float(rel.logScalingAlpha))
-            // Q is dead after attention, so reuse its chunk allocation for O.
-            encodeProjection(cbA, o, x: attentionChunk, y: qChunk,
-                             rows: Dh, columns: Int(qDim))
-            inkling.encodeSconvPrefillResidual(
-                commandBuffer: cbA,
-                x: qChunk, state: conv.attn,
-                weight: attnSconvW.buffer,
-                weightOffset: Int(attnSconvW.offset),
-                hidden: hiddenChunk,
-                channels: D, rows: UInt32(N))
-            inkling.encodeRMSF32Prefill(commandBuffer: cbA,
-                                        x: hiddenChunk,
-                                        weight: mlpNorm.buffer,
-                                        weightOffset: Int(mlpNorm.offset),
-                                        out: routedXChunk,
-                                        d: D, rows: UInt32(N), eps: eps)
-            if isDense {
-                for i in 0..<N {
-                    let proj = inklingDenseProjections[L]!
-                    let gain = model.inklingScalar(
-                        try model.inklingDenseGlobalScale(layer: L))
-                    try! shared.encode(commandBuffer: cbA,
-                                       x: routedXChunk, xOffset: xOff(i),
-                                       gate: proj.gate, up: proj.up, down: proj.down,
-                                       y: h2Buf,
-                                       scratchGate: denseScratchGate,
-                                       scratchUp: denseScratchUp,
-                                       scratchAct: denseScratchAct)
-                    inkling.encodeScale(commandBuffer: cbA, x: h2Buf,
-                                        by: gain, count: D)
-                    inkling.encodeSconvStepF32Out(commandBuffer: cbA,
-                                                  x: h2Buf, state: conv.mlp,
-                                                  weight: mlpSconvW.buffer,
-                                                  weightOffset: Int(mlpSconvW.offset),
-                                                  out: inklingDeltaF32!,
-                                                  channels: D, kernelSize: sconvK)
-                    inkling.encodeResidualAddF32Delta(commandBuffer: cbA,
-                                                      hidden: hiddenChunk,
-                                                      hiddenOffset: hOff(i),
-                                                      delta: inklingDeltaF32!,
-                                                      count: D)
-                }
-            } else {
-                let routerW = try model.router(layer: L)
-                let gateBias = try model.inklingGateBias(layer: L)
-                let gateScale = try model.inklingGateGlobalScale(layer: L)
-                inkling.encodeRouterPrefill(
-                    commandBuffer: cbA,
-                    weights: routerW.buffer,
-                    weightsOffset: Int(routerW.offset),
-                    hidden: routedXChunk,
-                    effectiveScale: effectiveScaleBuffers[L],
-                    logits: routerLogitsChunk,
-                    gateBias: gateBias.buffer,
-                    gateBiasOffset: Int(gateBias.offset),
-                    globalScale: gateScale.buffer,
-                    globalScaleOffset: Int(gateScale.offset),
-                    outIndices: idxChunk,
-                    outWeights: wChunk,
-                    gammasOut: gammaChunk,
-                    numRouted: UInt32(cfg.numExperts),
-                    numShared: UInt32(cfg.numSharedExperts),
-                    topK: UInt32(cfg.topKExperts),
-                    routeScale: Float(cfg.routedScalingFactor)
-                        / Self.inklingFFNPrescale,
-                    d: D,
-                    rows: UInt32(N))
-            }
-            cbA.commit()
-            waitForCompletion(cbA)
-            if isDense { continue }
-
-            // CPU: routing table for the whole chunk, then expert-major GLUs.
-            let idxPtr = idxChunk.contents().bindMemory(to: UInt32.self,
-                                                        capacity: N * 8)
-            let wPtr = wChunk.contents().bindMemory(to: Float16.self,
-                                                    capacity: N * 8)
-            let gPtr = gammaChunk.contents().bindMemory(to: Float.self,
-                                                        capacity: N * 2)
-            var expertTokens: [Int: [(Int, Float)]] = [:]
-            for i in 0..<N {
-                for s in 0..<cfg.topKExperts {
-                    let e = min(Int(idxPtr[i * 8 + s]), cfg.numExperts - 1)
-                    expertTokens[e, default: []].append((i, Float(wPtr[i * 8 + s])))
-                }
-            }
-            let routedOffsets = model.routedExpertOffsets(layer: L)
-            let F = UInt32(cfg.moeIntermediateSize)
-            // Flatten every (token, expert) pair into one expert-grouped list,
-            // uploaded once per chunk-layer. Each expert then costs two
-            // dispatches over its whole token set instead of three GEMVs per
-            // token: the v1 per-pair encoding spent ~250 us of dispatch
-            // overhead against ~17 us of bandwidth, and it dominated prefill.
-            //
-            // Shared experts come first, then routed experts in ascending id —
-            // the same accumulation order the per-pair path used, so the FP32
-            // sum per token is unchanged.
-            let tokPtr = pairTokens.contents().bindMemory(to: UInt32.self,
-                                                          capacity: N * 8)
-            let wgtPtr = pairWeights.contents().bindMemory(to: Float.self,
-                                                           capacity: N * 8)
-            struct ExpertPairRange { let expert: Int; let start: Int; let count: Int }
-            var sharedRanges: [ExpertPairRange] = []
-            var routedRanges: [ExpertPairRange] = []
-            var cursor = 0
-            for s2 in 0..<cfg.numSharedExperts {
-                let start = cursor
-                for i in 0..<N {
-                    tokPtr[cursor] = UInt32(i)
-                    wgtPtr[cursor] = gPtr[i * 2 + s2]
-                    cursor += 1
-                }
-                sharedRanges.append(ExpertPairRange(expert: s2, start: start,
-                                                    count: N))
-            }
-            for (e, pairs) in expertTokens.sorted(by: { $0.key < $1.key }) {
-                let start = cursor
-                for (i, w) in pairs {
-                    tokPtr[cursor] = UInt32(i)
-                    wgtPtr[cursor] = w
-                    cursor += 1
-                }
-                routedRanges.append(ExpertPairRange(expert: e, start: start,
-                                                    count: pairs.count))
-            }
-
-            func expertParams(_ range: ExpertPairRange,
-                              base: Int) -> InklingPrefillExpertGLU.Params {
-                InklingPrefillExpertGLU.Params(
-                    d: D, f: F,
-                    pairStart: UInt32(range.start),
-                    pairCount: UInt32(range.count),
-                    hiddenStride: D,
-                    gateWOff: UInt32(base) + routedOffsets.gateWOff,
-                    gateSOff: UInt32(base) + routedOffsets.gateSOff,
-                    gateBOff: UInt32(base) + routedOffsets.gateBOff,
-                    upWOff: UInt32(base) + routedOffsets.upWOff,
-                    upSOff: UInt32(base) + routedOffsets.upSOff,
-                    upBOff: UInt32(base) + routedOffsets.upBOff,
-                    downWOff: UInt32(base) + routedOffsets.downWOff,
-                    downSOff: UInt32(base) + routedOffsets.downSOff,
-                    downBOff: UInt32(base) + routedOffsets.downBOff)
-            }
-
-            // Shared experts (resident; per-token gammas as the pair weights).
-            // Their projections are separate tensors rather than one packed
-            // blob, so the byte offsets come from the views directly.
-            let sharedCB = ctx.queue.makeCommandBuffer()!
-            for range in sharedRanges {
-                let projs = inklingSharedProjections[L][range.expert]
-                var p = InklingPrefillExpertGLU.Params(
-                    d: D, f: F,
-                    pairStart: UInt32(range.start),
-                    pairCount: UInt32(range.count),
-                    hiddenStride: D,
-                    gateWOff: UInt32(projs.gate.weightsOffset),
-                    gateSOff: UInt32(projs.gate.scalesOffset),
-                    gateBOff: UInt32(projs.gate.biasesOffset),
-                    upWOff: UInt32(projs.up.weightsOffset),
-                    upSOff: UInt32(projs.up.scalesOffset),
-                    upBOff: UInt32(projs.up.biasesOffset),
-                    downWOff: UInt32(projs.down.weightsOffset),
-                    downSOff: UInt32(projs.down.scalesOffset),
-                    downBOff: UInt32(projs.down.biasesOffset))
-                p.pairStart = UInt32(range.start)
-                prefillGLU.encode(commandBuffer: sharedCB,
-                                  hidden: routedXChunk,
-                                  pairTokens: pairTokens,
-                                  pairWeights: pairWeights,
-                                  expertBuffer: projs.gate.weights,
-                                  expertOffset: 0,
-                                  act: actScratch,
-                                  acc: accChunk,
-                                  params: p)
-            }
-            sharedCB.commit()
-            waitForCompletion(sharedCB)
-
-            // Routed experts, each streamed once for the whole chunk.
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let breakdown = Self.prefillBreakdownEnabled
-            func now() -> UInt64 {
-                breakdown ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
-            }
-            // Depth-1 pipeline: while the GPU runs expert e's GLU, the CPU
-            // plans and preads expert e+1 into slots the in-flight buffer
-            // does not touch (`avoidingSlots`), so the fetch overlaps GPU
-            // work. `acc`/`act` hazards need no explicit sync: consecutive
-            // buffers on the serial queue are hazard-tracked on those
-            // resources, so expert accumulation order — and therefore the
-            // output — is byte-identical to the serialized loop. When slot
-            // pressure leaves no avoiding plan (or the pipeline is switched
-            // off), the next iteration drains first and demand-fetches,
-            // which *is* the old serialized behavior.
-            let tileScheduler = PrefillRoutedTileScheduler(
-                config: Self.prefillRoutedTileSchedulerConfig)
-            var pendingExpertCB: (cb: MTLCommandBuffer, slots: [Int])?
-            var prefetched: (expert: Int, plan: RoutedExpertFetchPlan,
-                             blob: TensorView)?
-            // Error-path backstop: any throw below (a failed prefetch pread,
-            // a drain surfacing a GPU error) must not leave the in-flight
-            // buffer running against the persistent act/acc scratch — an
-            // immediate reset or retry would race it. The success path
-            // drains and clears `pendingExpertCB`, so this no-ops there.
-            defer {
-                if let pending = pendingExpertCB {
-                    waitForCompletion(pending.cb)
-                    pendingExpertCB = nil
-                }
-            }
-            func drainPendingExpertCB() throws {
-                guard let pending = pendingExpertCB else { return }
-                pendingExpertCB = nil
-                let tDrain = now()
-                waitForCompletion(pending.cb)
-                if breakdown { Self.prefillDrainNanos &+= now() - tDrain }
-                if let error = pending.cb.error { throw error }
-            }
-            for (index, range) in routedRanges.enumerated() {
-                try Task.checkCancellation()
-                let t0 = now()
-                let blob: TensorView
-                let blobSlots: [Int]
-                if let ready = prefetched, ready.expert == range.expert {
-                    blob = ready.blob
-                    blobSlots = ready.plan.assignedSlots
-                    prefetched = nil
-                } else {
-                    prefetched = nil
-                    try drainPendingExpertCB()
-                    guard let plan = try model.planRoutedExperts(
-                        layer: L, experts: [range.expert]) else {
-                        throw ModelError.routedExpertPlanUnavailable(layer: L)
-                    }
-                    blob = try await model.fetchRoutedExperts(plan: plan)[0]
-                    blobSlots = plan.assignedSlots
-                }
-                let t1 = now()
-                let cb = ctx.queue.makeCommandBuffer()!
-                prefillGLU.encode(commandBuffer: cb,
-                                  hidden: routedXChunk,
-                                  pairTokens: pairTokens,
-                                  pairWeights: pairWeights,
-                                  expertBuffer: blob.buffer,
-                                  expertOffset: 0,
-                                  act: actScratch,
-                                  acc: accChunk,
-                                  params: expertParams(range, base: Int(blob.offset)))
-                cb.commit()
-                let t2 = now()
-                if breakdown {
-                    Self.prefillFetchNanos &+= t1 - t0
-                    Self.prefillEncodeNanos &+= t2 - t1
-                    Self.prefillExpertCount &+= 1
-                }
-                try drainPendingExpertCB()
-                pendingExpertCB = (cb, blobSlots)
-
-                if Self.inklingPrefillPipelineEnabled,
-                   index + 1 < routedRanges.count {
-                    let nextExpert = routedRanges[index + 1].expert
-                    let nextPlan = try model.planRoutedExpertsIfPossible(
-                        layer: L,
-                        experts: [nextExpert],
-                        avoidingSlots: Set(blobSlots))
-                    let decision = tileScheduler.decide(
-                        PrefillRoutedTileSchedulerInput(
-                            hasPendingTile: true,
-                            pendingAssignedSlots: blobSlots,
-                            avoidingSlotPlanAvailable: nextPlan != nil))
-                    if case .prefetchNext = decision, let nextPlan {
-                        let tFetch = now()
-                        let nextBlob =
-                            try await model.fetchRoutedExperts(plan: nextPlan)[0]
-                        if breakdown { Self.prefillFetchNanos &+= now() - tFetch }
-                        prefetched = (nextExpert, nextPlan, nextBlob)
-                    }
-                }
-            }
-            try drainPendingExpertCB()
-            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-
-            // Tail: one causal channel-wise dispatch replaces N narrowing,
-            // short-conv, and residual-add dispatch triplets.
-            let cbC = ctx.queue.makeCommandBuffer()!
-            inkling.encodeF32ToF16(commandBuffer: cbC,
-                                   src: accChunk, srcOffset: 0,
-                                   dst: qChunk, count: UInt32(N * Dh))
-            inkling.encodeSconvPrefillResidual(
-                commandBuffer: cbC,
-                x: qChunk, state: conv.mlp,
-                weight: mlpSconvW.buffer,
-                weightOffset: Int(mlpSconvW.offset),
-                hidden: hiddenChunk,
-                channels: D, rows: UInt32(N),
-                scale: Self.inklingFFNPrescale)
-            cbC.commit()
-            waitForCompletion(cbC)
-        }
-
-        if emitHead {
-            let fNorm = model.finalNorm
-            let lm = model.lmHead
-            let validVocab = UInt32(cfg.unpaddedVocabSize > 0
-                ? cfg.unpaddedVocabSize : cfg.vocabSize)
-            let muP = Float(1.0 / cfg.logitsWidthMultiplier)
-            inkling.resetNonFiniteLogitCount()
-            runSync { cb in
-                inkling.encodeRMSF32(commandBuffer: cb,
-                                     x: hiddenChunk, xOffset: hOff(N - 1),
-                                     weight: fNorm.buffer,
-                                     weightOffset: Int(fNorm.offset),
-                                     out: self.normed, d: D, eps: eps)
-                self.int4.encode(commandBuffer: cb,
-                                 weights: lm.buffer, weightsOffset: Int(lm.offset),
-                                 scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
-                                 biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
-                                 x: self.normed, y: logits,
-                                 m: validVocab, n: D)
-                inkling.encodeHeadEpilogue(commandBuffer: cb,
-                                           logits: logits,
-                                           scale: muP,
-                                           validVocab: validVocab,
-                                           totalVocab: UInt32(self.cfg.vocabSize))
-            }
-            try checkFiniteLogits(inkling, position: startPosition + N - 1)
-            if useFusedGreedyHead && outputMode == .greedyIfAvailable {
-                let lp = logits.contents()
-                    .bindMemory(to: Float16.self, capacity: Int(validVocab))
-                var best: (Int, Float) = (-1, -.infinity)
-                for i in 0..<Int(validVocab) {
-                    let vl = Float(lp[i])
-                    if vl > best.1 { best = (i, vl) }
-                }
-                guard best.0 >= 0 else {
-                    throw InklingHeadError.noFiniteLogit(
-                        position: startPosition + N - 1)
-                }
-                lastGreedyToken = UInt32(best.0)
-            }
-        }
-        kv.advance(by: N)
-    }
 
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.
     /// Reads `normed`, updates the layer's recurrent state + conv tail in
@@ -5117,723 +3394,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     x: attnOut, y: oOut, m: D, n: qDim)
     }
 
-    /// DeepSeek-V4 decode: 4 mHC residual streams, shared-KV MQA attention
-    /// over [window ring ‖ compressed entries], softmax-gated window
-    /// compressors, lightning-indexer selection past `index_topk` entries,
-    /// sqrtsoftplus/hash top-6 routing, and INT2 streamed experts. Mirrors
-    /// `produceToken`'s cb1 → readback → I/O-overlap → routed-cb pipeline.
-    private func produceTokenDSV4(token: Int32,
-                                  position: Int,
-                                  into logits: MTLBuffer,
-                                  emitHead: Bool,
-                                  outputMode: PrefillOutputMode) async throws {
-        guard let dsv4, let moeDSV4, let dsv4State,
-              let streams = dsv4Streams, let streamsAlt = dsv4StreamsAlt,
-              let qaBuf = dsv4QA, let oGrouped = dsv4OGrouped,
-              let hcPreA = dsv4HCPreA, let hcPostA = dsv4HCPostA,
-              let hcCombA = dsv4HCCombA,
-              let hcPreF = dsv4HCPreF, let hcPostF = dsv4HCPostF,
-              let hcCombF = dsv4HCCombF,
-              let indexerQ = dsv4IndexerQ, let indexerW = dsv4IndexerW,
-              let indexerScores = dsv4IndexerScores,
-              let selected = dsv4Selected else {
-            preconditionFailure("DeepSeek-V4 decode without DSV4 kernels")
-        }
-        guard model.routedExpertWeightBits == 2 else {
-            throw PrefillError.prefillCursorMismatch(
-                "DeepSeek-V4 runtime supports 2-bit routed experts; manifest says \(model.routedExpertWeightBits)")
-        }
-        let D = UInt32(cfg.hiddenSize)
-        let FmoE = UInt32(cfg.moeIntermediateSize)
-        let FShared = UInt32(cfg.intermediateSize)
-        let eps: Float = 1e-6
-        let ca = cfg.compressedAttention
-        let hc = cfg.hyperConnections
-        let headDim = cfg.fullHeadDim
-        let numHeads = cfg.numHeads
-        let fp16 = MemoryLayout<Float16>.stride
-
-        struct PendingRoutedCommand {
-            let cb: MTLCommandBuffer
-            /// The layer's attention+router+shared-expert buffer. Always
-            /// completed before `cb` (same queue, committed first); retained
-            /// only so its error surfaces.
-            let attentionCB: MTLCommandBuffer?
-            let phase1HitCB: MTLCommandBuffer?
-            let encodeAndCommitNanos: UInt64
-        }
-        var pendingRouted: PendingRoutedCommand?
-        func finishPending(_ pending: PendingRoutedCommand, waitIfNeeded: Bool) {
-            if waitIfNeeded {
-                if let attentionCB = pending.attentionCB { waitForCompletion(attentionCB) }
-                if let hitCB = pending.phase1HitCB { waitForCompletion(hitCB) }
-                waitForCompletion(pending.cb)
-            } else if let err = pending.cb.error {
-                print("CB error: \(err)")
-            }
-            totalCb2Nanos &+= pending.encodeAndCommitNanos
-        }
-        func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
-            let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-            for i in 0..<slots.count { ptr[i] = slots[i] }
-        }
-        func gemv(_ cb: MTLCommandBuffer, _ view: TensorView,
-                  x: MTLBuffer, xOffset: Int = 0,
-                  y: MTLBuffer, yOffset: Int = 0,
-                  m: Int, n: Int) {
-            int4.encode(commandBuffer: cb,
-                        weights: view.buffer, weightsOffset: Int(view.offset),
-                        scales: view.buffer, scalesOffset: Int(view.scaleOffset),
-                        biases: view.buffer, biasesOffset: Int(view.biasOffset),
-                        x: x, xOffset: xOffset,
-                        y: y, yOffset: yOffset,
-                        m: UInt32(m), n: UInt32(n))
-        }
-
-        // Embed, then broadcast into the residual streams.
-        let emb = model.embedding
-        runSync { cb in
-            embedInt4.encode(commandBuffer: cb,
-                             table: emb.buffer, tableOffset: Int(emb.offset),
-                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                             out: hidden,
-                             tokenId: UInt32(bitPattern: token),
-                             d: D,
-                             outScale: 1.0)
-            dsv4.encodeBroadcastStreams(commandBuffer: cb, x: hidden,
-                                        streams: streams,
-                                        hcMult: hc.mult, hidden: cfg.hiddenSize)
-        }
-
-        for L in 0..<cfg.numLayers {
-            let isCSA = cfg.layerIsCSA(L)
-            let isHCA = cfg.layerIsHCA(L)
-            let isCompressed = isCSA || isHCA
-            let ropeKind: DSV4Kernels.RopeKind = isCompressed ? .compress : .main
-            var counters = dsv4State.counters[L]
-
-            let inNorm = try model.inputNorm(layer: L)
-            let postAttn = try model.postAttnNorm(layer: L)
-            let qaView = try model.dsv4QAProj(layer: L)
-            let qaNormView = try model.dsv4QANorm(layer: L)
-            let qbView = try model.dsv4QBProj(layer: L)
-            let kvView = try model.dsv4KVProj(layer: L)
-            let kvNormView = try model.dsv4KVNorm(layer: L)
-            let oaView = try model.dsv4OAProj(layer: L)
-            let obView = try model.dsv4OBProj(layer: L)
-            let sinksView = try model.dsv4Sinks(layer: L)
-            let attnFn = try model.dsv4AttnHCFn(layer: L)
-            let attnBase = try model.dsv4AttnHCBase(layer: L)
-            let attnScale3 = try model.dsv4AttnHCScale(layer: L)
-            let ffnFn = try model.dsv4FFNHCFn(layer: L)
-            let ffnBase = try model.dsv4FFNHCBase(layer: L)
-            let ffnScale3 = try model.dsv4FFNHCScale(layer: L)
-            let routerW = try model.router(layer: L)
-            let sharedProj = sharedExpertProjections[L]
-
-            let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            var cb = ctx.queue.makeCommandBuffer()!
-
-            // Attention-site mHC: weights + collapse, then the input norm.
-            dsv4.encodeHCWeights(commandBuffer: cb, streams: streams,
-                                 fn: attnFn.buffer, fnOffset: Int(attnFn.offset),
-                                 base: attnBase.buffer, baseOffset: Int(attnBase.offset),
-                                 scale: attnScale3.buffer, scaleOffset: Int(attnScale3.offset),
-                                 outPre: hcPreA, outPost: hcPostA, outComb: hcCombA,
-                                 hcMult: hc.mult, hidden: cfg.hiddenSize,
-                                 sinkhornIters: hc.sinkhornIters,
-                                 hcEps: Float(hc.eps), rmsEps: eps)
-            dsv4.encodeHCCollapse(commandBuffer: cb, streams: streams,
-                                  pre: hcPreA, x: hidden,
-                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
-            rms.encodeBF16W(commandBuffer: cb, x: hidden,
-                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
-                            out: normed, d: D, eps: eps)
-
-            // Q path: low-rank down + norm + up, per-head unweighted norm,
-            // trailing interleaved RoPE.
-            gemv(cb, qaView, x: normed, y: qaBuf, m: ca.qLoraRank, n: cfg.hiddenSize)
-            rms.encodeBF16W(commandBuffer: cb, x: qaBuf,
-                            weight: qaNormView.buffer,
-                            weightOffset: Int(qaNormView.offset),
-                            out: qaBuf, d: UInt32(ca.qLoraRank), eps: eps)
-            gemv(cb, qbView, x: qaBuf, y: qScratch,
-                 m: numHeads * headDim, n: ca.qLoraRank)
-            rms.encodeNoScalePerHead(commandBuffer: cb, x: qScratch,
-                                     out: qScratch,
-                                     headDim: UInt32(headDim),
-                                     numHeads: numHeads, eps: eps)
-            dsv4.encodeRope(commandBuffer: cb, x: qScratch,
-                            numHeads: numHeads, headDim: headDim,
-                            ropeDim: ca.ropeHeadDim,
-                            position: position, rope: ropeKind, direction: 1)
-
-            // Shared K=V row straight into the window ring slot, then norm +
-            // RoPE in place.
-            let slot = dsv4State.windowSlot(position: position)
-            let ring = dsv4State.windowKV[L]
-            let slotOffset = slot * headDim * fp16
-            gemv(cb, kvView, x: normed, y: ring, yOffset: slotOffset,
-                 m: headDim, n: cfg.hiddenSize)
-            rms.encodeBF16W(commandBuffer: cb, x: ring, xOffset: slotOffset,
-                            weight: kvNormView.buffer,
-                            weightOffset: Int(kvNormView.offset),
-                            out: ring, outOffset: slotOffset,
-                            d: UInt32(headDim), eps: eps)
-            dsv4.encodeRope(commandBuffer: cb, x: ring, xOffset: slotOffset,
-                            numHeads: 1, headDim: headDim,
-                            ropeDim: ca.ropeHeadDim,
-                            position: position, rope: ropeKind, direction: 1)
-
-            // Compressor: project this token's kv/gate rows into the pending
-            // window; emit one compressed entry when the window fills. The
-            // emitted entry is visible to this token's attention (the
-            // reference runs the compressor before core attention).
-            var willEmit = false
-            var willEmitIndexer = false
-            if isCompressed {
-                let rate = isCSA ? ca.csaCompressRate : ca.hcaCompressRate
-                let rowWidth = isCSA ? 2 * headDim : headDim
-                let compKV = try model.dsv4CompressorKVProj(layer: L)
-                let compGate = try model.dsv4CompressorGateProj(layer: L)
-                let compNorm = try model.dsv4CompressorKVNorm(layer: L)
-                let compBias = try model.dsv4CompressorPositionBias(layer: L)
-                // The GEMVs land directly in the pending window at this
-                // token's row offset — no staging row, no blit.
-                let rowOffset = counters.pendingRows * rowWidth * fp16
-                gemv(cb, compKV, x: normed,
-                     y: dsv4State.pendingKV[L]!, yOffset: rowOffset,
-                     m: rowWidth, n: cfg.hiddenSize)
-                gemv(cb, compGate, x: normed,
-                     y: dsv4State.pendingGate[L]!, yOffset: rowOffset,
-                     m: rowWidth, n: cfg.hiddenSize)
-                willEmit = counters.pendingRows + 1 == rate
-                if willEmit {
-                    let entry = counters.compressedEntries
-                    dsv4.encodeCompressEmit(
-                        commandBuffer: cb,
-                        pendingKV: dsv4State.pendingKV[L]!,
-                        pendingGate: dsv4State.pendingGate[L]!,
-                        priorCaKV: dsv4State.priorCaKV[L] ?? dsv4State.pendingKV[L]!,
-                        priorCaGate: dsv4State.priorCaGate[L] ?? dsv4State.pendingGate[L]!,
-                        positionBias: compBias.buffer,
-                        positionBiasOffset: Int(compBias.offset),
-                        normWeight: compNorm.buffer,
-                        normWeightOffset: Int(compNorm.offset),
-                        outEntry: dsv4State.compressedKV[L]!,
-                        outEntryOffset: entry * headDim * fp16,
-                        nextPriorCaKV: dsv4State.priorCaKV[L] ?? dsv4State.pendingKV[L]!,
-                        nextPriorCaGate: dsv4State.priorCaGate[L] ?? dsv4State.pendingGate[L]!,
-                        rate: rate, dim: headDim, dual: isCSA,
-                        hasPrior: counters.hasPrior, eps: eps)
-                    dsv4.encodeRope(commandBuffer: cb,
-                                    x: dsv4State.compressedKV[L]!,
-                                    xOffset: entry * headDim * fp16,
-                                    numHeads: 1, headDim: headDim,
-                                    ropeDim: ca.ropeHeadDim,
-                                    position: entry * rate,
-                                    rope: .compress,
-                                    direction: 1)
-                }
-                if isCSA {
-                    let idxRate = ca.csaCompressRate
-                    let idxDim = ca.indexHeadDim
-                    let idxKV = try model.dsv4IndexerKVProj(layer: L)
-                    let idxGate = try model.dsv4IndexerGateProj(layer: L)
-                    let idxNorm = try model.dsv4IndexerKVNorm(layer: L)
-                    let idxBias = try model.dsv4IndexerPositionBias(layer: L)
-                    let idxRowOffset = counters.indexerPendingRows * 2 * idxDim * fp16
-                    gemv(cb, idxKV, x: normed,
-                         y: dsv4State.indexerPendingKV[L]!, yOffset: idxRowOffset,
-                         m: 2 * idxDim, n: cfg.hiddenSize)
-                    gemv(cb, idxGate, x: normed,
-                         y: dsv4State.indexerPendingGate[L]!, yOffset: idxRowOffset,
-                         m: 2 * idxDim, n: cfg.hiddenSize)
-                    willEmitIndexer = counters.indexerPendingRows + 1 == idxRate
-                    if willEmitIndexer {
-                        let entry = counters.indexerEntries
-                        dsv4.encodeCompressEmit(
-                            commandBuffer: cb,
-                            pendingKV: dsv4State.indexerPendingKV[L]!,
-                            pendingGate: dsv4State.indexerPendingGate[L]!,
-                            priorCaKV: dsv4State.indexerPriorCaKV[L]!,
-                            priorCaGate: dsv4State.indexerPriorCaGate[L]!,
-                            positionBias: idxBias.buffer,
-                            positionBiasOffset: Int(idxBias.offset),
-                            normWeight: idxNorm.buffer,
-                            normWeightOffset: Int(idxNorm.offset),
-                            outEntry: dsv4State.indexerKeys[L]!,
-                            outEntryOffset: entry * idxDim * fp16,
-                            nextPriorCaKV: dsv4State.indexerPriorCaKV[L]!,
-                            nextPriorCaGate: dsv4State.indexerPriorCaGate[L]!,
-                            rate: idxRate, dim: idxDim, dual: true,
-                            hasPrior: counters.indexerHasPrior, eps: eps)
-                        dsv4.encodeRope(commandBuffer: cb,
-                                        x: dsv4State.indexerKeys[L]!,
-                                        xOffset: entry * idxDim * fp16,
-                                        numHeads: 1, headDim: idxDim,
-                                        ropeDim: ca.ropeHeadDim,
-                                        position: entry * idxRate,
-                                        rope: .compress,
-                                        direction: 1)
-                    }
-                }
-            }
-
-            let compressedCount = isCompressed
-                ? counters.compressedEntries + (willEmit ? 1 : 0)
-                : 0
-
-            // Lightning-indexer selection is only needed once the compressed
-            // entries exceed index_topk (context > topk * rate); the extra
-            // CPU sync point exists only on those layers/positions.
-            let needsSelection = isCSA && compressedCount > ca.indexTopK
-            var selectedCount = DSV4Kernels.selectAll
-            if needsSelection {
-                let idxQB = try model.dsv4IndexerQBProj(layer: L)
-                let idxWProj = try model.dsv4IndexerWeightsProj(layer: L)
-                let idxEntries = counters.indexerEntries + (willEmitIndexer ? 1 : 0)
-                gemv(cb, idxQB, x: qaBuf, y: indexerQ,
-                     m: ca.indexNHeads * ca.indexHeadDim, n: ca.qLoraRank)
-                dsv4.encodeRope(commandBuffer: cb, x: indexerQ,
-                                numHeads: ca.indexNHeads,
-                                headDim: ca.indexHeadDim,
-                                ropeDim: ca.ropeHeadDim,
-                                position: position,
-                                rope: .compress,
-                                direction: 1)
-                gemv(cb, idxWProj, x: normed, y: indexerW,
-                     m: ca.indexNHeads, n: cfg.hiddenSize)
-                dsv4.encodeIndexerScore(
-                    commandBuffer: cb, q: indexerQ,
-                    keys: dsv4State.indexerKeys[L]!,
-                    weights: indexerW, scores: indexerScores,
-                    numHeads: ca.indexNHeads, indexDim: ca.indexHeadDim,
-                    entryCount: idxEntries,
-                    headScale: 1.0 / Float(ca.indexHeadDim).squareRoot(),
-                    weightScale: 1.0 / Float(ca.indexNHeads).squareRoot())
-                cb.commit()
-                waitForCompletion(cb)
-                // CPU top-k over the scores; attention gathers the same
-                // entry indices from the compressor cache (both caches share
-                // the emission schedule).
-                let scoresPtr = indexerScores.contents()
-                    .assumingMemoryBound(to: Float.self)
-                let k = min(ca.indexTopK, compressedCount)
-                var order = Array(0..<compressedCount)
-                order.sort { scoresPtr[$0] > scoresPtr[$1] }
-                let picks = order.prefix(k).sorted()
-                let selPtr = selected.contents().assumingMemoryBound(to: UInt32.self)
-                for (i, e) in picks.enumerated() { selPtr[i] = UInt32(e) }
-                selectedCount = UInt32(k)
-                cb = ctx.queue.makeCommandBuffer()!
-            }
-
-            // Core attention + conjugate output rotation.
-            dsv4.encodeAttention(
-                commandBuffer: cb, q: qScratch,
-                windowKV: ring,
-                compressedKV: dsv4State.compressedKV[L] ?? ring,
-                selected: selected,
-                sinks: sinksView.buffer, sinksOffset: Int(sinksView.offset),
-                out: attnOut,
-                headDim: headDim, numHeads: numHeads,
-                windowCount: dsv4State.windowCount(position: position),
-                windowStartPos: dsv4State.windowStartPosition(position: position),
-                ringCapacity: dsv4State.ringCapacity,
-                compressedCount: compressedCount,
-                selectedCount: selectedCount,
-                scale: Float(cfg.attentionScale))
-            dsv4.encodeRope(commandBuffer: cb, x: attnOut,
-                            numHeads: numHeads, headDim: headDim,
-                            ropeDim: ca.ropeHeadDim,
-                            position: position, rope: ropeKind, direction: -1)
-
-            // Grouped low-rank output projection: one dispatch covering every
-            // head group (the output row index selects both the weight block
-            // and the activation slice), then the mixing projection.
-            dsv4.encodeOGroupProjection(
-                commandBuffer: cb,
-                weights: oaView.buffer, weightsOffset: Int(oaView.offset),
-                scales: oaView.buffer, scalesOffset: Int(oaView.scaleOffset),
-                biases: oaView.buffer, biasesOffset: Int(oaView.biasOffset),
-                x: attnOut, y: oGrouped,
-                rank: ca.oLoraRank,
-                groupIn: numHeads * headDim / ca.oGroups,
-                groups: ca.oGroups)
-            gemv(cb, obView, x: oGrouped, y: oOut,
-                 m: cfg.hiddenSize, n: ca.oGroups * ca.oLoraRank)
-
-            // Attention-site placement + residual mix: streams -> streamsAlt.
-            dsv4.encodeHCPlaceMix(commandBuffer: cb, streams: streams,
-                                  sub: oOut, post: hcPostA, comb: hcCombA,
-                                  outStreams: streamsAlt,
-                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
-
-            // FFN-site mHC + norm, producing the MoE input.
-            dsv4.encodeHCWeights(commandBuffer: cb, streams: streamsAlt,
-                                 fn: ffnFn.buffer, fnOffset: Int(ffnFn.offset),
-                                 base: ffnBase.buffer, baseOffset: Int(ffnBase.offset),
-                                 scale: ffnScale3.buffer, scaleOffset: Int(ffnScale3.offset),
-                                 outPre: hcPreF, outPost: hcPostF, outComb: hcCombF,
-                                 hcMult: hc.mult, hidden: cfg.hiddenSize,
-                                 sinkhornIters: hc.sinkhornIters,
-                                 hcEps: Float(hc.eps), rmsEps: eps)
-            dsv4.encodeHCCollapse(commandBuffer: cb, streams: streamsAlt,
-                                  pre: hcPreF, x: hidden,
-                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
-            rms.encodeBF16W(commandBuffer: cb, x: hidden,
-                            weight: postAttn.buffer,
-                            weightOffset: Int(postAttn.offset),
-                            out: routedX, d: D, eps: eps)
-
-            // Router. Hash layers take their expert set from tid2eid[token]
-            // (written CPU-side before commit); the gate only weights them.
-            let isHash = cfg.layerIsHashRouted(L)
-            if isHash {
-                let table = try model.dsv4HashTable(layer: L)
-                // The table rides the resident file in its source dtype:
-                // the real checkpoint ships I64 [vocab, topK]; synthetic
-                // fixtures may use U32. Read CPU-side, dtype-aware.
-                let base = table.buffer.contents().advanced(by: Int(table.offset))
-                let row = min(max(Int(token), 0), cfg.vocabSize - 1) * cfg.topKExperts
-                let idxPtr = outIndices.contents().assumingMemoryBound(to: UInt32.self)
-                let expertCap = UInt32(cfg.numExperts - 1)
-                if table.dtype == 4 {
-                    let tPtr = base.assumingMemoryBound(to: Int64.self)
-                    for i in 0..<cfg.topKExperts {
-                        idxPtr[i] = min(UInt32(clamping: max(0, tPtr[row + i])), expertCap)
-                    }
-                } else {
-                    let tPtr = base.assumingMemoryBound(to: UInt32.self)
-                    for i in 0..<cfg.topKExperts {
-                        idxPtr[i] = min(tPtr[row + i], expertCap)
-                    }
-                }
-                moeDSV4.encodeRouterHashWeights(
-                    commandBuffer: cb,
-                    weights: routerW.buffer, weightsOffset: Int(routerW.offset),
-                    hidden: routedX,
-                    onesScale: effectiveScaleBuffers[L],
-                    indices: outIndices,
-                    outWeights: outWeights,
-                    numExperts: UInt32(cfg.numExperts), d: D)
-            } else {
-                let bias = try model.dsv4RouterCorrectionBias(layer: L)
-                moeDSV4.encodeRouterTopK(
-                    commandBuffer: cb,
-                    weights: routerW.buffer, weightsOffset: Int(routerW.offset),
-                    hidden: routedX,
-                    onesScale: effectiveScaleBuffers[L],
-                    correctionBias: bias.buffer, correctionBiasOffset: Int(bias.offset),
-                    outIndices: outIndices,
-                    outWeights: outWeights,
-                    numExperts: UInt32(cfg.numExperts), d: D)
-            }
-
-            // PILOT lookahead: run layer L+1's router against *this* layer's
-            // post-attention state, into private buffers, before the signal.
-            // The CPU then reads the real L indices and the speculative L+1
-            // indices at one wake — no extra command buffer, no extra sync.
-            // The mHC streams mean L+1's true router input also carries this
-            // layer's FFN contribution, so this is an approximation whose
-            // recall the predicted/confirmed counters measure.
-            var pilotGemvEncoded = false
-            if shouldEncodePilotGemv(nextLayer: L + 1),
-               let pilot = ensurePilotRouter(),
-               let nextRouter = try? model.router(layer: L + 1),
-               let nextBias = try? model.dsv4RouterCorrectionBias(layer: L + 1) {
-                pilot.encodePrediction(
-                    commandBuffer: cb,
-                    weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
-                    hidden: routedX,
-                    onesScale: effectiveScaleBuffers[L + 1],
-                    correctionBias: nextBias.buffer,
-                    correctionBiasOffset: Int(nextBias.offset),
-                    numExperts: UInt32(cfg.numExperts), d: D,
-                    routeScale: Float(cfg.routedScalingFactor))
-                pilotGemvEncoded = true
-            }
-
-            // The router indices are written at this point in the buffer, so
-            // signal the CPU here and keep encoding into the SAME buffer: the
-            // shared expert (clamped SwiGLU) depends only on `routedX`, never
-            // on the routed experts, so the GPU runs it while the CPU wakes,
-            // plans slots and preads the routed-expert blobs.
-            let routerSignal = encodeRouterSignal(cb)
-            int4.encode(commandBuffer: cb,
-                        weights: sharedProj.gate.weights,
-                        weightsOffset: sharedProj.gate.weightsOffset,
-                        scales: sharedProj.gate.scales,
-                        scalesOffset: sharedProj.gate.scalesOffset,
-                        biases: sharedProj.gate.biases,
-                        biasesOffset: sharedProj.gate.biasesOffset,
-                        x: routedX, y: denseScratchGate,
-                        m: FShared, n: D)
-            int4.encode(commandBuffer: cb,
-                        weights: sharedProj.up.weights,
-                        weightsOffset: sharedProj.up.weightsOffset,
-                        scales: sharedProj.up.scales,
-                        scalesOffset: sharedProj.up.scalesOffset,
-                        biases: sharedProj.up.biases,
-                        biasesOffset: sharedProj.up.biasesOffset,
-                        x: routedX, y: denseScratchUp,
-                        m: FShared, n: D)
-            dsv4.encodeSwigluClampMul(commandBuffer: cb,
-                                      gate: denseScratchGate,
-                                      up: denseScratchUp,
-                                      out: denseScratchAct,
-                                      n: cfg.intermediateSize,
-                                      limit: Float(cfg.swigluLimit))
-            int4.encode(commandBuffer: cb,
-                        weights: sharedProj.down.weights,
-                        weightsOffset: sharedProj.down.weightsOffset,
-                        scales: sharedProj.down.scales,
-                        scalesOffset: sharedProj.down.scalesOffset,
-                        biases: sharedProj.down.biases,
-                        biasesOffset: sharedProj.down.biasesOffset,
-                        x: denseScratchAct, y: h1Buf,
-                        m: D, n: FShared)
-            let overlapProbe = Self.phaseInstrumentationEnabled ? GPUOverlapProbe() : nil
-            overlapProbe?.track(cb)
-            cb.commit()
-            let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitForRouterSignal(routerSignal, fallback: cb)
-            let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
-            if let pending = pendingRouted {
-                finishPending(pending, waitIfNeeded: false)
-                pendingRouted = nil
-            }
-            totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
-
-            // Commit the compressor bookkeeping for this token.
-            counters.tokens += 1
-            if isCompressed {
-                if willEmit {
-                    counters.pendingRows = 0
-                    counters.compressedEntries += 1
-                    if isCSA { counters.hasPrior = true }
-                } else {
-                    counters.pendingRows += 1
-                }
-                if isCSA {
-                    if willEmitIndexer {
-                        counters.indexerPendingRows = 0
-                        counters.indexerEntries += 1
-                        counters.indexerHasPrior = true
-                    } else {
-                        counters.indexerPendingRows += 1
-                    }
-                }
-            }
-            dsv4State.counters[L] = counters
-
-            // Expert readback -> plan -> advise -> pread -> routed CB, the
-            // same overlap structure as `produceToken`.
-            let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
-                                                          capacity: cfg.topKExperts)
-            var experts = [Int](repeating: 0, count: cfg.topKExperts)
-            for i in 0..<cfg.topKExperts {
-                experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
-            }
-            // Join any speculative read aimed at this layer before planning —
-            // the plan must not evict a slot a background pread is filling —
-            // and score the prediction. Then this layer's routing becomes the
-            // next token's prediction for the same layer.
-            settleSpeculation(layer: L, actualExperts: experts)
-            recordRoutedExperts(experts, layer: L)
-            capturePilotPrediction(nextLayer: L + 1,
-                                   token: token,
-                                   gemvEncoded: pilotGemvEncoded)
-
-            let routedOffsets = model.routedExpertOffsets(layer: L)
-            let gateGroupSize = UInt32(model.routedGateGroupSize(layer: L))
-            guard let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
-            else {
-                throw ModelError.routedExpertPlanUnavailable(layer: L)
-            }
-            var phase1HitCB: MTLCommandBuffer?
-            var phase1HitSlots: [UInt32] = []
-            var phase1MissSlots: [UInt32] = []
-            var phase1HitSplitArgBuf: MTLBuffer?
-            let missSet = Set(plannedFetch.misses)
-            phase1HitSlots = (0..<cfg.topKExperts)
-                .filter { !missSet.contains($0) }
-                .map { UInt32($0) }
-            phase1MissSlots = plannedFetch.misses.map { UInt32($0) }
-
-            if plannedFetch.hits > 0, !plannedFetch.misses.isEmpty {
-                let plannedBlobs = try model.routedExpertBuffers(for: plannedFetch)
-                let bufs = plannedBlobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
-                writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                let hitCB = ctx.queue.makeCommandBuffer()!
-                let argBuf = moeDSV4.makeReusedRoutedArgumentBuffer(routedBlobs: bufs)
-                phase1HitSplitArgBuf = argBuf
-                moeDSV4.encodeRoutedPhase1Subset(
-                    commandBuffer: hitCB,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: bufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX, acts: moeActs,
-                    activeSlots: moeHitActiveSlots,
-                    activeSlotIndices: phase1HitSlots,
-                    activeCount: UInt32(phase1HitSlots.count),
-                    d: D, f: FmoE,
-                    gateGroupSize: gateGroupSize)
-                phase1HitCB = hitCB
-            }
-
-            // Phase-1 for the resident (hit) experts needs no I/O, so it goes
-            // to the GPU immediately, extending the window the pread hides
-            // behind. It follows the shared expert on the same queue.
-            if let hitCB = phase1HitCB {
-                overlapProbe?.track(hitCB)
-                hitCB.commit()
-            }
-
-            if rdadviseEnabled && rdadvisePolicyMode != .off {
-                let requestedMisses = plannedFetch.misses.count
-                let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
-                    layer: L, missCount: requestedMisses)
-                if let skipped = shouldSkipRDAdvice(position: position,
-                                                    requestedMisses: requestedMisses,
-                                                    estimatedBytes: estimatedAdviceBytes,
-                                                    canOverlapUsefulGPUWork: true) {
-                    recordRDAdvice(skipped, wallNanos: 0)
-                } else {
-                    let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                    let result = try model.adviseRoutedExperts(plan: plannedFetch)
-                    let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
-                    recordRDAdvice(result, wallNanos: wallNanos)
-                    updateRDAdvicePolicy(after: result, position: position)
-                }
-            }
-
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
-            let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            totalIoNanos &+= tIoEnd - tIoStart
-            recordExpertIOOverlap(probe: overlapProbe,
-                                  startNanos: tIoStart,
-                                  endNanos: tIoEnd)
-            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
-
-            let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let routedCB = ctx.queue.makeCommandBuffer()!
-            let argBuf = phase1HitSplitArgBuf
-                ?? moeDSV4.makeReusedRoutedArgumentBuffer(routedBlobs: routedBufs)
-            if phase1HitCB != nil {
-                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-                moeDSV4.encodeRoutedPhase1Subset(
-                    commandBuffer: routedCB,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: routedBufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX, acts: moeActs,
-                    activeSlots: moeMissActiveSlots,
-                    activeSlotIndices: phase1MissSlots,
-                    activeCount: UInt32(phase1MissSlots.count),
-                    d: D, f: FmoE,
-                    gateGroupSize: gateGroupSize)
-            } else {
-                moeDSV4.encodeRoutedPhase1(
-                    commandBuffer: routedCB,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: routedBufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX, acts: moeActs,
-                    d: D, f: FmoE,
-                    gateGroupSize: gateGroupSize)
-            }
-            // Phase-2 seeds with the shared-expert output, so h2Buf holds
-            // routed + shared — exactly the reference's `routed +
-            // shared_experts(residual)`.
-            moeDSV4.encodeRoutedPhase2Reduce(
-                commandBuffer: routedCB,
-                routedArgBuffer: argBuf,
-                routedBlobs: routedBufs,
-                routedOffsets: routedOffsets,
-                acts: moeActs,
-                routingWeights: outWeights,
-                residual: h1Buf,
-                y: h2Buf,
-                d: D, f: FmoE)
-            // FFN-site placement + residual mix: streamsAlt -> streams.
-            dsv4.encodeHCPlaceMix(commandBuffer: routedCB, streams: streamsAlt,
-                                  sub: h2Buf, post: hcPostF, comb: hcCombF,
-                                  outStreams: streams,
-                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
-            routedCB.commit()
-            // GPU is busy with routed work and the next layer's attention, CPU
-            // is idle: the natural window for the speculative read.
-            issueSpeculativePrefetch(layer: L + 1)
-            precondition(pendingRouted == nil,
-                         "routed command-buffer pipeline drained before queuing the next layer")
-            pendingRouted = PendingRoutedCommand(
-                cb: routedCB,
-                attentionCB: cb,
-                phase1HitCB: phase1HitCB,
-                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
-        }
-        if let pending = pendingRouted {
-            finishPending(pending, waitIfNeeded: true)
-            pendingRouted = nil
-        }
-
-        if emitHead {
-            // Collapse the residual streams, then the standard head.
-            let hhFn = try model.dsv4HyperHeadFn
-            let hhBase = try model.dsv4HyperHeadBase
-            let hhScale = try model.dsv4HyperHeadScale
-            runSync { cb in
-                dsv4.encodeHyperHead(commandBuffer: cb, streams: streams,
-                                     fn: hhFn.buffer, fnOffset: Int(hhFn.offset),
-                                     base: hhBase.buffer, baseOffset: Int(hhBase.offset),
-                                     scale: hhScale.buffer, scaleOffset: Int(hhScale.offset),
-                                     x: hidden,
-                                     hcMult: hc.mult, hidden: cfg.hiddenSize,
-                                     hcEps: Float(hc.eps), rmsEps: eps)
-            }
-            let fNorm = model.finalNorm
-            let lm = model.lmHead
-            let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
-            let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            if useFusedHeadForThisToken {
-                runSync { cb in
-                    self.fusionHead.encodeGreedyDecode(
-                        commandBuffer: cb,
-                        hidden: self.hidden,
-                        normWeight: fNorm.buffer, normOffset: Int(fNorm.offset),
-                        weights: lm.buffer, weightsOffset: Int(lm.offset),
-                        scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
-                        biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
-                        outToken: self.greedyTokenBuf,
-                        d: D, vocab: UInt32(self.cfg.vocabSize),
-                        rmsEps: eps)
-                }
-                totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
-                lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
-            } else {
-                runSync { cb in
-                    self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
-                                         weight: fNorm.buffer,
-                                         weightOffset: Int(fNorm.offset),
-                                         out: self.normed, d: D, eps: eps)
-                    self.int4.encode(commandBuffer: cb,
-                                     weights: lm.buffer, weightsOffset: Int(lm.offset),
-                                     scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
-                                     biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
-                                     x: self.normed, y: logits,
-                                     m: UInt32(self.cfg.vocabSize), n: D)
-                }
-                totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
-            }
-        }
-
-        kv?.advance()
-    }
-
     /// Grows full-attention KV before anything is encoded at these positions.
     /// Growing re-wraps the same pages, so nothing in flight is disturbed.
     private func ensureKVCapacity(for tokens: Int, headroom: Int? = nil) throws {
@@ -5846,6 +3406,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         cb.commit()
         cb.waitUntilCompleted()
         reportCommandBufferFailure(cb)
+    }
+
+    /// `MFERENCE_PREFILL_BREAKDOWN=1` only: commits and waits the command
+    /// buffer at a stage boundary, records its GPU span, and continues on a
+    /// fresh buffer with the same label. Out of line so none of it is inlined
+    /// into `executePrefillChunk` when the diagnostic is off.
+    @inline(never)
+    private func splitPrefillStage(_ cb: inout MTLCommandBuffer,
+                                   stage: PrefillStage,
+                                   into breakdown: PrefillStageBreakdown) throws {
+        cb.commit()
+        waitForCompletion(cb)
+        try checkCommandBufferError(cb)
+        breakdown.addGPU(stage, cb)
+        guard let next = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        next.label = cb.label
+        cb = next
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {
@@ -5981,4 +3560,59 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+}
+
+// MARK: - Prefix state snapshots (server multi-prefix cache)
+
+/// Qwen 3.6 only: its numerical state at a position is full-attention KV rows
+/// [0, position) plus the gated-DeltaNet state and conv tail. A layout these
+/// copies do not cover (sliding rings, no recurrent state) reports no support
+/// and the server keeps its single-prefix behaviour for it.
+extension RealForwardRunner: PrefixStateSnapshotting {
+    public var supportsPrefixStateSnapshots: Bool {
+        model.config.family == .qwen36
+            && gdnState != nil && kv?.supportsPrefixSnapshots == true
+    }
+
+    public func prefixKVRowBytes(tokens: Int) -> Int {
+        kv?.prefixSnapshotBytes(tokens: tokens) ?? 0
+    }
+
+    public var prefixRecurrentStateBytes: Int { gdnState?.recurrentCheckpointBytes ?? 0 }
+
+    private func requireSnapshotReady(_ operation: String) throws -> (KVCacheManager, GDNStateManager) {
+        try Task.checkCancellation()
+        try prefillChunkState.requireClean(operation: operation)
+        guard supportsPrefixStateSnapshots, let kv, let gdnState else {
+            throw PrefixSnapshotError.unsupported("\(model.config.family) runner")
+        }
+        return (kv, gdnState)
+    }
+
+    public func capturePrefixKVRows(count: Int, into region: PrefixSnapshotRegion) throws {
+        let (kv, _) = try requireSnapshotReady("prefix KV capture")
+        try kv.copyPrefixRows(count: count, into: region)
+    }
+
+    public func capturePrefixRecurrentState(into region: PrefixSnapshotRegion) throws {
+        let (_, gdnState) = try requireSnapshotReady("prefix recurrent capture")
+        try gdnState.copyRecurrentState(into: region)
+    }
+
+    public func restorePrefixState(rows: (region: PrefixSnapshotRegion, count: Int)?,
+                                   position: Int,
+                                   recurrentState: PrefixSnapshotRegion) throws {
+        let (kv, gdnState) = try requireSnapshotReady("prefix restore")
+        if let rows {
+            try kv.restorePrefixRows(count: rows.count, from: rows.region, position: position)
+        } else {
+            guard position > 0, position <= kv.position else {
+                throw PrefixSnapshotError.outOfRange(
+                    "rewind to \(position) with cursor at \(kv.position)")
+            }
+            kv.rewind(to: position)
+        }
+        try gdnState.restoreRecurrentState(from: recurrentState)
+        resetTransientState()
+    }
 }

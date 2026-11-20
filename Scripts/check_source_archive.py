@@ -14,12 +14,12 @@ def validate_archive(archive):
     if len(entries) != len(members):
         raise ValueError("duplicate source archive member")
     required = ["Package.swift", "Package.resolved", "LICENSE", "LICENSE-APACHE", "LICENSE-MLX",
-                "README.md", "mference-ui.sh", "Scripts/test.sh", "Scripts/openwebui-mference.py",
-                "Scripts/openwebui-configure-models.py", "docs/SOURCE_RELEASE.md"]
+                "LICENSE-GGML",
+                "README.md", "Scripts/test.sh"]
     for name in required:
         if name not in entries or not entries[name].isfile():
             raise ValueError(f"missing source-release file: {name}")
-    for name in ["mference-ui.sh", "Scripts/test.sh"]:
+    for name in ["Scripts/test.sh"]:
         if not entries[name].mode & 0o111:
             raise ValueError(f"source archive loses executable bit: {name}")
     for prefix in ["Sources/Mference/Metal/", "Sources/MferenceCLI/", "Sources/MferenceServer/",

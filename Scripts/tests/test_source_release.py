@@ -22,9 +22,8 @@ class SourceReleaseTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.email", "release-test@example.invalid")
         self.git("config", "user.name", "Source Release Test")
-        for name in ["Package.swift", "Package.resolved", "LICENSE", "LICENSE-APACHE", "LICENSE-MLX",
-                     "README.md", "mference-ui.sh", "Scripts/test.sh", "Scripts/openwebui-mference.py",
-                     "Scripts/openwebui-configure-models.py", "docs/SOURCE_RELEASE.md",
+        for name in ["Package.swift", "Package.resolved", "LICENSE", "LICENSE-APACHE", "LICENSE-MLX", "LICENSE-GGML",
+                     "README.md", "Scripts/test.sh",
                      "Sources/Mference/Metal/probe.metal", "Sources/MferenceCLI/probe.swift",
                      "Sources/MferenceServer/probe.swift", "Sources/MferenceRepack/probe.swift", "Tests/probe.swift"]:
             path = self.root / name
@@ -57,7 +56,7 @@ class SourceReleaseTests(unittest.TestCase):
         with tarfile.open(archive) as tar:
             self.assertEqual(metadata["archive_entries"], len(tar.getmembers()))
             self.assertEqual(metadata["source_entries"] + 1, metadata["archive_entries"])
-            self.assertTrue(tar.getmember("mference-0.1.0-rc.1/mference-ui.sh").mode & 0o111)
+            self.assertTrue(tar.getmember("mference-0.1.0-rc.1/Scripts/test.sh").mode & 0o111)
             self.assertTrue(all(m.name.startswith("mference-0.1.0-rc.1") for m in tar.getmembers()))
 
     def test_untracked_models_and_secrets_never_enter_archive(self):
@@ -82,7 +81,7 @@ class SourceReleaseTests(unittest.TestCase):
                 package(self.root, self.output(), version)
 
     def test_missing_file_and_executable_bit_rejected(self):
-        (self.root / "mference-ui.sh").chmod(0o644)
+        (self.root / "Scripts/test.sh").chmod(0o644)
         self.git("add", ".")
         self.git("commit", "-qm", "lose execute bit")
         with self.assertRaisesRegex(ValueError, "executable"):

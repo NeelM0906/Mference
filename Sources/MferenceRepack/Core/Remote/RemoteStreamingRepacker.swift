@@ -68,24 +68,12 @@ public struct RemoteStreamingRepackResult: Sendable {
     public let reusedBytes: UInt64
     public let downloadedThisRunBytes: UInt64
     public let dryRun: Bool
-    /// QAT assets/layout, plus actual manifest/receipt bytes after completion.
-    public let supportingFileBytes: UInt64
-    /// Additional bounded staging/manifest allowance used by the space check.
-    public let metadataReserveBytes: UInt64
-    /// Unique source metadata/assets, separate from resumable payload ranges.
-    public let sourceMetadataBytes: UInt64
-    /// Routed-expert bytes a Gemma 4 QAT install does not keep because its
-    /// biases are implied; zero for every other family.
-    public let impliedBiasBytes: UInt64
 
     /// Bytes the install writes: the resident file plus every packed-expert
-    /// layer blob. QAT includes its required supporting files explicitly.
+    /// layer blob.
     public var outputBytes: UInt64 {
         plan.resident.totalSize
             + plan.allExpertLayers.reduce(UInt64(0)) { $0 + $1.fileSize }
-            + plan.plePools.reduce(UInt64(0)) { $0 + $1.fileSize }
-            + supportingFileBytes
-            - impliedBiasBytes
     }
     public var residentEntryCount: Int { plan.resident.entries.count }
     public var expertLayerCount: Int { plan.layers.count }
@@ -116,9 +104,9 @@ public struct RemoteStreamingRepackResult: Sendable {
 }
 
 public final class RemoteStreamingRepacker {
-    private let options: RemoteStreamingRepackOptions
-    private let audit: RepackAudit
-    private let startTime = Date()
+    let options: RemoteStreamingRepackOptions
+    let audit: RepackAudit
+    let startTime = Date()
 
     public init(options: RemoteStreamingRepackOptions,
                 audit: RepackAudit = RepackAudit()) {
@@ -276,34 +264,11 @@ public final class RemoteStreamingRepacker {
                 to: paths.checkpointFile,
                 parentDirectory: paths.parentDirectory)
         }
-        let isQAT = GemmaQATSource.applies(arch: snapshot.arch, metadata: snapshot.metadata)
-        let assetBytes = isQAT ? try await prepareQATAssets(snapshot: snapshot, remote: remote) : 0
         let expertStride = plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertStride ?? 0
-        // QAT stores its routed experts without the `-8 * scale` biases: the
-        // download fills ordinary layer files, then finalize compacts each one.
-        let compaction = isQAT ? try Self.qatCompaction(plan: plan, expertStride: expertStride) : nil
-        let qatLayoutBytes = UInt64(compaction?.layout.count ?? 0)
-        let impliedBiasBytes = compaction.map { compaction in
-            plan.layers.reduce(UInt64(0)) {
-                $0 + UInt64($1.expertsPerLayer) * (expertStride - compaction.plan.storedExpertStride)
-            }
-        } ?? 0
-        let supportingBytes = assetBytes + qatLayoutBytes
-        let sourceMetadataBytes = isQAT ? snapshot.metadataSourceBytes + assetBytes
-            - (snapshot.remoteFiles["config.json"]?.size ?? 0) : 0
-        // Required assets remain in bounded metadata staging until publication.
-        // One MiB additionally covers the index, manifest and receipt metadata;
-        // compaction holds one extra compact layer file at a time.
-        let compactLayerBytes = compaction.map { compaction in
-            UInt64(plan.layers.map(\.expertsPerLayer).max() ?? 0) * compaction.plan.storedExpertStride
-        } ?? 0
-        let metadataReserve: UInt64 = isQAT ? assetBytes + 1_048_576 + compactLayerBytes : 0
         let outputBytes = plan.resident.totalSize
             + plan.allExpertLayers.reduce(UInt64(0)) { $0 + $1.fileSize }
-            + plan.plePools.reduce(UInt64(0)) { $0 + $1.fileSize }
-            + supportingBytes
         progress(.planning(downloadBytes: rangePlan.remoteBytesToDownload,
-                           outputBytes: outputBytes - impliedBiasBytes))
+                           outputBytes: outputBytes))
         let reusedDestinationBytes = checkpoint.completedRanges.reduce(UInt64(0)) {
             $0 + $1.destinationBytes
         }
@@ -313,7 +278,7 @@ public final class RemoteStreamingRepacker {
         let diskRequirement = try DiskSpaceChecker.requireAvailable(
             path: paths.parentDirectory,
             bytes: remainingOutputBytes + UInt64(options.rangeChunkBytes),
-            reserveBytes: options.minFreeReserveBytes + metadataReserve)
+            reserveBytes: options.minFreeReserveBytes)
         progress(.checkingDisk(diskRequirement))
         try Task.checkCancellation()
 
@@ -342,11 +307,7 @@ public final class RemoteStreamingRepacker {
                                                    $0 + $1.sourceBytes
                                                },
                                                downloadedThisRunBytes: 0,
-                                               dryRun: true,
-                                               supportingFileBytes: supportingBytes,
-                                               metadataReserveBytes: metadataReserve,
-                                               sourceMetadataBytes: sourceMetadataBytes,
-                                               impliedBiasBytes: impliedBiasBytes)
+                                               dryRun: true)
         }
 
         if saved == nil {
@@ -389,16 +350,6 @@ public final class RemoteStreamingRepacker {
                     parentDirectory: paths.parentDirectory)
             })
 
-        if let compaction {
-            for layer in plan.layers where layer.expertsPerLayer > 0 {
-                try Task.checkCancellation()
-                let rel = "packed_experts/" + (layer.path as NSString).lastPathComponent
-                progress(.compactingExperts(rel))
-                _ = try QATImpliedBiasConverter.compactLayerInPlace(
-                    path: layer.path, relative: rel, expertsPerLayer: layer.expertsPerLayer,
-                    expertStride: layer.expertStride, plan: compaction.plan)
-            }
-        }
         try recordOutputFile(relativePath: "model_weights.bin",
                              path: plan.resident.path,
                              progress: progress)
@@ -415,12 +366,6 @@ public final class RemoteStreamingRepacker {
                 try recordOutputFile(relativePath: rel, path: layer.path, progress: progress)
             }
         }
-        for pool in plan.plePools {
-            try Task.checkCancellation()
-            try recordOutputFile(relativePath: pool.relativePath,
-                                 path: pool.path,
-                                 progress: progress)
-        }
 
         let layoutPath = ((paths.partialDirectory as NSString)
             .appendingPathComponent("packed_experts") as NSString)
@@ -428,9 +373,6 @@ public final class RemoteStreamingRepacker {
         let layoutData = try GTurboJSON.encodeLayout(plan: plan, expertStride: expertStride)
         try writeSmall(path: layoutPath, data: layoutData)
         try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
-        if let compaction {
-            try writeSmall(path: layoutPath, data: compaction.layout)
-        }
         try recordOutputFile(relativePath: "packed_experts/layout.json",
                              path: layoutPath,
                              progress: progress)
@@ -448,8 +390,7 @@ public final class RemoteStreamingRepacker {
                           partialDir: paths.partialDirectory,
                           metadata: snapshot.metadata,
                           expertStride: expertStride,
-                          resolvedCommit: snapshot.resolvedCommit,
-                          impliedRoutedBiases: compaction != nil)
+                          resolvedCommit: snapshot.resolvedCommit)
 
         try Task.checkCancellation()
         if try Posix.entryKind(paths.finalDirectory) == .directory {
@@ -470,19 +411,6 @@ public final class RemoteStreamingRepacker {
             try data.write(to: URL(fileURLWithPath: auditPath))
         }
 
-        let finalMetadataBytes: UInt64
-        if isQAT {
-            finalMetadataBytes = try ["manifest.json", "verified-install.json"].reduce(0) {
-                let attributes = try FileManager.default.attributesOfItem(
-                    atPath: (options.outputDir as NSString).appendingPathComponent($1))
-                guard let size = attributes[.size] as? NSNumber else {
-                    throw RepackError.configurationInvalid(detail: "missing completed metadata file size")
-                }
-                return $0 + size.uint64Value
-            }
-        } else {
-            finalMetadataBytes = 0
-        }
         return RemoteStreamingRepackResult(outputDir: options.outputDir,
                                            resolvedCommit: snapshot.resolvedCommit,
                                            plan: plan,
@@ -493,29 +421,7 @@ public final class RemoteStreamingRepacker {
                                            reusedBytes: reusedBytes,
                                            downloadedThisRunBytes:
                                                audit.remoteBytesDownloaded - payloadDownloadStart,
-                                           dryRun: false,
-                                           supportingFileBytes: supportingBytes + finalMetadataBytes,
-                                           metadataReserveBytes: metadataReserve,
-                                           sourceMetadataBytes: sourceMetadataBytes,
-                                           impliedBiasBytes: impliedBiasBytes)
-    }
-
-    /// The compaction plan and the final `layout.json` bytes of a Gemma 4 QAT
-    /// install, derived from the ordinary layout the download produces.
-    static func qatCompaction(plan: RepackPlan, expertStride: UInt64) throws
-        -> (plan: QATImpliedBiasConverter.Plan, layout: Data) {
-        let explicit = try GTurboJSON.encodeLayout(plan: plan, expertStride: expertStride)
-        guard let layout = try JSONSerialization.jsonObject(with: explicit) as? [String: Any] else {
-            throw RepackError.configurationInvalid(detail: "layout.json is not a JSON object")
-        }
-        let compaction = try QATImpliedBiasConverter.plan(
-            tensors: try QATImpliedBiasConverter.referenceTensors(layout: layout),
-            expertStride: expertStride, pageSize: Layout.pageBytes)
-        let data = try JSONSerialization.data(
-            withJSONObject: try QATImpliedBiasConverter.compactLayout(
-                layout, expertStride: expertStride, plan: compaction),
-            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        return (compaction, data)
+                                           dryRun: false)
     }
 
     private func validateOptions() throws {
@@ -533,17 +439,13 @@ public final class RemoteStreamingRepacker {
         }
     }
 
-    private func createOutputFiles(plan: RepackPlan,
+    func createOutputFiles(plan: RepackPlan,
                                    paths: RemoteInstallPaths) throws {
         try Posix.mkdirP((paths.partialDirectory as NSString)
             .appendingPathComponent("packed_experts"))
         for pool in plan.auxiliaryExpertPools {
             try Posix.mkdirP((paths.partialDirectory as NSString)
                 .appendingPathComponent(pool.directoryName))
-        }
-        if !plan.plePools.isEmpty {
-            try Posix.mkdirP((paths.partialDirectory as NSString)
-                .appendingPathComponent("ple"))
         }
         let resident = try ResidentWriter.createAndWriteIndex(
             plan: plan.resident,
@@ -557,17 +459,10 @@ public final class RemoteStreamingRepacker {
             try Posix.fsync(descriptor, path: layer.path)
             close(descriptor)
         }
-        for pool in plan.plePools {
-            try Task.checkCancellation()
-            let descriptor = try Posix.openCreateRW(pool.path)
-            try Posix.ftruncate(descriptor, path: pool.path, size: pool.fileSize)
-            try Posix.fsync(descriptor, path: pool.path)
-            close(descriptor)
-        }
         try Posix.fsyncDirectory(paths.partialDirectory)
     }
 
-    private func outputFilesMatch(plan: RepackPlan,
+    func outputFilesMatch(plan: RepackPlan,
                                   rangePlan: RangeCopyPlan) throws -> Bool {
         for output in rangePlan.expectedOutputs {
             let path = ((plan.resident.path as NSString).deletingLastPathComponent
@@ -636,7 +531,7 @@ public final class RemoteStreamingRepacker {
         return valid.sorted { $0.id < $1.id }
     }
 
-    private func recordOutputFile(relativePath: String,
+    func recordOutputFile(relativePath: String,
                                   path: String,
                                   progress: @Sendable (ModelInstallProgress) -> Void) throws {
         progress(.hashingOutput(relativePath))
@@ -651,7 +546,7 @@ public final class RemoteStreamingRepacker {
         audit.outputFiles.append(.init(relativePath: relativePath, size: size, sha256: sha))
     }
 
-    private func writeSmall(path: String, data: Data) throws {
+    func writeSmall(path: String, data: Data) throws {
         try Posix.mkdirP((path as NSString).deletingLastPathComponent)
         try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
         audit.recordWrite(bytes: data.count)
@@ -662,20 +557,6 @@ public final class RemoteStreamingRepacker {
                                            partialDir: String,
                                            progress: @Sendable (ModelInstallProgress) -> Void) async throws {
         let tokenizerDir = (partialDir as NSString).appendingPathComponent("tokenizer")
-        if GemmaQATSource.applies(arch: snapshot.arch, metadata: snapshot.metadata) {
-            try Posix.mkdirP(tokenizerDir)
-            for name in GemmaQATSource.requiredAssets {
-                try Task.checkCancellation()
-                let src = (snapshot.metadataDirectory as NSString).appendingPathComponent(name)
-                let dst = (tokenizerDir as NSString).appendingPathComponent(name)
-                if FileManager.default.fileExists(atPath: dst) {
-                    try FileManager.default.removeItem(atPath: dst)
-                }
-                try FileManager.default.copyItem(atPath: src, toPath: dst)
-                try recordOutputFile(relativePath: "tokenizer/" + name, path: dst, progress: progress)
-            }
-            return
-        }
         for filename in ["config.json"] {
             try Task.checkCancellation()
             let src = (snapshot.metadataDirectory as NSString).appendingPathComponent(filename)
@@ -733,39 +614,11 @@ public final class RemoteStreamingRepacker {
         return false
     }
 
-    /// Fetch and validate required small files before any weight transfer. A
-    /// damaged resume may have recreated staging; refetch config in that case.
-    private func prepareQATAssets(snapshot: RemoteSnapshot,
-                                  remote: HuggingFaceRemoteSource) async throws -> UInt64 {
-        try Posix.mkdirP(snapshot.metadataDirectory)
-        let pinned = remote.pinned(commit: snapshot.resolvedCommit)
-        var bytes: UInt64 = 0
-        for name in GemmaQATSource.requiredAssets {
-            try Task.checkCancellation()
-            let path = (snapshot.metadataDirectory as NSString).appendingPathComponent(name)
-            if name != "config.json" || !FileManager.default.fileExists(atPath: path) {
-                let info = try await pinned.resolveFileInfo(filename: name, audit: audit)
-                guard info.resolvedCommit == snapshot.resolvedCommit else {
-                    throw RepackError.remoteProtocolInvalid(detail: "Gemma QAT \(name) commit differs from weights")
-                }
-                try await pinned.fetchSmallFile(filename: name, info: info,
-                    capBytes: name == "tokenizer.json" ? 64 * 1024 * 1024 : 4 * 1024 * 1024,
-                    outputPath: path, audit: audit)
-            }
-            try GemmaQATSource.validateAsset(name: name, path: path,
-                pinned: options.repoID == SupportedModelSource.gemma4QAT.repoID)
-            let attributes = try FileManager.default.attributesOfItem(atPath: path)
-            bytes += (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        }
-        return bytes
-    }
-
     private func writeManifest(plan: RepackPlan,
                                partialDir: String,
                                metadata: IndexLoader.SourceMetadata,
                                expertStride: UInt64,
-                               resolvedCommit: String,
-                               impliedRoutedBiases: Bool) throws {
+                               resolvedCommit: String) throws {
         var bits = GTurboJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
@@ -774,42 +627,20 @@ public final class RemoteStreamingRepacker {
             routedExpert: 4)
         for e in plan.resident.entries {
             if e.name == "language_model.model.embed_tokens.weight"
-                || e.name == "model.embed_tokens.weight"
-                || e.name == "model.llm.embed.weight"
-                || e.name == "model.language_model.embed_tokens.weight",
+                || e.name == "model.embed_tokens.weight",
                let s = e.quantSpec {
                 bits.embedding = s.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
-                || e.name.hasSuffix(".attn.wq_a.weight")
-                || e.name.hasSuffix(".attn.wq_du.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight"),
                let s = e.quantSpec {
                 bits.attention = s.bits
             }
-            if e.name.hasSuffix(".router.proj.weight")
-                || e.name.hasSuffix(".mlp.gate.weight")
-                || e.name.hasSuffix(".ffn.gate.weight"),
+            if e.name.hasSuffix(".mlp.gate.weight"),
                let s = e.quantSpec {
                 bits.router = s.bits
             }
-            if plan.arch.family == .gemma4,
-               e.name.hasSuffix(".router.proj.weight"),
-               e.quantSpec == nil, e.sourceWeight.dtype == .bf16 {
-                bits.router = 16
-            }
-            if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_experts.gate_proj.weight")
-                || e.name.hasSuffix(".ffn.shared_experts.gate_proj.weight"),
-               let s = e.quantSpec {
-                bits.sharedExpert = s.bits
-            }
-            // Gemma folds the shared expert into the bare `.mlp.` names.
-            // Inkling uses those same names for its two dense-FFN layers, so
-            // trusting them everywhere would make the recorded shared-expert
-            // width depend on tensor iteration order.
-            if plan.arch.family == .gemma4,
-               e.name.hasSuffix(".mlp.gate_proj.weight"),
+            if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight"),
                let s = e.quantSpec {
                 bits.sharedExpert = s.bits
             }
@@ -834,7 +665,7 @@ public final class RemoteStreamingRepacker {
         let modelID = plan.matchedModelID
             ?? SourceFingerprint.trustOnFirstUseModelID(forRepoID: options.repoID)
             ?? "unknown/snapshot"
-        var data = try GTurboJSON.encodeManifest(
+        let data = try GTurboJSON.encodeManifest(
             plan: plan,
             modelID: modelID,
             sourceSnapshotHash: "sha256:" + metadata.indexSha256Hex,
@@ -843,18 +674,6 @@ public final class RemoteStreamingRepacker {
             numLayers: plan.arch.numLayers,
             expertStride: expertStride,
             bitWidths: bits)
-        if impliedRoutedBiases {
-            guard var manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  var quant = manifest["quant"] as? [String: Any],
-                  var routed = quant["routedExpert"] as? [String: Any] else {
-                throw RepackError.configurationInvalid(detail: "manifest has no routed-expert quant slot")
-            }
-            routed["biasType"] = QATImpliedBiasConverter.impliedBiasType
-            quant["routedExpert"] = routed
-            manifest["quant"] = quant
-            data = try JSONSerialization.data(withJSONObject: manifest,
-                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        }
         let tmp = (partialDir as NSString).appendingPathComponent("manifest.json.tmp")
         let final = (partialDir as NSString).appendingPathComponent("manifest.json")
         try writeSmall(path: tmp, data: data)

@@ -47,20 +47,7 @@ public enum ForwardRunnerFactory {
                                   prefillConfig: runtimeConfiguration.prefillConfig,
                                   kvStorageMode: .fp16)
         }
-        if model.config.family == .glm53Flash {
-            return ForwardRuntime(producer: try Glm53ForwardRunner(
-                model: model, context: context, maxContext: maxContext,
-                runtimeConfiguration: runtimeConfiguration),
-                                  prefillConfig: runtimeConfiguration.prefillConfig,
-                                  kvStorageMode: .fp16)
-        }
-        if model.config.family == .qwen38flashnext {
-            return ForwardRuntime(producer: try FlashNextForwardRunner(
-                model: model, context: context, maxContext: maxContext,
-                runtimeConfiguration: runtimeConfiguration),
-                                  prefillConfig: runtimeConfiguration.prefillConfig,
-                                  kvStorageMode: .fp16)
-        }
+        // Qwen 3.6 is the shared runner's one remaining family.
         return ForwardRuntime(producer: try RealForwardRunner(
             model: model,
             context: context,

@@ -27,21 +27,7 @@ import Testing
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
             for: .qwen36, physicalMemoryBytes: eightGiB) == 16)
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .gemma4, physicalMemoryBytes: twentyFourGiB) == 16)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .deepseekV4Flash, physicalMemoryBytes: twentyFourGiB) == 16)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
-    }
-
-    @Test func serverPrefillChunkGrowsForGemmaOnSixteenGiBHosts() {
-        let gib = UInt64(1) << 30
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 2048)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 2048)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+            for: .maple, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
     @Test func serverPrefillChunkGrowsForQwen36OnSixteenGiBHosts() {
@@ -57,21 +43,21 @@ import Testing
     @Test func serverPrefillChunkStaysEstablishedForUnmeasuredFamilies() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .inklingSmall, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+            for: .maple, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnext, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+            for: .minicpm5, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
     }
 
     @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            for: .qwen36, physicalMemoryBytes: 16 * gib,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .qwen36, physicalMemoryBytes: 16 * gib,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"]) == 512)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            for: .qwen36, physicalMemoryBytes: 16 * gib,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 2048)
     }
 

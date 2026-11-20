@@ -115,6 +115,8 @@ import MferenceValidationSupport
         seqLen: Int,
         mode: Mode,
         shareKV: Bool = false,
+        batched: Bool = false,
+        qScale: Float = 1,
         seed: UInt64,
         tolerance: Float = Tolerance.fp16ChainedReduction
     ) throws {
@@ -125,7 +127,7 @@ import MferenceValidationSupport
         let qCount = numQHeads * headDim
         let kvCount = seqLen * numKVHeads * headDim
 
-        let qFp32 = (0..<qCount).map { _ in rng.uniform(-0.5, 0.5) }
+        let qFp32 = (0..<qCount).map { _ in rng.uniform(-0.5, 0.5) * qScale }
         let kFp32 = (0..<kvCount).map { _ in rng.uniform(-0.5, 0.5) }
         let vFp32: [Float] = shareKV
             ? kFp32
@@ -137,6 +139,7 @@ import MferenceValidationSupport
 
         let ctx = try MetalContext()
         let kernel = try Attention(context: ctx)
+        kernel.groupedFull256Batched = batched
 
         guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
               let kBuf = Fp16Buffer.make(ctx.device, halves: kFp16),
@@ -373,6 +376,55 @@ import MferenceValidationSupport
     @Test func attentionFull_qwenRealShape() throws {
         try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
                                seqLen: 128, mode: .full, seed: 0x36_0175)
+    }
+
+    /// Qwen 3.6 decode's batched grouped kernel against the CPU reference.
+    /// The lengths cover every loop shape: 5 positions (5 one-position
+    /// chunks, the tail loop only), 100 (16 chunks of 7: tails only, and the
+    /// last chunk starts past the end, so it is empty), 1,000 (16 chunks of
+    /// 63: seven full batches of 8 and a 7-position tail), 4,096 (32 chunks of
+    /// 128, batches only) and 9,000 (32 chunks of 282 with a short last
+    /// chunk).
+    @Test(arguments: [5, 100, 1000, 4096, 9000])
+    func attentionFull_qwenBatchedMatchesReference(seqLen: Int) throws {
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                               seqLen: seqLen, mode: .full, batched: true,
+                               seed: 0x36_0176 &+ UInt64(seqLen))
+    }
+
+    /// The same with peaked scores (q scaled 24×, so scores spread over about
+    /// ±6 instead of ±0.3): the running maximum moves inside batches and in
+    /// the tail, so a missing or misapplied rescale shows. The per-component
+    /// kernel runs the same inputs as a check on the reference at this scale.
+    @Test(arguments: [1000, 4096])
+    func attentionFull_qwenBatchedMatchesReferenceWithPeakedScores(seqLen: Int) throws {
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                               seqLen: seqLen, mode: .full, batched: true, qScale: 24,
+                               seed: 0x36_0177 &+ UInt64(seqLen))
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                               seqLen: seqLen, mode: .full, qScale: 24,
+                               seed: 0x36_0177 &+ UInt64(seqLen))
+    }
+
+    @Test func groupedFull256BatchedChunkCount_onlyWhenEnabled() {
+        func chunks(_ seqLen: Int, headDim: UInt32 = 256, q: UInt32 = 16, kv: UInt32 = 2,
+                    on: Bool = true) -> Int {
+            Attention.splitGeometry(headDim: headDim, numQHeads: q, numKVHeads: kv,
+                                    seqLen: UInt32(seqLen), kvStart: 0, preferGQASWA: false,
+                                    forceGroupedVector: true, groupedFull256Batched: on).numChunks
+        }
+        // Below 4,096 the split is today's, including fewer chunks than 16.
+        #expect(chunks(5) == 5)
+        #expect(chunks(4095) == 16)
+        #expect(chunks(4096) == 32)
+        #expect(chunks(32768) == 32)
+        for seqLen in [1, 100, 1024, 4096, 32768] {
+            #expect(chunks(seqLen) >= chunks(seqLen, on: false))
+        }
+        // Off by default, and only the Qwen 3.6 256/16/2 grouped shape changes.
+        #expect(chunks(32768, on: false) == 16)
+        #expect(chunks(32768, headDim: 512) == 16)
+        #expect(chunks(32768, q: 24, kv: 4) == 16)
     }
 
 

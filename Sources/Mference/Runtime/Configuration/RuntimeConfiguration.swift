@@ -37,7 +37,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
     /// shadow prefetch with that many speculative reads per layer.
     public static let allowedShadowPrefetchBudgets = 0...8
-    /// Full-attention KV (Gemma 4, Qwen 3.6, Inkling) starts at this many tokens. A
+    /// Full-attention KV (Qwen 3.6) starts at this many tokens. A
     /// prompt that does not fit grows it to the prompt plus this many more,
     /// room for the answer; an answer that outgrows that room grows it by half
     /// as much at a time, up to `--max-context`. Metal charges a KV buffer in full once
@@ -124,7 +124,15 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// an A B B A run) for +351 MB of Metal allocation, 210 MB of it sliding
     /// KV ring. Qwen 3.6 has no sliding ring to grow, so 2,048 costs it +270 MB
     /// of scratch: a 2,940-token prompt went from 148.7 s to 42.7 s with decode
-    /// unchanged (2026-09-21). The server's `--prefill-chunk` and then
+    /// unchanged (2026-09-21). The Unsloth UD-IQ3_XXS Flash-Next install
+    /// re-reads its 47 GB routed-expert pool once per chunk: through the
+    /// server a 2,940-token prompt's first token took 321 s at 128 before
+    /// prefill batched its per-token GEMV loops; with them it takes 108-110 s
+    /// at 1,024 and 87-88 s at 4,096 (one chunk, one sweep), with peak
+    /// footprints of 2.3 and 4.4 GB (2026-11-17, 32 GB M1 Max). It takes
+    /// 4,096 on hosts with at least 32 GiB and 1,024 on hosts from 16 GiB up
+    /// to but not including 32 GiB. Vendor Flash-Next keeps 128 (unmeasured
+    /// here). The server's `--prefill-chunk` and then
     /// `MFERENCE_SERVER_PREFILL_CHUNK` override.
     public static func defaultServerPrefillChunkTokens(
         for family: ModelFamily,
@@ -138,7 +146,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         let gib = UInt64(1) << 30
         guard physicalMemoryBytes >= 16 * gib else { return 128 }
         switch family {
-        case .gemma4, .qwen36: return 2048
+        case .qwen36: return 2048
         default: return 128
         }
     }
@@ -176,41 +184,48 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// (short −2%, long −56% from page-cache thrash), and 128 near-resident
     /// slots beat nothing, because at 32 slots the page cache already holds
     /// the whole expert pool. Qwen 3.6 therefore stays on the slot rule.
-    /// Flash-Next separately selects resident mapping at ≥192 GiB when the
-    /// routed pool and core still leave the fixed headroom above.
-    ///
-    /// GLM-5.3-Flash is the other measured exception: its whole INT4 expert
-    /// set (~171 GB) fits a 256 GB host beside the ~10 GB core, and with the
-    /// experts resident its runner routes on the GPU with no per-layer CPU
-    /// round trip, so `auto` picks `.resident` whenever pool + core + the
-    /// resident reserve + 16 GiB for KV, scratch and the process fit physical
-    /// memory. Smaller hosts fall back to the slot rule.
     public static func defaultExpertStreamingMode(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
         expertPoolBytes: UInt64,
         coreWeightsBytes: UInt64
     ) -> ExpertStreamingMode {
-        let gib = UInt64(1) << 30
-        let reserve = residentHeadroomBytes
-        if family == .qwen38flashnext,
-           physicalMemoryBytes >= 192 * gib,
-           coreWeightsBytes <= physicalMemoryBytes - reserve,
-           expertPoolBytes <= physicalMemoryBytes - reserve - coreWeightsBytes {
-            // The routed pool is ~68 GiB. Mapping it on the 256 GiB M3 Ultra
-            // improved the full protocol to 15.12/15.39/14.91 tok/s and avoids
-            // the 17 GiB zero-filled allocation of the runner-up 128-slot rung.
-            return .resident
-        }
-        if family == .glm53Flash {
-            let runtimeReserve = UInt64(16) * gib
-            let (sum1, o1) = expertPoolBytes.addingReportingOverflow(coreWeightsBytes)
-            let (sum2, o2) = sum1.addingReportingOverflow(reserve + runtimeReserve)
-            if !o1, !o2, physicalMemoryBytes >= sum2 { return .resident }
-        }
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes))
+    }
+
+    /// Memory the prefill-sweep rule treats as unavailable to the page cache
+    /// beside the wired expert slots: the OS, other processes, and the
+    /// process's own KV, scratch and Metal heaps. On the M1 Max 32 GiB
+    /// (2026-11-15 A/B), file-backed pages never exceeded 14.36 GB while
+    /// Qwen 3.6 ran 96 slots (6.79 GB), so at least 34.36 − 6.79 − 14.36 =
+    /// 13.2 GB (12.3 GiB) was unavailable; 12 GiB rounds that down.
+    static let prefillSweepReserveBytes = UInt64(12) << 30
+
+    /// Whether prefill expert sweeps read through an `F_NOCACHE` descriptor.
+    /// A buffered sweep pulls most of each layer's experts through the page
+    /// cache; when the pool cannot stay cached anyway, that pass only evicts
+    /// pages decode reuses, the mapped core weights among them. Measured on
+    /// Qwen 3.6 at 32 GiB (2026-11-15, A B B A): the unbuffered sweep cut
+    /// medium-review prefill 9–18% and the server's 2,940-token TTFT 12–15%,
+    /// with identical output. Every other family keeps buffered sweeps: none
+    /// was measured, and `F_NOCACHE` would change its I/O.
+    static func prefillSweepBypassesPageCache(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        expertPoolBytes: UInt64,
+        wiredSlotBytes: UInt64,
+        coreWeightsBytes: UInt64
+    ) -> Bool {
+        guard family == .qwen36 else { return false }
+        var required = prefillSweepReserveBytes
+        for term in [expertPoolBytes, wiredSlotBytes, coreWeightsBytes] {
+            let (sum, overflow) = required.addingReportingOverflow(term)
+            if overflow { return true }
+            required = sum
+        }
+        return required > physicalMemoryBytes
     }
 
     /// Auto pool sizing for the paged KV cache: everything resident when it

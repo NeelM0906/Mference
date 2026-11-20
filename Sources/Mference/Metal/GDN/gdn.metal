@@ -34,6 +34,32 @@ constant constexpr float kGdnRmsEps = 1e-6f;
 // before, and only a caller that asks for sigmoid gets a different kernel.
 constant bool FC_GDN_GATE_SIGMOID [[function_constant(99)]];
 
+// GGUF checkpoints (WS4, llama.cpp's `_LinearAttentionVReorderBase`): value
+// heads in **tiled** order, so value head `h` reads key head `h % Hk` instead
+// of `h / (Hv / Hk)`; and the decay stored as `A = -exp(A_log)` in FP32
+// (`ssm_a`, not invertible exactly), read directly through the `A_log`
+// binding. UNSET constants keep every shipped pipeline's code unchanged.
+constant bool FC_GDN_A_DIRECT [[function_constant(97)]];
+constant bool FC_GDN_V_TILED  [[function_constant(98)]];
+
+static inline bool gdn_a_direct() {
+    return is_function_constant_defined(FC_GDN_A_DIRECT) && FC_GDN_A_DIRECT;
+}
+
+// The key head value head `h` reads.
+static inline uint gdn_key_head(uint h, uint Hk, uint ratio) {
+    return (is_function_constant_defined(FC_GDN_V_TILED) && FC_GDN_V_TILED)
+        ? h % Hk : h / ratio;
+}
+
+// `-exp(A_log[h])`, or the stored FP32 `A[h]` under FC_GDN_A_DIRECT.
+static inline float gdn_neg_a(device const bfloat* A_log, uint h) {
+    if (gdn_a_direct()) {
+        return reinterpret_cast<device const float*>(A_log)[h];
+    }
+    return -exp(float(A_log[h]));
+}
+
 constant uint FC_GDN_IN_QKV    [[function_constant(90)]];
 constant uint FC_GDN_IN_Z      [[function_constant(91)]];
 constant uint FC_GDN_IN_AB     [[function_constant(92)]];
@@ -364,12 +390,12 @@ kernel void gdn_delta_step_decode(
     const uint lane = tpos.x;
     if (h >= Hv || dv >= Dv) return;
 
-    const uint hk = h / (Hv / Hk);
+    const uint hk = gdn_key_head(h, Hk, Hv / Hk);
     device const half* q = conv_out + hk * Dk;
     device const half* k = conv_out + Hk * Dk + hk * Dk;
     device const half* v = conv_out + 2u * Hk * Dk + h * Dv;
 
-    const float g = exp(-exp(float(A_log[h]))
+    const float g = exp(gdn_neg_a(A_log, h)
                         * gdn_softplus(float(a_proj[h]) + float(dt_bias[h])));
     const float beta = 1.0f / (1.0f + exp(-float(b_proj[h])));
 
@@ -595,11 +621,11 @@ kernel void gdn_delta_gated_decode_qwen38(
     threadgroup float norm_partial[4];
     threadgroup float inv_rms;
 
-    const uint hk = h / 3u;   // Hv/Hk = 3
+    const uint hk = gdn_key_head(h, Hk, 3u);   // Hv/Hk = 3
     device const half* q = conv_out + hk * Dk;
     device const half* k = conv_out + Hk * Dk + hk * Dk;
     device const half* v = conv_out + 2u * Hk * Dk + h * Dv;
-    const float g = exp(-exp(float(A_log[h]))
+    const float g = exp(gdn_neg_a(A_log, h)
                         * gdn_softplus(float(a_proj[h]) + float(dt_bias[h])));
     const float beta = 1.0f / (1.0f + exp(-float(b_proj[h])));
 
@@ -684,8 +710,8 @@ kernel void gdn_delta_step_prefill(
     const uint lane = tpos.x;
     if (h >= Hv || dv >= Dv) return;
 
-    const uint hk = h / (Hv / Hk);
-    const float expA = exp(float(A_log[h]));
+    const uint hk = gdn_key_head(h, Hk, Hv / Hk);
+    const float negA = gdn_neg_a(A_log, h);
     const float dtb = float(dt_bias[h]);
 
     const uint nPerLane = Dk / 32u;
@@ -701,7 +727,7 @@ kernel void gdn_delta_step_prefill(
         device const half* k = conv_out + t * C + Hk * Dk + hk * Dk;
         device const half* v = conv_out + t * C + 2u * Hk * Dk + h * Dv;
 
-        const float g = exp(-expA * gdn_softplus(float(a_proj[t * Hv + h]) + dtb));
+        const float g = exp(negA * gdn_softplus(float(a_proj[t * Hv + h]) + dtb));
         const float beta = 1.0f / (1.0f + exp(-float(b_proj[t * Hv + h])));
 
         float kv = 0.0f;

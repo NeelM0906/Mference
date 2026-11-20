@@ -77,8 +77,8 @@ public struct Args: Equatable, Sendable {
     /// installed checkpoint carries the required FlashHead tensors.
     public var flashHead: Bool
     /// Model-integrity policy. `.fullSha256` re-hashes every routed-expert
-    /// file on first touch — 145 GB for Inkling-Small, ~59 s inside the first
-    /// prefill. `.sizeCheckTrustedReceipt` checks sizes against the receipt
+    /// file on first touch, inside the first prefill.
+    /// `.sizeCheckTrustedReceipt` checks sizes against the receipt
     /// written at install time instead. The default uses the receipt when it
     /// validates and hashes otherwise.
     public var verification: ModelIntegrityPolicy
@@ -184,7 +184,7 @@ extension Args {
     private static let samplingDefaults = GenerationConfig.defaults
 
     public static let usage = """
-    MferenceCLI — Gemma 4 / Qwen 3.6 / DeepSeek V4 Flash / Inkling-Small / Maple / GLM-5.3 Flash text generation
+    MferenceCLI — Qwen 3.6 / Qwen 3.8 / Maple / MiniCPM5 text generation
 
     usage: MferenceCLI --model <dir> (--prompt <string> | --messages-file <path> | --chat) [options]
 
@@ -196,10 +196,8 @@ extension Args {
       --messages-file <path>    JSON chat messages with role and content fields.
       --chat                    Interactive multi-turn chat on stdin.
 
-    Sampling defaults below apply to existing checkpoints. Gemma QAT
-    uses its verified local generation_config.json: temperature 1, top-k 64,
-    top-p 0.95, min-p 0 and neutral penalties. Explicit flags take precedence.
-    QAT chat uses its installed checkpoint template; preserve_thinking=true is unsupported.
+    Sampling defaults below apply unless the installed checkpoint's
+    generation_config.json sets its own. Explicit flags take precedence.
 
     options:
       --system <string>         System message for --chat (repeatable).
@@ -219,8 +217,8 @@ extension Args {
       --kv-pool-pages <n|auto>  Resident pool per full-attention layer in
                                 pages (default auto: sized from RAM).
       --kv-reserve              Reserve full-attention KV for the whole
-                                context up front. Without it, Gemma 4,
-                                Qwen 3.6 and Inkling start at 16384 tokens; a
+                                context up front. Without it, Qwen 3.6
+                                starts at 16384 tokens; a
                                 longer prompt grows it to the prompt plus
                                 16384, a longer answer by 8192 at a time.
       --temperature <float>     Sampling temperature (default \(samplingDefaults.temperature); 0 = greedy).
@@ -240,9 +238,7 @@ extension Args {
                                 Routed-expert cache slots per layer: 8, 16,
                                 24, 32, 64, 96, 128, resident, or auto.
                                 resident maps every layer file once and skips
-                                the slot cache entirely. auto maps Flash-Next's
-                                routed pool on 192 GiB+ hosts when 32 GiB of
-                                headroom remains; Qwen 3.6 gets 96 slots on
+                                the slot cache entirely. auto gives Qwen 3.6 96 slots on
                                 hosts with at least 24 GiB, 32 with at least
                                 16 GiB, else 16; other cases get 16.
                                 More slots raise the hit rate but use more RAM.
@@ -257,21 +253,22 @@ extension Args {
                                 the exact head.
       --shadow-budget <0...8>   Speculative expert prefetch during decode: reads
                                 issued per layer ahead of the router. 0 turns it
-                                off. Default: 4 for Qwen 3.6 and Gemma 4 on
-                                hosts with 16 to under 24 GiB, 2 for
-                                DeepSeek-V4-Flash, off elsewhere. Output is
-                                identical at every value.
+                                off. Default: 4 for
+                                Qwen 3.6 on hosts with 16 to under
+                                24 GiB and 8 at 24 GiB; 8 for Qwen 3.6 up to
+                                32 GiB; off elsewhere. Output is identical at
+                                every value.
       --verify <mode>           Model integrity: auto (default) checks file
                                 sizes against the receipt written at install
                                 time when that receipt validates, and hashes
                                 otherwise; full-sha256 re-hashes every
-                                routed-expert file on first touch, which for a
-                                145 GB expert pool costs ~59 s inside the
-                                first prefill; trusted-receipt requires the
+                                routed-expert file on first touch, which costs
+                                time inside the first prefill; trusted-receipt
+                                requires the
                                 receipt and fails without it.
-      --reasoning-effort <mode>  Gemma 4 / Qwen chat: xhigh, medium, low,
-                                or none. Gemma 4 and Qwen 3.6 use binary
-                                on/off aliases. Not applied to raw prompts.
+      --reasoning-effort <mode>  Qwen chat: xhigh, medium, low, or none.
+                                Qwen 3.6 uses binary on/off aliases. Not
+                                applied to raw prompts.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """

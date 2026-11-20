@@ -1,0 +1,11 @@
+# The root .gitignore drops any `Model/` directory (weights) and every
+# `*.xcodeproj`; here the Model folder is source and the project is the iOS
+# app's, so re-include both.
+!MferenceMobileKit/Sources/**/Model/
+!MferenceMobile.xcodeproj/
+
+# Per-user Xcode state.
+xcuserdata/
+MferenceMobile.xcodeproj/project.xcworkspace/
+.swiftpm/
+.build/

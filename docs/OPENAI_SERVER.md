@@ -6,22 +6,14 @@ Tailscale IPv4 address with `--bind tailnet`. It has no application-level
 authentication or TLS; do not expose it through a wildcard interface, proxy,
 or tunnel.
 
-This document is the API: one model per process, named by `--model`. If you want
-the **user interface** — a browser, a model picker, chats that persist — start
-at [The Mference UI (Open WebUI)](OPEN_WEBUI.md) and run `./mference-ui.sh`,
-which does everything below for you.
-
-The `--library` mode that UI runs on serves every installed model from this one
-process, listing them all in `/v1/models` and swapping the resident model in
-place when a request names a different one. It changes nothing about the mode
-described here, which is what runs whenever `--library` is absent. The UI guide
-covers library mode, its model identifiers, and the cost of a swap.
+By default it serves one model per process, named by `--model`.
+[Library mode](#library-mode) (`--library`) instead serves every product model
+from one process and swaps the resident model in place.
 
 ## Start the server
 
-First, install the model with `MferenceRepack` or
-`./mference-ui.sh install <family>`. Then check that no other Mference model
-process is running:
+First, install the model with `MferenceRepack`. Then check that no other
+Mference model process is running:
 
 ```bash
 pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
@@ -32,7 +24,7 @@ If the command prints a match, do not start the server.
 ```bash
 swift build -c release --product MferenceServer
 .build/release/MferenceServer \
-  --model scratch/gemma4.gturbo \
+  --model scratch/qwen36.gturbo \
   --port 8080 \
   --max-context 16384
 ```
@@ -46,7 +38,7 @@ bind the machine's Tailscale IPv4 address:
 
 ```bash
 .build/release/MferenceServer \
-  --model scratch/gemma4.gturbo \
+  --model scratch/qwen36.gturbo \
   --bind tailnet \
   --port 8080 \
   --max-context 32768 \
@@ -71,7 +63,7 @@ curl --silent --show-error http://127.0.0.1:8080/v1/models
 curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gemma-4-26b-a4b-it",
+    "model": "qwen3.6-35b-a3b",
     "messages": [{"role": "user", "content": "Reply with exactly READY."}],
     "temperature": 0,
     "max_completion_tokens": 16
@@ -84,8 +76,9 @@ By default, the server runs one generation and queues up to four requests. Use
 Model integrity follows `--verify`, on the first load and on every library
 swap. The default `auto` checks the routed-expert files against the install
 receipt's sizes when that receipt validates and hashes them on first touch
-otherwise; `--verify full-sha256` always hashes, which adds that time to the
-first prefill after each load. See
+otherwise, logging a `notice: --verify auto: …` line that names the failed
+receipt check; `--verify full-sha256` always hashes, which adds that time to
+the first prefill after each load. See
 [Runtime settings](RUNTIME_CONTROLS.md#runtime-settings) for the trade-off.
 
 ## Connect a client
@@ -100,7 +93,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
 response = client.chat.completions.create(
-    model="gemma-4-26b-a4b-it",
+    model="qwen3.6-35b-a3b",
     messages=[{"role": "user", "content": "Say hello in one sentence."}],
 )
 print(response.choices[0].message.content)
@@ -120,8 +113,8 @@ OpenCode:
         "apiKey": "local"
       },
       "models": {
-        "gemma-4-26b-a4b-it": {
-          "name": "Gemma 4 26B-A4B IT"
+        "qwen3.6-35b-a3b": {
+          "name": "Qwen 3.6 35B-A3B"
         }
       }
     }
@@ -129,31 +122,58 @@ OpenCode:
 }
 ```
 
-Select `mference/gemma-4-26b-a4b-it` in OpenCode.
+Select `mference/qwen3.6-35b-a3b` in OpenCode.
 
 ## Prompt reuse
 
-Single-prefix KV reuse is on by default. Send the complete message history with
-every request. When a request continues the retained conversation exactly, the
+KV prefix reuse is on by default. Send the complete message history with
+every request. When a request continues a retained conversation exactly, the
 server reuses the verified KV prefix and reports the number of reused tokens in:
 
 ```text
 usage.prompt_tokens_details.cached_tokens
 ```
 
-The server retains one prefix. A different or incompatible history replaces
-it. Use `--prompt-cache-mode off` to disable reuse.
+`--prompt-cache-mode` selects how many prefixes are retained:
 
-For Gemma, a new user message applies Google's thought-stripping template.
-The server reuses the longest unchanged prefix whose state is still valid,
-rewinding current KV or restoring one bounded sliding-window snapshot before
-prefilling the remaining tokens. A tool continuation keeps the same snapshot;
-a new user turn replaces it before generating thoughts. Full-attention prefix
-rows stay in their original buffers. At most 199.81 MiB is allocated for the
-pinned Gemma recovery image (less for short histories), only with caching on.
-Missing state or incompatible history falls back to full prefill. Cancellation,
-errors, model replacement and reset invalidate recovery. Clients continue to
-send complete history; Qwen keeps its existing continuation behavior.
+| Mode | Retains |
+| --- | --- |
+| `multi-prefix` (default) | Qwen 3.6: the end of every finished turn, across conversations, within `--prompt-cache-bytes`. Every other model, and any runner that cannot snapshot its state: as `single-prefix`. |
+| `single-prefix` | The last finished turn. A different or incompatible history replaces it. |
+| `off` | Nothing; every request prefills its whole prompt. |
+
+Deep (`qwen3.8-27b`) is the exception: with MTP draft decoding on, every request
+prefills its whole prompt, and `cached_tokens` is 0.
+
+With `multi-prefix`, Qwen 3.6 keeps a copy of its recurrent state (about
+61 MiB) at the end of each finished turn. While one conversation continues,
+its attention KV stays in the runner and nothing else is copied. Before a
+request writes over KV that a retained turn still needs (another
+conversation, or an edited or regenerated earlier message), the conversation's
+KV up to its latest retained turn is copied out, even when only its end will
+be overwritten: 20 KiB per token, 640 MiB for a 32K-token conversation. A later request
+that continues any retained turn restores it and prefills only what it adds.
+`--prompt-cache-bytes <bytes|auto>` caps these copies; the least recently used
+are released first, and a copy that does not fit is skipped. `auto` is the
+smaller of 4 GiB and an eighth of physical memory on Macs with at least
+24 GiB, 1 GiB from 16 GiB, and 0 below. `0` serves exactly as
+`single-prefix`. The copies are released when the model is unloaded or
+swapped; cancellation and errors release only the conversation that was in
+the runner. When macOS reports memory pressure (warning or critical), the
+server keeps no new copies, and at the first moment no request is running it
+releases every copy except the conversation in the runner. Copies are kept
+again once pressure returns to normal. Some Macs swap before they report
+pressure, so swap is watched too. If swap grows by more than 256 MiB after
+the copies last grew, the server releases copies back to their size before
+that growth, and keeps no new ones until swap has grown by less than 16 MiB
+over a minute.
+
+A restored prefix continues from exactly the state the turn ended in, so a
+request gets the same output it would get from `single-prefix` had no other
+request come between its turns. Neither mode is byte-identical to prefilling
+the whole history from scratch: a continued turn's new tokens are prefilled
+as one short chunk, and earlier replies stay as generated rather than
+re-rendered.
 
 ## Tool calls
 
@@ -165,8 +185,7 @@ execute them. The client runs the tool loop:
    argument object. Apply the client's normal permission checks before running
    the function.
 3. Append the assistant message, including its unchanged `tool_calls` and any
-   `reasoning_content`. Gemma needs that reasoning between tool calls within
-   the current user turn.
+   `reasoning_content`.
 4. Append each result as a `role: "tool"` message. Its `tool_call_id` must
    match the call it resolves.
 5. Send the complete history and tool schemas again.
@@ -175,18 +194,47 @@ The server accepts only function tools. Omit `tool_choice` or set it to `auto`
 to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
 
-Original Gemma tool-result continuation retains the generated reasoning/KV and prefills
-only the verified results and next generation suffix. Repeated function names
-and arguments, including multiple calls in one response, are valid. A new
-user turn uses Google's canonical history policy; it cannot take the tool-loop
-append path to retain thoughts that the template strips. This also corrects
-legacy non-thinking history: the empty thought block used to start generation
-is not inserted into prior assistant messages by the canonical template.
+## Library mode
 
-QAT uses its own installed source template. That template may normalize the
-current tool-call turn, so QAT reuse requires an actual matching source prefix;
-the server recovers that prefix and recomputes the remaining source-rendered
-tokens. Resumed input matches a fresh source render.
+With `--library`, the server scans for completed installs and serves the
+product models among them through the [engine](ENGINE.md) (`EngineCatalog` and
+`EngineHost`).
+
+- A bare `--library` scans the default roots: the `Mference.libraryRoot` user
+  default (or `MFERENCE_LIBRARY_ROOT`) if set, `~/llm-models`, the checkout's
+  `scratch/`, and `~/Library/Application Support/Mference`. `--library <dir>`
+  scans that root instead, and repeats; add a bare `--library` to keep the
+  defaults too. Each root contributes itself and its immediate subdirectories.
+- `.gturbo` installs are detected by their own `manifest.json` and install
+  receipt, never by directory name. `.gguf` files are found in each root and in
+  `~/llm-models/gguf`. Partial installs and installs locked by a running
+  `MferenceRepack` are skipped, and every skip is logged once on stderr with
+  its reason.
+- `--catalog product` (the default) lists only the product models, under their
+  stable identifiers: `qwen3.5-4b` (Quick) and `qwen3.8-27b` (Deep) through
+  llama.cpp, and `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and
+  `maple-preview-2bit-mlx` through the native runtime. A request for any other
+  runnable install gets `400 model_not_runnable`. `--catalog all` is a
+  developer switch that lists every runnable install; extra installs of one
+  family get an `@<directory basename>` suffix.
+- `MferenceServer --library --list-models` prints what would be served, with
+  engine, size and path, without loading anything or binding a port.
+- `--model-id` is refused in library mode. The library is fixed at startup.
+
+A request that names a model other than the resident one swaps it in process.
+The running and queued generations finish first, the resident model is
+released, and only then does the new one load, so peak memory is one model.
+The request waits for the load rather than getting `503`. The first token
+after a switch therefore takes seconds to tens of seconds, or longer when the
+expert pool has to be hashed. While a model loads, `/health` reports
+`{"status":"loading","model":"…"}`. A failed load leaves nothing resident, and
+the next request retries.
+
+In library mode, prompt rendering and the context check run in the request's
+turn, because the tokenizer belongs to the model being swapped in. A request
+that waited behind another streaming generation therefore reports those
+failures in-band (see [Errors](#errors)), and one that did not wait still gets
+its real status.
 
 ## Errors
 
@@ -258,14 +306,18 @@ Endpoints:
 Each model in `GET /v1/models` carries `max_model_len`, vLLM's field: the
 context window for prompt plus completion that the model runs with. That is
 the numeric `--max-context`, or with `--max-context max` the model family's
-native context. In library mode it comes from the install index, so listing
+native context. In library mode it comes from the engine catalog, so listing
 loads nothing and answers during a model load.
+
+Each model also carries `engine`: what runs it, `mference` (a `.gturbo`
+install on Mference's own runtime) or `llama.cpp` (a GGUF file). It is
+metadata for a model picker and changes nothing else about the API.
 
 Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.
 
-For ChatML (including base/Swift Qwen), GLM and MiniCPM, usage also includes
+For ChatML (including Qwen) and MiniCPM, usage also includes
 `completion_tokens_details.reasoning_tokens` and the Mference extension
 `visible_tokens`. These count generated payload tokens in each channel,
 including whitespace and buffered byte tokens, not re-tokenized rendered text.
@@ -284,13 +336,11 @@ supplied), `prompt_ms` and `prompt_per_second` for prefill, and `predicted_n`,
 
 Requests may contain system, developer, user, assistant, and tool messages.
 Guidance must precede the conversation, and consecutive messages of the same
-guidance role are merged into one block separated by a blank line. Only
-Gemma's chat template has a distinct `developer` role; with any other family
-loaded a `developer` message is treated as a `system` message — it merges
-with adjacent system guidance instead of rendering as its own block.
-Exception: Swift-Qwen, and base Qwen 3.8 requests with an explicit
-`reasoning_effort`, use the source template and reject `developer`; use leading
-`system` guidance instead.
+guidance role are merged into one block separated by a blank line. A
+`developer` message is treated as a `system` message — it merges with adjacent
+system guidance instead of rendering as its own block.
+Exception: base Qwen 3.8 requests with an explicit `reasoning_effort` use the
+source template and reject `developer`; use leading `system` guidance instead.
 Supported options include `temperature`, `top_p`, `top_k`, `min_p`,
 `presence_penalty`, `frequency_penalty`, `repetition_penalty` (alias
 `repeat_penalty`), `repeat_last_n`, `seed`, `stop`, `max_tokens`,
@@ -300,8 +350,9 @@ aliases are rejected.
 When an install carries the checkpoint's `generation_config.json`, its sampler
 values replace these defaults; otherwise the defaults below (temperature `0.8`,
 Top-K `40`) apply. Keys the checkpoint leaves out are off (no Top-K, Top-P, or
-Min-P, and neutral penalties), and Top-P below 1 without Top-K uses a 256-token
-window.
+Min-P, and neutral penalties), and Top-P below 1 without Top-K uses a 64-token
+window, the widest the fused sampler handles (full-vocabulary nucleus is not
+implemented).
 
 Without a checkpoint `generation_config.json`, all families default to temperature `0.8`, Top-K `40`, Top-P `0.95`, Min-P
 `0.05`, repetition penalty `1.0`, presence/frequency penalties `0.0`, and a
@@ -317,17 +368,35 @@ Penalties act on post-softcap logits: positive seen-token logits are divided
 by repetition penalty, nonpositive logits multiplied; then subtract
 `count * frequency_penalty + presence_penalty`. Counts are restricted to the
 penalty window. Nonzero penalties with an enabled window require the logits
-path even at temperature zero. See [sampling compatibility](LLAMA_SAMPLING.md).
+path even at temperature zero.
 Top-K accepts `0` (off) or `1...256`; with positive temperature, disabling
 Top-K requires `top_p: 1`. Full-vocabulary Min-P remains supported.
 
-Base and Swift Qwen 3.8 accept `reasoning_effort` values `xhigh`, `medium`, `low`,
-and `none`. An explicit value uses the source template, retains reasoning in a
+Qwen 3.8 accepts `reasoning_effort` values `xhigh`, `medium`, `low`, and
+`none`. An explicit value uses the source template, retains reasoning in a
 separate `reasoning_content` response/history field, and allows only exact
 rendered-prefix cache reuse. Preserve that field when replaying history.
-Omitted effort retains Swift's source-default xhigh and base Qwen's legacy
-behavior; the latter does not stream hidden reasoning. Do not treat those two
-omitted-effort policies as a matched fine-tune comparison.
+Omitted effort retains Qwen 3.8's legacy behavior, which does not stream
+hidden reasoning.
+
+The GGUF models in library mode take their thinking controls from the chat
+template in the GGUF file:
+
+- Quick (`qwen3.5-4b`) reads only `enable_thinking`. With `reasoning_effort` and
+  `chat_template_kwargs.enable_thinking` omitted, its template default applies
+  (no thinking). `none` (or `enable_thinking: false`) renders with
+  `enable_thinking=false`; `low`, `medium` and `xhigh` (or
+  `enable_thinking: true`) render with `enable_thinking=true`. `developer`
+  messages are accepted and treated as `system` guidance.
+- Deep (`qwen3.8-27b`) carries Qwen 3.8's source template, so the Qwen 3.8 rules
+  above apply: it reads `reasoning_effort` (`xhigh`, `medium`, `low`, `none`;
+  omitted is `xhigh` with thinking on), and a request with an explicit effort
+  rejects `developer` messages. Deep is served with MTP draft decoding
+  (llama.cpp's `draft-mtp`). Its greedy output is equivalent to decoding
+  without MTP but not guaranteed byte-identical, since verifying drafted
+  tokens in a batch differs numerically from single-token decode (8 of 10
+  server outputs matched in validation; see [the engine](ENGINE.md)). While
+  MTP is on, Deep reuses no prompt prefix (see Prompt reuse).
 
 Qwen 3.6 opts into its source thinking template with
 `chat_template_kwargs: {"enable_thinking": true}` or an explicit
@@ -339,51 +408,8 @@ the cached generated turn with a verified source-template suffix, including
 tool-result rounds. `preserve_thinking` is accepted for compatibility; source
 template history always preserves reasoning. Thinking requests without an
 explicit completion cap default to 32,768 tokens, subject to available context.
-Gemma 4 also accepts these controls, with the policy below. Other models reject
-explicit thinking controls. Sampling and MTP defaults remain unchanged.
-
-Gemma 4 thinking is opt-in in both single-model and library mode, including
-custom model aliases. Use `chat_template_kwargs: {"enable_thinking": true}`
-or `reasoning_effort: "low"|"medium"|"xhigh"`; these three aliases enable the
-same binary mode. `none` disables it, and an explicit effort takes precedence
-over `enable_thinking`. Omitted controls leave thinking off. Its default
-completion cap remains 4,096 tokens, including reasoning; a cap reached during
-thought may return empty `content` and `finish_reason: "length"`.
-
-JSON and SSE responses return Gemma thoughts separately as `reasoning_content`.
-Replay that field on assistant messages, particularly between tool-result
-rounds. Google's template retains thoughts within the active user turn and
-strips earlier thoughts when a new user message arrives. For both Gemma
-checkpoints, the HTTP server accepts `chat_template_kwargs.preserve_thinking`
-for generic-client compatibility and normalizes it to `false` before rendering
-and cache matching. Tool-call reasoning remains available within the current
-user turn; the selected source template removes older reasoning after a new
-user prompt. This option does not enable or disable thinking. Gemma does not
-report estimated reasoning-token usage counts.
-
-This changes the former HTTP contract: ordinary Gemma no longer retains older
-tool-call thoughts when a client sends `preserve_thinking=true`, and QAT no
-longer rejects that value. Clients should continue replaying `reasoning_content`;
-the server applies the model's history policy without changing client messages.
-
-The app bundles Google's canonical template at revision
-`35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. Existing valid installs need no
-weight download or repack. Ordinary and tool chat use the same template;
-canonical formatting trims message content and keeps tool responses inside
-the model turn. The effective template has its own cache identity. A missing
-or damaged template resource requires rebuilding/reinstalling the application,
-not the model weights.
-
-The separate `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned` checkpoint instead uses
-its verified installed template and generation settings, including through a
-custom alias or library swap. Its thinking switch follows the same opt-in
-rules, but its source drops ordinary assistant reasoning and retains tool-call
-reasoning only after the latest user message. Every accepted
-`preserve_thinking` value follows that source policy, including while queued.
-The two checkpoints retain their distinct source templates; their prompt bytes
-and cache reuse counts need not be identical. After tool results, the source suffix does
-not pre-open a thought channel. Reasoning, visible content and tool calls still
-use the same separate API fields. See [QAT defaults and qualification](RUNTIME_CONTROLS.md#gemma-qat).
+Other models reject explicit thinking controls. Sampling and MTP defaults
+remain unchanged.
 
 For Qwen 3.6's recommended general-thinking sampling profile, send these
 explicit options along with `model` and `messages`:
@@ -416,18 +442,15 @@ set the server uses 4096) — or the reasoning budget swallows the visible
 answer and the request finishes with `finish_reason` `"length"`.
 
 `--max-context` takes any length up to the model's native context (default
-16K): 262,144 tokens for Gemma 4 (QAT included), Qwen 3.6, Qwen 3.8 and
-Flash-Next; 131,072 for MiniCPM5; 128,000 for Maple; 1,048,576 for
-DeepSeek-V4-Flash, Inkling-Small and GLM-5.3-Flash. `--max-context max` gives
-every model its own native context, which suits a library of different
-models; families that do not grow their KV (all but Gemma 4, Qwen 3.6 and
-Inkling) then reserve that whole context when they load. A model whose native
+16K): 262,144 tokens for Qwen 3.6 and Qwen 3.8; 131,072 for MiniCPM5; 128,000
+for Maple. `--max-context max` gives every model its own native context, which
+suits a library of different models; families that do not grow their KV (all
+but Qwen 3.6) then reserve that whole context when they load. A model whose native
 context is shorter refuses to load: with `--model` the server exits at
 startup, and in library mode the request that asked for it gets HTTP 400
-`context_exceeds_model`. At 262,144 Gemma 4 QAT needs about 9.15 GiB with
-server settings, 5.02 GiB of it growing with context.
+`context_exceeds_model`.
 
-Gemma 4, Qwen 3.6 and Inkling-Small do not reserve their full-attention KV for
+Qwen 3.6 does not reserve its full-attention KV for
 `--max-context` up front. It starts at 16,384 tokens (a context of 16,384 or
 less is reserved whole); a prompt that does not fit grows it to the prompt
 plus 16,384 tokens, room for the answer, and an answer that outgrows that
@@ -436,9 +459,7 @@ address space for the whole context and grows its Metal buffer over the same
 pages, so rows are never copied and the KV is never held twice; a new
 conversation starts again from 16,384 and returns the pages. Metal charges a
 KV buffer in full once it is bound, so a whole reservation costs memory a
-short chat never uses: on a 16 GiB M2 reserving 262,144 instead of 128,000
-took 2.6 GiB from the page cache holding routed experts and cut QAT decode
-from about 6.3 to 4.6 tok/s. `--kv-reserve` reserves the whole context at load
+short chat never uses. `--kv-reserve` reserves the whole context at load
 instead; the other families always do. Pages the GPU writes into a growing
 KV count as wired system memory rather than in the server process's own
 footprint, so Activity Monitor shows the process smaller than its KV.

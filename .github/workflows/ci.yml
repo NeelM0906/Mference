@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - mference-app
   pull_request:
     types:
       - opened
@@ -21,59 +22,99 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # Picks how much of the Swift suite this run needs (engine program spec
+  # section 12, changes 2 and 5):
+  #   pull_request  path-scoped by .github/scripts/ci-scope.sh: docs-only PRs
+  #                 skip the test job; engine, server, llama.cpp and script PRs
+  #                 run without MferenceTestsCore (t0); anything else runs the
+  #                 default suite (full).
+  #   push          main and mference-app run t0; the full suite on the merged
+  #                 tip is the coordinator's local G12 run.
+  #   workflow_call release validation runs the default suite plus the
+  #                 production-shape full tier (MFERENCE_TEST_TIER=full).
+  changes:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # macos-15 holds the Swift 6.1 / macOS 15 SDK floor; macos-26 exercises the
-    # MSL 4.0 tensor-ops path. Both must build.
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The pull request's base and head commits are needed for the diff.
+          fetch-depth: 0
+      - name: Test the scope classifier
+        run: python3 .github/scripts/test_ci_scope.py
+      - name: Classify changed paths
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request)
+              # --no-renames lists a moved file under both its old and new
+              # path, so moving a file out of a full-scope path still counts.
+              # A failed diff leaves the list empty, which the classifier
+              # treats as full.
+              files=$(git diff --name-only --no-renames "$BASE...$HEAD" || true)
+              scope=$(printf '%s\n' "$files" | bash .github/scripts/ci-scope.sh)
+              count=$(printf '%s\n' "$files" | grep -c . || true)
+              ;;
+            push)
+              scope=t0
+              ;;
+            *)
+              scope=full
+              ;;
+          esac
+          echo "event=$EVENT changed=${count:-n/a} scope=$scope"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.scope == 't0' || needs.changes.outputs.scope == 'full'
+    # macos-26 runs the suite (including the MSL 4.0 tensor-ops path) on the
+    # declared macOS 26 floor, with the image's default Swift (6.2+). Release configuration is built
+    # locally before every merge (engine program G1).
     strategy:
       fail-fast: false
       matrix:
         runner:
-          - macos-15
           - macos-26
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Report toolchain
         run: swift --version
-      - name: Hold the Swift floor
-        if: matrix.runner == 'macos-15'
+      - name: Run serial tests (${{ needs.changes.outputs.scope }})
+        env:
+          SCOPE: ${{ needs.changes.outputs.scope }}
+          # Release validation (workflow_call) also runs the production-shape
+          # cases; pull requests and pushes leave them to the nightly run.
+          MFERENCE_TEST_TIER: ${{ (github.event_name != 'pull_request' && github.event_name != 'push') && 'full' || '' }}
         run: |
-          # This leg exists only to prove the declared floor still builds. If
-          # the runner image's default Xcode moves forward, the leg would
-          # quietly start testing a newer toolchain and the floor would rot
-          # unnoticed, so fail loudly instead.
-          version=$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
-          # Exact match: the sed above yields major.minor only, so a glob like
-          # 6.1* would also accept a future 6.10 and silently stop testing the
-          # floor this leg exists to hold.
-          case "$version" in
-            6.1)
-              echo "floor leg is exercising Swift $version, as intended"
-              ;;
-            *)
-              echo "::error::This leg must prove the Swift 6.1 floor declared in Package.swift, but the runner provides Swift $version. Select an Xcode that ships Swift 6.1, or change the declared floor."
-              exit 1
-              ;;
-          esac
-      - name: Build release products
-        run: swift build -c release
-      - name: Run serial tests
-        run: Scripts/test.sh
-      - name: Check launcher and UI adapters without model downloads
+          if [ "$SCOPE" = t0 ]; then
+            Scripts/test.sh --skip '^MferenceTestsCore\.'
+            # The one MferenceTestsCore suite that reads the whole Sources/
+            # tree (no Metal device outside MetalContext), so it applies to
+            # engine, server and llama.cpp code too.
+            Scripts/test.sh --skip-build --filter '^MferenceTestsCore\.MetalContextDeviceCreationTests'
+          else
+            Scripts/test.sh
+          fi
+      - name: Check scripts without model downloads
         run: |
-          bash -n mference-ui.sh
-          python3 Scripts/tests/test_mference_ui.py
-          python3 Scripts/tests/test_openwebui_mference.py
-          python3 Scripts/tests/test_swift_qwen_task_screen.py
           python3 Scripts/tests/test_release_task_screen.py
           python3 Scripts/tests/test_release_screen_summary.py
-          python3 Scripts/tests/test_qwen_efficiency_screen.py
           python3 Scripts/tests/test_source_release.py
+          python3 Scripts/tests/test_engine_validate.py
 
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: macos-26
+    # Ruby and Python only; on Linux it no longer waits for a macOS runner, and
+    # its case-sensitive file system also catches link case mismatches.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check Markdown links

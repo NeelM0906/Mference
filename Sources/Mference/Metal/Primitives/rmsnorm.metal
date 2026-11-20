@@ -216,6 +216,18 @@ void rmsnorm_bf16w_perhead(
     }
 }
 
+// WS4 GGUF install: the group norm weights are F32 (`1 + w`, not BF16-exact),
+// read through the `weight` binding. UNSET keeps every shipped pipeline's
+// BF16 read unchanged.
+constant bool FC_RMS_GROUPED_W_F32 [[function_constant(120)]];
+
+static inline float rms_grouped_weight(device const bfloat* weight, uint i) {
+    if (is_function_constant_defined(FC_RMS_GROUPED_W_F32) && FC_RMS_GROUPED_W_F32) {
+        return reinterpret_cast<device const float*>(weight)[i];
+    }
+    return float(weight[i]);
+}
+
 // Qwen4-Exp (`qwen38flashnext`) group RMSNorm: `group_size = hidden`.
 //
 // The residual stream is `hc_count` copies of a `hidden`-wide vector laid end to
@@ -245,11 +257,11 @@ void rmsnorm_bf16w_grouped(
     const uint G = rms_fc_d(groupSize);
     device const half*   xg = x      + slot * G;
     device       half*   og = out    + slot * G;
-    device const bfloat* wg = weight + (slot % groups) * G;
+    const uint wbase = (slot % groups) * G;
     const float inv = rms_block_inv(xg, G, eps, lid, lsize,
                                     simd_lane_id, simd_group_id, simdgroups, partial);
     for (uint i = lid; i < G; i += lsize) {
-        og[i] = gemma_weighted_norm(float(xg[i]), inv, float(wg[i]));
+        og[i] = gemma_weighted_norm(float(xg[i]), inv, rms_grouped_weight(weight, wbase + i));
     }
 }
 

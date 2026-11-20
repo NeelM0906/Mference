@@ -90,6 +90,22 @@ public struct PromptPrefixCache: Sendable {
         reasoningContent: String? = nil,
         stopStringFiltered: Bool = false
     ) {
+        entry = Self.makeEntry(domain: domain, turn: turn, content: content, calls: calls,
+                               result: result, reasoningContent: reasoningContent,
+                               stopStringFiltered: stopStringFiltered)
+    }
+
+    /// The entry `publish` would hold for a finished turn, or nil when the
+    /// turn cannot be continued. Shared with the server's multi-prefix cache.
+    public static func makeEntry(
+        domain: PromptPrefixCacheDomain,
+        turn: PromptPrefixCacheTurn,
+        content: String,
+        calls: [ParsedToolCall],
+        result: RawDecodeResult,
+        reasoningContent: String? = nil,
+        stopStringFiltered: Bool = false
+    ) -> PromptPrefixCacheEntry? {
         guard result.kvPosition == result.kvBackedTokenIDs.count,
               !result.kvBackedTokenIDs.isEmpty,
               result.uncommittedBoundaryTokenIDs.count == 1,
@@ -97,8 +113,7 @@ public struct PromptPrefixCache: Sendable {
               result.reason == .endOfTurn
                 || result.reason == .toolCalls
                 || result.reason == .maxTokens else {
-            entry = nil
-            return
+            return nil
         }
         let historicalCalls = calls.map {
             MFTokenizer.HistoricalToolCall(
@@ -111,7 +126,7 @@ public struct PromptPrefixCache: Sendable {
             content: calls.isEmpty ? content : nil,
             toolCalls: historicalCalls,
             reasoningContent: reasoningContent)
-        entry = PromptPrefixCacheEntry(
+        return PromptPrefixCacheEntry(
             domain: domain,
             inputMessages: turn.messages,
             tools: turn.tools,
@@ -129,23 +144,29 @@ public struct PromptPrefixCache: Sendable {
         domain: PromptPrefixCacheDomain,
         turn: PromptPrefixCacheTurn,
         renderedPromptIDs: [Int32],
-        tokenizer: MFTokenizer,
-        gemmaRecoverablePrefix: ((Int) -> Int)? = nil
+        tokenizer: MFTokenizer
     ) -> PromptPrefixCacheMatch {
-        guard let entry,
-              entry.domain == domain,
+        guard let entry else { return .miss }
+        return Self.match(entry: entry, domain: domain, turn: turn,
+                          renderedPromptIDs: renderedPromptIDs, tokenizer: tokenizer)
+    }
+
+    /// Whether `turn` may continue from `entry`, by the same per-dialect rules
+    /// as `match`. Shared with the server's multi-prefix cache, which applies
+    /// it to each retained entry.
+    public static func match(
+        entry: PromptPrefixCacheEntry,
+        domain: PromptPrefixCacheDomain,
+        turn: PromptPrefixCacheTurn,
+        renderedPromptIDs: [Int32],
+        tokenizer: MFTokenizer
+    ) -> PromptPrefixCacheMatch {
+        guard entry.domain == domain,
               entry.tools == turn.tools,
               entry.kvPosition == entry.kvBackedTokenIDs.count,
               entry.kvPosition > 0,
               entry.uncommittedBoundaryTokenIDs.count == 1 else {
             return .miss
-        }
-
-        if tokenizer.dialect == .gemma {
-            let wasThinking = (entry.reasoningEffort ?? .off) != .off
-            let isThinking = (turn.reasoningEffort ?? .off) != .off
-            guard wasThinking == isThinking,
-                  entry.preserveThinking == turn.preserveThinking else { return .miss }
         }
 
         if renderedPromptIDs.count > entry.kvPosition,
@@ -156,45 +177,9 @@ public struct PromptPrefixCache: Sendable {
                 cachedPromptTokens: entry.kvPosition)
         }
 
-        if tokenizer.dialect == .gemma {
-            let inputCount = entry.inputMessages.count
-            guard turn.messages.count > inputCount + 1,
-                  turn.messages.prefix(inputCount).elementsEqual(entry.inputMessages),
-                  assistantMatches(turn.messages[inputCount], entry.assistantTurn.message) else {
-                return .miss
-            }
-            // Only tool results from this same user turn may append to the
-            // generated prefix. A new user must use the canonical re-render,
-            // which can remove earlier thoughts.
-            let continuation = Array(turn.messages.dropFirst(inputCount + 1))
-            if !tokenizer.isGemmaQAT {
-                let toolMatch = matchToolContinuation(entry: entry, turn: turn,
-                    continuation: continuation, tokenizer: tokenizer)
-                if case .hit = toolMatch { return toolMatch }
-            }
-            // Results may arrive together with a new user message. Such a
-            // request starts a new turn too, and must use canonical recovery
-            // rather than the append-only tool bridge.
-            // QAT's source can normalize even the current tool-call turn
-            // (thought closure whitespace and the non-thinking channel).
-            // Its resumed input must equal a fresh source render; appending a
-            // bridge to raw generated tokens cannot establish that equality.
-            guard tokenizer.isGemmaQAT || continuation.contains(where: { $0.role == .user }),
-                  let gemmaRecoverablePrefix else { return .miss }
-            let common = zip(entry.kvBackedTokenIDs, renderedPromptIDs).prefix { $0 == $1 }.count
-            // Leave at least one token for the next-token logits. Only the
-            // backend can prove which ring rows or snapshot remain available.
-            let limit = min(common, renderedPromptIDs.count - 1)
-            guard limit > 0 else { return .miss }
-            let cached = gemmaRecoverablePrefix(limit)
-            guard cached > 0, cached <= limit else { return .miss }
-            return .hit(effectivePromptIDs: renderedPromptIDs, cachedPromptTokens: cached)
-        }
-
         // Qwen 3.8 source-template requests require an exact rendered prefix;
         // the legacy bridge cannot prove equivalence for those checkpoints.
         // Qwen 3.6 has its own verified source-template continuation below.
-        guard !tokenizer.isSwiftQwen else { return .miss }
         if tokenizer.supportsQwenReasoningEffort,
            turn.reasoningEffort != nil || entry.reasoningEffort != nil {
             return .miss
@@ -230,7 +215,7 @@ public struct PromptPrefixCache: Sendable {
             tokenizer: tokenizer)
     }
 
-    private func assistantMatches(
+    private static func assistantMatches(
         _ incoming: MFTokenizer.Message,
         _ cached: MFTokenizer.Message
     ) -> Bool {
@@ -254,7 +239,7 @@ public struct PromptPrefixCache: Sendable {
     /// state cannot be rewound to re-render the turn, so the cached turn stays
     /// as generated and only what follows it is prefilled. ChatML ends a
     /// tool-call turn with `<|im_end|>` too, so both shapes stop `.endOfTurn`.
-    private func matchSourceTemplateContinuation(
+    private static func matchSourceTemplateContinuation(
         entry: PromptPrefixCacheEntry,
         turn: PromptPrefixCacheTurn,
         cachedTurnIndex: Int,
@@ -274,7 +259,7 @@ public struct PromptPrefixCache: Sendable {
             cachedPromptTokens: entry.kvPosition)
     }
 
-    private func matchTextContinuation(
+    private static func matchTextContinuation(
         entry: PromptPrefixCacheEntry,
         continuation: [MFTokenizer.Message],
         tokenizer: MFTokenizer
@@ -299,7 +284,7 @@ public struct PromptPrefixCache: Sendable {
             cachedPromptTokens: entry.kvPosition)
     }
 
-    private func matchToolContinuation(
+    private static func matchToolContinuation(
         entry: PromptPrefixCacheEntry,
         turn: PromptPrefixCacheTurn,
         continuation: [MFTokenizer.Message],

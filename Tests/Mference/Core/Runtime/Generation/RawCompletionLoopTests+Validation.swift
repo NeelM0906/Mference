@@ -5,7 +5,7 @@ import Testing
 extension RawCompletionLoopTests {
     @Test func rawCompletionRejectsContextOverflowBeforeReset() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let promptIDs = tokenizer.encode("one two three", addBOS: true)
         let producer = CountingProducer(
@@ -40,7 +40,7 @@ extension RawCompletionLoopTests {
 
     @Test func rawCompletionRejectsZeroMaxNewBeforeReset() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let promptIDs = tokenizer.encode("one two three", addBOS: true)
         let producer = CountingProducer(
@@ -72,7 +72,7 @@ extension RawCompletionLoopTests {
 
     @Test func rawCompletionRejectsEmptyPromptBeforeReset() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let producer = CountingProducer(
             vocabSize: tokenizer.vocabSize,

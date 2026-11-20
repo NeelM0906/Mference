@@ -253,14 +253,20 @@ extension Model {
         }
     }
 
-    public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {
+    /// `sweep`: the plan is part of a pass over most of the layer (prefill).
+    /// Its reads bypass the page cache only where
+    /// `prefillSweepBypassesPageCache` held at load; otherwise they are
+    /// ordinary buffered reads.
+    public func fetchRoutedExperts(plan: RoutedExpertFetchPlan,
+                                   sweep: Bool = false) async throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         switch expertBackend(plan.layer) {
         case .pread(let streamer):
             return try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
-                        let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
+                        let buffers = try streamer.executeExpertCachePlan(plan.cachePlan,
+                                                                          sweep: sweep)
                         continuation.resume(returning: Self.makeExpertViews(
                             buffers,
                             layer: plan.layer,

@@ -24,6 +24,15 @@ extension ModelIntegrityPolicy {
         default: return nil
         }
     }
+
+    /// The one-line stderr notice the CLI and server print when `--verify
+    /// auto` falls back to full SHA-256, so the slower first prefill has a
+    /// visible cause. `detail` is the receipt check that failed.
+    public static func autoFallbackNotice(detail: String) -> String {
+        let reason = detail.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return "notice: --verify auto: install receipt did not validate (\(reason)); "
+            + "hashing routed-expert files with full SHA-256 on first use"
+    }
 }
 
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {

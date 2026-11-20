@@ -24,7 +24,10 @@ final class RMSNorm {
     private let psoNoScalePerHead512: MTLComputePipelineState
     private let psoBF16Grouped: MTLComputePipelineState
 
-    init(context: MetalContext, sourceFP16: Bool = false) throws {
+    /// `groupedWeightF32`: the grouped norm reads F32 weights (WS4 GGUF
+    /// install, `FC_RMS_GROUPED_W_F32`). Only `encodeBF16WGrouped` changes;
+    /// every other pipeline and every shipped caller (false) is unchanged.
+    init(context: MetalContext, sourceFP16: Bool = false, groupedWeightF32: Bool = false) throws {
         let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w", constants: precision)
         self.psoNoScale  = try context.pipeline("rmsnorm_no_scale", constants: precision)
@@ -48,7 +51,10 @@ final class RMSNorm {
         self.psoNoScalePerHead512 = try Self.specializedPipeline(context,
                                                                  "rmsnorm_no_scale_perhead",
                                                                  d: 512, sourceFP16: sourceFP16)
-        self.psoBF16Grouped = try context.pipeline("rmsnorm_bf16w_grouped", constants: precision)
+        self.psoBF16Grouped = try context.pipeline(
+            "rmsnorm_bf16w_grouped",
+            constants: precision + (groupedWeightF32
+                ? [MetalFunctionConstant(index: 120, value: .bool(true))] : []))
     }
 
     /// Qwen4-Exp group RMSNorm: `rows * groups` independent normalizations of

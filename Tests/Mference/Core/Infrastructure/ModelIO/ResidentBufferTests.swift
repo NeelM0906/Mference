@@ -100,12 +100,15 @@ import Metal
         }
     }
 
+    /// The Qwen 3.6 toy's INT4 embedding and lm_head (with scale and bias
+    /// companions) are each larger than half the 64 KiB limit, so the resident
+    /// region splits into several chunks, some starting mid-page.
     @Test func modelViewsIncludeChunkOffsetsForWeightsAndCompanions() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
-        let directory = try FlashNextToySynthetic.write()
+        let directory = try QwenToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
         let original = try Model.load(directoryURL: directory, device: device,
-                                      expecting: .qwen38FlashNextToy())
+                                      expecting: .qwen36Toy())
         let index = original.residentIndex
         let region = index.header.indexSize
         let spans = index.entries.values.map { entry -> (start: UInt64, end: UInt64) in

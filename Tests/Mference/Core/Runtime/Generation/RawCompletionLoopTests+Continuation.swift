@@ -7,7 +7,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true])
     func checkpointSplitsOnlyPrefillAndPreservesAccounting(chunked: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load(from: GemmaThinkingTests.fixtureFolder(), family: .gemma4)
+        let tokenizer = try await MFTokenizer.load(from: try ChatMLTemplateTests.fixtureFolder(), family: .qwen36)
         let prompt: [Int32] = [1, 2, 3, 4, 5, 6, 7]
         let producer = ContinuationProducer(vocabSize: tokenizer.vocabSize,
             terminalToken: tokenizer.eosID, position: 2)
@@ -108,7 +108,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true])
     func resumedChunkedPrefillUsesNonzeroStart(reportsExecution: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two three four", addBOS: true)
         let cached = prompt.count - 1
         let producer = ContinuationProducer(
@@ -159,7 +159,7 @@ extension RawCompletionLoopTests {
 
     @Test func resumeRejectsInvalidCachedCountsBeforeMutatingProducer() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two", addBOS: true)
         let producer = ContinuationProducer(
             vocabSize: tokenizer.vocabSize,

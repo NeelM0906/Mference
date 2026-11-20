@@ -80,7 +80,7 @@ enum MiniCPM5Parity {
 
         // Resident order: the family's own (embedding, layers, norm, head).
         let names = source.names.sorted {
-            FlashNextPlanner.residentOrdering($0, $1, family: .minicpm5)
+            OriginalRepoPlanner.residentOrdering($0, $1, family: .minicpm5)
         }
 
         struct Placed {

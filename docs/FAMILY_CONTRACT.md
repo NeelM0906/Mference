@@ -17,33 +17,39 @@ if any of them is missing from this file. Adding an axis without a row here
 breaks the suite; the failure names the undocumented fields.
 
 The enumeration is of axes, not of behavior. What a kernel does with an
-axis lives in the family's own page —
-[Gemma 4](../README.md), [DeepSeek-V4-Flash](DEEPSEEK_V4_FLASH.md),
-[Inkling-Small](INKLING_SMALL.md), [Qwen 3.8](QWEN38_LONG_CONTEXT.md),
-[MiniCPM5](families/MINICPM5.md),
-[GLM-5.3-Flash](families/GLM53_FLASH.md) —
-and in [System design](SYSTEM_DESIGN.md).
+axis lives in the family's runner and kernels.
+
+**Retired families.** Gemma 4 (with its QAT install), DeepSeek-V4-Flash,
+Inkling-Small, Flint, Qwen3.8-Flash-Next (base and Unsloth GGUF) and GLM-5.3-Flash
+were retired on 2026-11-18: their
+baselines, `ModelFamily` cases and runners are gone. Their axes stay in the
+manifest schema, so the tables below keep their columns (G4, DSV4, INK, FLT,
+FNX, FNU, G53) as the values those baselines had at `mference-app` 8ff588c.
+The G4 column still matters: it is the `ArchConfig.init` default an absent
+manifest key validates against.
 
 ## Reading the tables
 
-Gemma 4 is the baseline. Its values are the `ArchConfig.init` defaults for
-every axis that has one, so a legacy manifest that omits the family
-extensions still validates as Gemma 4. Each table gives the Gemma 4 value
-and then only the families that differ from it. Values are the compiled
+The `ArchConfig.init` defaults are the original install format's values,
+Gemma 4's (G4), for every axis that has one, so a manifest that omits a
+family-extension key validates against that value. Each table gives the G4
+value and then only the families that differ from it. Values are the compiled
 baselines, not a supported range: an axis with one observed value is
 documented as what has been exercised, not as what is permitted.
 
 | Tag | Family | `arch.family` | Baseline constant |
 | --- | --- | --- | --- |
-| G4 | Gemma 4 26B-A4B | `gemma4` (absent in legacy manifests) | `ArchConfig.gemma4_26B_A4B` |
 | Q36 | Qwen 3.6 35B-A3B | `qwen36` | `ArchConfig.qwen36_35B_A3B` |
 | Q38 | Qwen 3.8 27B | `qwen38` | `ArchConfig.qwen38_27B` |
-| DSV4 | DeepSeek-V4-Flash 284B-A13B | `deepseekV4Flash` | `ArchConfig.deepseekV4Flash_284B_A13B` |
-| INK | Inkling-Small 276B-A12B | `inklingSmall` | `ArchConfig.inklingSmall_276B_A12B` |
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
-| FNX | Qwen3.8-Flash-Next 180B-A3.5B | `qwen38flashnext` | `ArchConfig.qwen38FlashNext_180B_A3_5B` |
 | MC5 | MiniCPM5-2B | `minicpm5` | `ArchConfig.miniCPM5_2B` |
-| G53 | GLM-5.3-Flash 320B-A18B | `glm53Flash` | `ArchConfig.glm53Flash_320B_A18B` |
+
+Retired (values only, no baseline): G4 Gemma 4 26B-A4B (`gemma4`, also any
+manifest without `arch.family`), DSV4 DeepSeek-V4-Flash (`deepseekV4Flash`),
+INK Inkling-Small (`inklingSmall`), FLT Flint-40B-A2.5B (`flint`), FNX
+Qwen3.8-Flash-Next (`qwen38flashnext`), FNU its Unsloth UD-IQ3_XXS GGUF
+(`qwen38flashnextudiq3xxs`), G53 GLM-5.3-Flash (`glm53Flash`). Loading one
+fails with `ModelError.retiredFamily` (`ManifestReader.retiredFamilies`).
 
 `ArchConfig.knownArchitectures` maps `arch.family` to the baseline used for
 auto-detection at load.
@@ -53,12 +59,14 @@ runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
 machinery is reached.
 
-That table has **one entry today: G53**, added 2026-09-11 with its Day-0
-contract ([GLM-5.3-Flash](families/GLM53_FLASH.md)); the three axis names it
-lists are the mechanisms of the `glm53` section below. FNX was the previous
-entry, and its gate was lifted on 2026-09-10 once `FlashNextForwardRunner`
-landed. MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
-arrived together ([MiniCPM5](families/MINICPM5.md)). Keep the two facts
+That table is **empty today**.
+
+FNU has no column of its own in the field tables below: every value equals
+FNX's except `family` and the two storage-shaped PLE fields,
+`pleNgramShardCount` (1: the GGUF stores the n-gram table as one merged
+tensor) and `pleNgramVocabSizeBase` (0: the GGUF carries the explicit per-head
+vocab sizes instead of the base). MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
+arrived together. Keep the two facts
 separate — a new
 port earns its `ArchConfig` baseline, `ModelFamily` case, tensor accessors and
 manifest validation well before its kernels do, and it belongs in the gate for
@@ -69,7 +77,7 @@ guessing.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `family` | `ModelFamily` | The tensor-name contract, the layer graph shape (norm sandwich vs plain pre-norm), and family-specific kernel behavior. Stored in `manifest.json -> arch.family`; absent means Gemma 4, the format's original architecture. | `.gemma4` | One value per family; every family diverges by definition. |
+| `family` | `ModelFamily` | The tensor-name contract, the layer graph shape (norm sandwich vs plain pre-norm), and family-specific kernel behavior. Stored in `manifest.json -> arch.family`; an absent value was Gemma 4, the format's original (now retired) architecture, and is refused. The `ArchConfig.init` default is `.qwen36`. | `.gemma4` | One value per family; every family diverges by definition. |
 
 ## Dimensions
 
@@ -115,6 +123,8 @@ DSV4 and G53 carry `hyperConnections.mult` streams the same way.
 | `attentionKEqV` | `Bool` | Full-attention K and V share the `k_proj` weight, so one dequant and GEMV produces the raw projection for both. The K and V cache slots stay separate regardless — they diverge at the norms and RoPE. | `true` | Q36, Q38, INK, MPL, FNX, MC5 `false`. DSV4 and G53 `true` in the strongest sense: K and V are the same cache entry (G53: the `kv_a` latent). |
 | `attnOutputGate` | `Bool` | Full-attention `q_proj` emits `2 * numHeads * fullHeadDim` rows as per-head [query ; gate] halves, and the attention output is multiplied by sigmoid(gate) before `o_proj`. | `false` | Q36, Q38, FNX `true` (FNX's `output_gate_type` is `sigmoid`). G53 `false`: its KDA output gate is the low-rank `g_b(g_a(x))` inside `o_norm`, part of the `kimiDeltaAttention` axis, not this one. |
 | `attentionScale` | `Double` | Softmax scale for full attention. | 1.0 | Q36/Q38/FNX 0.0625 (256^-0.5). DSV4 0.044194173824159216 (512^-0.5). MPL and MC5 1/sqrt(128). INK 1/128 — it RMS-normalizes q and k per head, so the scale is 1/d, not 1/sqrt(d). G53 0.0625 (256^-0.5, the `qkNopeHeadDim` query width — the latent dot product is taken after `embed_q` folds q into the 512-wide latent). |
+| `attentionSinks` | `Bool` | Add one learned logit per query head to the attention softmax denominator only. The sink has no value contribution. | `false` | FLT `true`, backed by `self_attn.softmax_offset`. |
+| `noRopeLayerMask` | `[UInt8]` | Per-layer NoPE switch. A nonzero entry disables rotary position encoding on that layer; empty means the family's normal RoPE policy applies everywhere. | `[]` | FLT mirrors `fullAttentionLayerMask`, so all 14 full-attention layers are NoPE while the 35 sliding layers rotate. |
 
 ### Per-head query/key norms
 

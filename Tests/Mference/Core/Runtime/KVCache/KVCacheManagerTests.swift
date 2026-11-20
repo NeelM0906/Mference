@@ -7,7 +7,7 @@ import Metal
 /// and reset semantics against the Gemma 4 config.
 @Suite struct KVCacheManagerTests {
 
-    private let config = ArchConfig.gemma4_26B_A4B
+    private let config = ArchConfig.retiredGemma4Shape
 
     private func makeManager(maxContext: Int,
                              fp16RingEnabled: Bool = false,
@@ -98,6 +98,34 @@ import Metal
         #expect(kv.keyBuffer(layer: 5, validTokenCount: 0).length == 256 * 2048)
     }
 
+    /// A batched prefill writes every row of a chunk before its attention
+    /// reads them, so a ring override has to carry that batch's slack on top
+    /// of the sliding window. A plain window-sized ring would wrap a chunk
+    /// covering positions 512..<544 onto keys earlier rows of the same chunk
+    /// still attend. Exercised on Maple's hybrid sliding/full shape.
+    @Test func ringOverrideMustCarryBatchPrefillSlack() throws {
+        let hybrid = ArchConfig.maplePreview
+        let batch = 32
+        let kv = try KVCacheManager(
+            device: try MetalContext().device,
+            config: hybrid,
+            maxContext: 4096,
+            fp16RingEnabled: true,
+            slidingWindow: hybrid.slidingWindow,
+            maxPrefillChunkTokens: 1,
+            fp16RingCapacityOverride: hybrid.slidingWindow + batch)
+        let layer = try #require((0..<hybrid.numLayers)
+            .first { kv.layerKind($0) == .swa })
+        #expect(kv.ringCapacity(layer: layer) == hybrid.slidingWindow + batch)
+        // The wrapped rows stay inside the ring: a whole batch of writes
+        // starting at the window boundary never lands on position 0.
+        let firstRow = kv.kSlot(layer: layer, position: hybrid.slidingWindow).offset
+        let lastRow = kv.kSlot(layer: layer,
+                               position: hybrid.slidingWindow + batch - 1).offset
+        #expect(lastRow > firstRow, "batch rows must not wrap onto the window head")
+        #expect(lastRow < kv.keyBuffer(layer: layer, validTokenCount: 0).length)
+    }
+
     @Test func fp16Ring_slotOffsetsWrapOnlyForSWALayers() throws {
         let (_, kv) = try makeManager(maxContext: 128,
                                       fp16RingEnabled: true,
@@ -135,6 +163,26 @@ import Metal
         #expect(kv.keyView(layer: 0, validTokenCount: 513).startSlot == 1)
         #expect(kv.valueView(layer: 0, validTokenCount: 513).startSlot == 1)
         #expect(kv.keyView(layer: 3, validTokenCount: 513).startSlot == 0)
+    }
+
+    @Test func pagedFullAttention_keepsHybridSlidingLayersAllocated() throws {
+        let context = try MetalContext()
+        let hybrid = ArchConfig.maplePreview
+        let kv = try KVCacheManager(device: context.device,
+                                    config: hybrid,
+                                    maxContext: 513,
+                                    fp16RingEnabled: true,
+                                    slidingWindow: hybrid.slidingWindow,
+                                    maxPrefillChunkTokens: 1,
+                                    fp16RingCapacityOverride: 512,
+                                    pagedFullAttention: true)
+
+        #expect(kv.layerKind(3) == .full)
+        #expect(kv.layerKind(2) == .swa)
+        #expect(kv.capacity(layer: 3) == 0)
+        #expect(kv.capacity(layer: 2) == 512)
+        #expect(kv.kSlot(layer: 2, position: 0).offset == 0)
+        #expect(kv.kSlot(layer: 2, position: 512).offset == 0)
     }
 
     @Test func fp16Ring_rangesMustNotWrap() throws {

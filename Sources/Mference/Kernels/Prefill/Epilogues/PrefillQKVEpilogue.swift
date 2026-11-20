@@ -5,8 +5,10 @@ final class PrefillQKVEpilogue {
     private let perHeadNorm: PrefillPerHeadNorm
     private let rope: PrefillRoPE
 
-    init(context: MetalContext, sourceFP16: Bool = false) throws {
-        self.perHeadNorm = try PrefillPerHeadNorm(context: context, sourceFP16: sourceFP16)
+    /// `normWeightsF32`: the q/k norm weights are F32 (WS4 GGUF install).
+    init(context: MetalContext, sourceFP16: Bool = false, normWeightsF32: Bool = false) throws {
+        self.perHeadNorm = try PrefillPerHeadNorm(context: context, sourceFP16: sourceFP16,
+                                                  weightF32: normWeightsF32)
         self.rope = try PrefillRoPE(context: context, sourceFP16: sourceFP16)
     }
 

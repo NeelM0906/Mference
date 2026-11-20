@@ -15,7 +15,7 @@ import Testing
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(
             directoryURL: dir, device: device,
-            expecting: .gemma4Toy(),
+            expecting: .defaultsToy(),
             streamingMode: .resident)
 
         let plan = try #require(try model.planRoutedExperts(layer: 0,
@@ -35,11 +35,11 @@ import Testing
         let device = try #require(MTLCreateSystemDefaultDevice())
         let resident = try Model.load(
             directoryURL: dir, device: device,
-            expecting: .gemma4Toy(),
+            expecting: .defaultsToy(),
             streamingMode: .resident)
         let pread = try Model.load(
             directoryURL: dir, device: device,
-            expecting: .gemma4Toy(),
+            expecting: .defaultsToy(),
             streamingMode: .pread(slotCount: 8))
 
         for layer in 0..<2 {
@@ -71,7 +71,7 @@ import Testing
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(
             directoryURL: dir, device: device,
-            expecting: .gemma4Toy(),
+            expecting: .defaultsToy(),
             streamingMode: .resident)
         _ = try model.routedExpert(layer: 0, expert: 0)
         #expect(model.routedExpertCacheSlotCount(layer: 0) == nil)

@@ -23,7 +23,7 @@ enum StreamerError: Error, CustomStringConvertible {
         case .preadFailed(let error):
             return "pread failed: errno \(error)"
         case .allocFailed(let error):
-            return "posix_memalign failed: errno \(error)"
+            return "expert memory allocation failed: errno \(error)"
         case .slotOutOfRange(let slot):
             return "expert cache slot \(slot) is out of range"
         case .noSlotCache:
@@ -63,7 +63,9 @@ public struct StreamLayout: Sendable {
 
     /// Bytes of one expert in the file.
     @inline(__always)
-    public var storedExpertStride: UInt64 { storage?.storedExpertStride ?? expertStride }
+    public var storedExpertStride: UInt64 {
+        storage?.storedExpertStride ?? expertStride
+    }
 
     @inline(__always)
     public func expertOffset(layer: Int, expert: Int) -> UInt64 {

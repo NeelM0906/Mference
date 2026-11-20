@@ -11,6 +11,7 @@ final class DequantInt4GEMVMultiX {
 
     private let pipelines: [MTLComputePipelineState]        // index = T - 1
     private let f32OutPipelines: [MTLComputePipelineState]  // index = T - 1
+    private let groupedPipelines: [MTLComputePipelineState] // index = T - 1
 
     init(context: MetalContext) throws {
         // One pipeline per token count: the specialized T lets the compiler
@@ -43,6 +44,9 @@ final class DequantInt4GEMVMultiX {
         self.f32OutPipelines = try (1...Self.maxTokens).map {
             try specialized("dequant_int4_gemv_simd_multix_f32out", tokens: $0)
         }
+        self.groupedPipelines = try (1...Self.maxTokens).map {
+            try specialized("dequant_int4_gemv_simd_multix_grouped", tokens: $0)
+        }
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -73,6 +77,41 @@ final class DequantInt4GEMVMultiX {
         encoder.setBytes(&mValue, length: MemoryLayout<UInt32>.size, index: 5)
         encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.setBytes(&tValue, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (m + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup,
+                    height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32 * Self.rowsPerThreadgroup,
+                                           height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// Grouped-input projection over `tokens` rows of `x`: the `m` output rows
+    /// form blocks of `rowsPerGroup`, block g reading columns `[g*n, (g+1)*n)`
+    /// of each token's `xStride`-wide input row.
+    func encodeGrouped(commandBuffer: MTLCommandBuffer,
+                       weights: MTLBuffer, weightsOffset: Int,
+                       scales: MTLBuffer, scalesOffset: Int,
+                       biases: MTLBuffer, biasesOffset: Int,
+                       x: MTLBuffer, y: MTLBuffer,
+                       m: Int, n: Int, tokens: Int,
+                       rowsPerGroup: Int, xStride: Int) {
+        precondition(n % Quantization.groupSize == 0,
+                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(weightsOffset % 2 == 0,
+                     "dequant_int4_gemv_simd_multix_grouped needs a 2-aligned weightsOffset")
+        precondition(tokens > 0 && tokens <= Self.maxTokens,
+                     "token count \(tokens) outside 1...\(Self.maxTokens)")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(groupedPipelines[tokens - 1])
+        encoder.setBuffer(weights, offset: weightsOffset, index: 0)
+        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+        encoder.setBuffer(x, offset: 0, index: 3)
+        encoder.setBuffer(y, offset: 0, index: 4)
+        var values = [UInt32(m), UInt32(n), UInt32(tokens), UInt32(rowsPerGroup), UInt32(xStride)]
+        for (i, _) in values.enumerated() {
+            encoder.setBytes(&values[i], length: MemoryLayout<UInt32>.size, index: 5 + i)
+        }
         encoder.dispatchThreadgroups(
             MTLSize(width: (m + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup,
                     height: 1, depth: 1),

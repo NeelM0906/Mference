@@ -28,8 +28,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let hiddenActivation: String
     public let fullAttentionLayerMask: [Int]
 
-    // Family extensions. Optional so legacy Gemma manifests decode unchanged;
-    // absent values validate against the Gemma defaults in `ArchConfig`.
+    // Family extensions. Optional so manifests that omit a key decode
+    // unchanged; absent values validate against `absentFieldDefaults`.
     public let family: String?
     public let attnOutputGate: Bool?
     public let attentionScale: Double?
@@ -87,6 +87,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let routerNormAfterTopK: Bool?
     public let routerGlobalScale: Bool?
     public let unpaddedVocabSize: Int?
+    public let noRopeLayerMask: [UInt8]?
+    public let attentionSinks: Bool?
 
     // Qwen3.8-Flash-Next extensions. Optional for the same reason: absent
     // values validate against the zeroed `FlashNextConfig.none`. Field names
@@ -106,9 +108,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     /// it only when present. See `FlashNextConfig.pleEosTokenID`.
     public let pleEosTokenID: Int?
     /// Axis names the install claims a runner must implement. Advisory only —
-    /// `ManifestReader.familiesWithoutRunner` is the authority, and it is empty
-    /// today, so an install publishing this field does not make the family
-    /// unloadable.
+    /// `ManifestReader.familiesWithoutRunner` is the authority, so an install
+    /// publishing this field does not by itself make the family unloadable.
     public let requiredAxes: [String]?
     /// Per-head q/k RMSNorm gains on full-attention layers. Optional so every
     /// manifest predating the axis decodes unchanged; absent validates against
@@ -126,67 +127,6 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let indexerKNormEps: Double?
     public let kdaGateLowerBound: Double?
     public let rmsNormEps: Double?
-}
-
-/// One page-aligned region of a row-lookup pool, mirroring one source shard.
-public struct ManifestPleShard: Decodable, Equatable, Sendable {
-    public let shard: Int
-    public let rows: Int
-    /// Byte offset of the region's first block within the pool file.
-    public let offset: UInt64
-    public let size: UInt64
-}
-
-/// One PLE n-gram row pool: the repacked, page-aligned form of a layer's
-/// hashed n-gram embedding table.
-///
-/// Row `i` of shard `s` lives at
-/// `shards[s].offset + (i / rowsPerBlock) * blockStride
-///  + (i % rowsPerBlock) * rowStride`, and a record never straddles a block,
-/// so one row costs one page fault and a cached page serves `rowsPerBlock`
-/// neighbours. `rows` is the pool-wide total; shard rows are consecutive in
-/// shard order.
-public struct ManifestPlePoolLayer: Decodable, Equatable, Sendable {
-    public let layer: Int
-    /// Path relative to the install directory, e.g. `ple/layer_01_ngram_rows.bin`.
-    public let file: String
-    public let rows: Int
-    public let rowDim: Int
-    /// `"bf16"` or `"int4AffineG64"`. Chosen from the row width at install:
-    /// group-64 needs `rowDim % 64 == 0`, which 160 does not satisfy.
-    public let storage: String
-    public let weightBits: Int
-    public let groupSize: Int
-    public let rowWeightBytes: Int
-    public let rowScaleBytes: Int
-    public let rowBiasBytes: Int
-    public let rowStride: Int
-    public let rowsPerBlock: Int
-    public let blockStride: Int
-    public let fileSize: UInt64
-    public let shards: [ManifestPleShard]
-}
-
-public struct ManifestPlePool: Decodable, Equatable, Sendable {
-    /// Pool format tag. Readers must refuse an unknown kind.
-    public let kind: String
-    public let layers: [ManifestPlePoolLayer]
-}
-
-/// An additive routed-expert pool outside `packed_experts/`, for a sidecar
-/// (today: the MTP draft layer's own 512 experts at `packed_experts_mtp/`).
-/// Kept out of `packed_experts/layout.json` so the shipped layout validator
-/// and the routed-expert reader are untouched.
-public struct ManifestAuxiliaryExpertPool: Decodable, Equatable, Sendable {
-    public struct Layer: Decodable, Equatable, Sendable {
-        public let layer: Int
-        public let file: String
-    }
-    public let name: String
-    public let directory: String
-    public let expertsPerLayer: Int
-    public let expertStride: UInt64
-    public let layers: [Layer]
 }
 
 /// Whether an optional tensor group from the source checkpoint was carried
@@ -244,20 +184,8 @@ public struct Manifest: Decodable, Equatable, Sendable {
     // Additive install blocks. Every family that predates them emits none of
     // these keys, so existing manifests decode byte-identically.
 
-    /// Streamed n-gram row pools, one per PLE layer.
-    public let plePool: ManifestPlePool?
-    /// Routed-expert pools outside `packed_experts/` (sidecar draft layers).
-    public let auxiliaryExpertPools: [ManifestAuxiliaryExpertPool]?
     /// Optional source tensor groups and whether the install carried them.
     public let sidecars: [String: ManifestSidecar]?
-    /// True when the installer has already folded the `+1` of the
-    /// zero-centered `(1 + w)` RMSNorm convention into the stored norm
-    /// weights. Absent means it has not: the loader applies the bake itself
-    /// for families whose norms are zero-centered
-    /// (`ZeroCenteredNormPolicy`). Deliberately outside `arch` — it describes
-    /// how the bytes were written, not what architecture they describe, so it
-    /// must not participate in the `archMismatch` field-by-field comparison.
-    public let zeroCenteredNormsBakedAtInstall: Bool?
 }
 
 public enum ManifestReader {
@@ -329,21 +257,13 @@ public enum ManifestReader {
                 detail: "manifest requests removed TurboQuant KV runtime support")
         }
         try validateArch(m.arch, expected: expected)
-        if m.modelID == CheckpointIdentity.gemma4QAT {
-            try GemmaQATCheckpoint.validate(m, expected: expected, directory: directoryURL)
-        } else if let quant = m.quant {
+        if let quant = m.quant {
             try validateQuant(quant, expected: expected)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
         if let flashHead = m.flashHead {
             try validateMapleFlashHead(flashHead, expected: expected)
-        }
-        if let plePool = m.plePool {
-            try validatePlePool(plePool, expected: expected)
-        } else if !expected.flashNext.pleLayerIDs.isEmpty {
-            throw ModelError.plePoolMissing(
-                layer: expected.flashNext.pleLayerIndices[0])
         }
         let pageSize = UInt64(getpagesize())
         guard m.expertStride % pageSize == 0 else {
@@ -354,7 +274,7 @@ public enum ManifestReader {
             if m.files[f] == nil { throw ModelError.missingFile(name: f) }
         }
         // Leading dense-FFN layers carry no routed experts, so the writer
-        // emits no blob for them (Inkling's layers 0-1). `validateArch` has
+        // emits no blob for them. `validateArch` has
         // already confirmed the manifest agrees with the baseline on the
         // count, so it is safe to skip exactly that many.
         for L in expected.numDenseLayers..<m.numLayers {
@@ -380,39 +300,6 @@ public enum ManifestReader {
 
     private static func validateQuant(_ quant: ManifestQuant,
                                       expected: ArchConfig) throws {
-        if expected.family == .glm53Flash {
-            // PipeNetwork's mixed 4/8-bit conversion: INT8 affine group-64
-            // attention (KDA and sparse projections alike), shared experts,
-            // dense FFNs, embedding and head; INT4 group-64 routed experts;
-            // the router gate unquantized BF16, recorded as an unquantized
-            // slot (the Maple convention) rather than the default 8 the
-            // writer would otherwise assume.
-            let affine: [(String, ManifestQuantSlot, Int)] = [
-                ("embedding", quant.embedding, 8),
-                ("attention", quant.attention, 8),
-                ("sharedExpert", quant.sharedExpert, 8),
-                ("routedExpert", quant.routedExpert, 4),
-            ]
-            for (name, slot, bits) in affine {
-                guard slot.weightBits == bits,
-                      slot.scheme.lowercased() == "affine",
-                      slot.scaleType.lowercased() == "bf16",
-                      slot.biasType.lowercased() == "bf16",
-                      slot.groupSize == Quantization.groupSize else {
-                    throw ModelError.indexCorrupt(
-                        detail: "unsupported GLM-5.3-Flash quantization for \(name)")
-                }
-            }
-            guard quant.router.weightBits == 16,
-                  quant.router.scheme.lowercased() == "unquantized",
-                  quant.router.scaleType.lowercased() == "none",
-                  quant.router.biasType.lowercased() == "none",
-                  quant.router.groupSize == 0 else {
-                throw ModelError.indexCorrupt(
-                    detail: "unsupported GLM-5.3-Flash quantization for router")
-            }
-            return
-        }
         if expected.family == .minicpm5 {
             // Dense, like Qwen 3.8: INT4 affine group-64 embedding and
             // attention slots (the MLP shares the attention slot), and the
@@ -488,49 +375,8 @@ public enum ManifestReader {
             }
             return
         }
-        if expected.family == .qwen38flashnext {
-            // Workstream-2 quantize-in-flight: every eligible resident and
-            // routed tensor is INT4 affine group-64 — except the MoE gating
-            // tensors, which the install policy may keep at INT8.
-            //
-            // Both widths are admitted on the router slot on purpose, and the
-            // set is not a courtesy: two installs of this family exist. The
-            // uniform-INT4 one (`bitWidthOverridesHonored` 0) predates the
-            // 2026-09-10 router measurement and records 4; the INT8-router one
-            // records 8 and 98 overrides. Refusing either would strand an
-            // install that is on disk and correct for what it claims to be, so
-            // the manifest slot is read as a declaration rather than as a
-            // constant, and `FlashNextWeightMatrix` dispatches per tensor on
-            // the width its own index entry implies.
-            //
-            // `sharedExpert` stays INT4-only because that slot describes the
-            // shared expert's `gate_proj`, a projection the policy never
-            // overrides. The `mlp.shared_expert_gate` scalar gate, which the
-            // policy *does* override, has no slot of its own in the manifest
-            // schema; its width lives only in the resident index, which is the
-            // authority for every per-tensor width anyway.
-            let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-                ("embedding", quant.embedding, [4]),
-                ("attention", quant.attention, [4]),
-                ("router", quant.router, [4, 8]),
-                ("sharedExpert", quant.sharedExpert, [4]),
-                ("routedExpert", quant.routedExpert, [4]),
-            ]
-            for (name, slot, allowedBits) in slots {
-                guard allowedBits.contains(slot.weightBits),
-                      slot.scheme.lowercased() == "affine",
-                      slot.scaleType.lowercased() == "bf16",
-                      slot.biasType.lowercased() == "bf16",
-                      slot.groupSize == Quantization.groupSize else {
-                    throw ModelError.indexCorrupt(
-                        detail: "unsupported Qwen3.8-Flash-Next quantization for \(name)")
-                }
-            }
-            return
-        }
-        // Routed experts additionally allow 2-bit: the DeepSeek-V4-Flash
-        // dynamic-quant checkpoint ships Q2 experts under a Q4 core, and the
-        // MoE runtime dispatches on `quant.routedExpert.weightBits`.
+        // Routed experts additionally allow 2-bit: the MoE runtime dispatches
+        // on `quant.routedExpert.weightBits`.
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
             ("embedding", quant.embedding, [4]),
             ("attention", quant.attention, [4]),
@@ -546,27 +392,6 @@ public enum ManifestReader {
                   slot.groupSize == Quantization.groupSize else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
             }
-        }
-    }
-
-    /// Structural gate on `manifest.plePool`. The runtime refuses a pool whose
-    /// geometry cannot address its own file: every arithmetic assumption the
-    /// row reader makes (`PleRowPool`) is checked once here rather than being
-    /// rediscovered per row read.
-    static func validatePlePool(_ pool: ManifestPlePool,
-                                expected: ArchConfig) throws {
-        guard pool.kind == PleRowPool.supportedKind else {
-            throw ModelError.plePoolInvalid(
-                detail: "unknown kind \"\(pool.kind)\"; this runtime reads "
-                    + "\"\(PleRowPool.supportedKind)\"")
-        }
-        for layerIndex in expected.flashNext.pleLayerIndices {
-            guard pool.layers.contains(where: { $0.layer == layerIndex }) else {
-                throw ModelError.plePoolMissing(layer: layerIndex)
-            }
-        }
-        for layer in pool.layers {
-            _ = try PleRowPoolGeometry(layer: layer, hiddenSize: expected.hiddenSize)
         }
     }
 
@@ -620,6 +445,23 @@ public enum ManifestReader {
             }
         }
     }
+
+    /// What an absent family-extension key in `manifest.arch` means: the
+    /// original install format's values (Gemma 4's, a family retired on
+    /// 2026-11-18; see `docs/RETIRED_FAMILIES.md`). They equal the
+    /// `ArchConfig.init` defaults and must not change, or kept installs that
+    /// omit a key would validate against different values.
+    private struct AbsentFieldDefaults {
+        let attnOutputGate = false
+        let attentionScale = 1.0
+        let embeddingScaledBySqrtHidden = true
+        let routerScaled = true
+        let ffnSandwichNorms = true
+        let sharedExpertGated = false
+        let ropeNeoxSubdim = false
+        let qkNorm = true
+    }
+    private static let absentFieldDefaults = AbsentFieldDefaults()
 
     private static func validateArch(_ a: ManifestArch,
                                      expected e: ArchConfig) throws {
@@ -684,34 +526,35 @@ public enum ManifestReader {
             }
         }
 
-        // Family extensions: absent fields mean the Gemma defaults.
-        let gemmaDefaults = ArchConfig.gemma4_26B_A4B
+        // Family extensions: absent fields mean the original install format's
+        // values (`absentFieldDefaults`).
+        let absentDefaults = Self.absentFieldDefaults
         try check("family",
-                  a.family ?? ModelFamily.gemma4.rawValue,
+                  a.family ?? "",
                   e.family.rawValue)
         try check("attnOutputGate",
-                  a.attnOutputGate ?? gemmaDefaults.attnOutputGate,
+                  a.attnOutputGate ?? absentDefaults.attnOutputGate,
                   e.attnOutputGate)
         try check("attentionScale",
-                  a.attentionScale ?? gemmaDefaults.attentionScale,
+                  a.attentionScale ?? absentDefaults.attentionScale,
                   e.attentionScale)
         try check("embeddingScaledBySqrtHidden",
-                  a.embeddingScaledBySqrtHidden ?? gemmaDefaults.embeddingScaledBySqrtHidden,
+                  a.embeddingScaledBySqrtHidden ?? absentDefaults.embeddingScaledBySqrtHidden,
                   e.embeddingScaledBySqrtHidden)
         try check("routerScaled",
-                  a.routerScaled ?? gemmaDefaults.routerScaled,
+                  a.routerScaled ?? absentDefaults.routerScaled,
                   e.routerScaled)
         try check("ffnSandwichNorms",
-                  a.ffnSandwichNorms ?? gemmaDefaults.ffnSandwichNorms,
+                  a.ffnSandwichNorms ?? absentDefaults.ffnSandwichNorms,
                   e.ffnSandwichNorms)
         try check("sharedExpertGated",
-                  a.sharedExpertGated ?? gemmaDefaults.sharedExpertGated,
+                  a.sharedExpertGated ?? absentDefaults.sharedExpertGated,
                   e.sharedExpertGated)
         try check("ropeNeoxSubdim",
-                  a.ropeNeoxSubdim ?? gemmaDefaults.ropeNeoxSubdim,
+                  a.ropeNeoxSubdim ?? absentDefaults.ropeNeoxSubdim,
                   e.ropeNeoxSubdim)
         try check("qkNorm",
-                  a.qkNorm ?? gemmaDefaults.qkNorm,
+                  a.qkNorm ?? absentDefaults.qkNorm,
                   e.qkNorm)
         try check("linearNumKHeads",
                   a.linearNumKHeads ?? 0, e.linearAttention.numKHeads)
@@ -824,6 +667,11 @@ public enum ManifestReader {
         if let published = a.pleEosTokenID {
             try check("pleEosTokenID", published, fn.pleEosTokenID)
         }
+        try check("noRopeLayerMask",
+                  (a.noRopeLayerMask ?? []).description,
+                  e.noRopeLayerMask.description)
+        try check("attentionSinks",
+                  a.attentionSinks ?? false, e.attentionSinks)
 
         let g = e.glm53
         try check("kvLoraRank",        a.kvLoraRank ?? 0,        g.kvLoraRank)
@@ -879,8 +727,16 @@ public enum ManifestReader {
         } catch {
             throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
         }
-        guard let raw = manifest.arch.family else { return .gemma4 }
+        // A retired checkpoint on a kept architecture (Swift-Qwen3.8 is a
+        // `qwen38` install) would otherwise load as that kept family.
+        if retiredCheckpoints[manifest.modelID] != nil {
+            throw ModelError.retiredCheckpoint(modelID: manifest.modelID)
+        }
+        // A manifest without `arch.family` was a Gemma 4 install, a retired
+        // family, as is every name in `retiredFamilies`.
+        guard let raw = manifest.arch.family else { throw ModelError.retiredFamily(family: "gemma4") }
         guard let family = ModelFamily(rawValue: raw) else {
+            if retiredFamilies.contains(raw) { throw ModelError.retiredFamily(family: raw) }
             throw ModelError.indexCorrupt(detail: "unknown arch.family \"\(raw)\"")
         }
         return family
@@ -907,12 +763,8 @@ public enum ManifestReader {
     /// Families `MferenceRepack` can install but no forward runner can execute,
     /// mapped to the axes whose kernels are missing.
     ///
-    /// One entry today: `glm53Flash`, added 2026-09-11 with its Day-0 contract.
-    /// `qwen38flashnext` was the previous occupant, removed 2026-09-10 when
-    /// `FlashNextForwardRunner` landed and the owner lifted its gate. The three
-    /// axis names are the runtime's own (`Glm53Config` and its doc comment name
-    /// the mechanism behind each); remove the entry only when
-    /// `ForwardRunnerFactory` actually dispatches to the family's runner.
+    /// Empty today. Remove an entry only when `ForwardRunnerFactory` actually
+    /// dispatches to the family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
     /// keyed by its `manifest.arch.family` string and valued with the axis
@@ -937,20 +789,70 @@ public enum ManifestReader {
     /// `peekFamily` before any of that machinery is reached.
     static let familiesWithoutRunner: [String: [String]] = [:]
 
-    /// The axes `glm53Flash` needed a runner for, in the order the port built
-    /// them; `Glm53ForwardRunner` implements all three, so the family is no
-    /// longer in the table. Still what the installer publishes as
-    /// `arch.requiredAxes`.
-    public static let glm53RequiredAxes: [String] = [
-        "kimiDeltaAttention",
-        "nopeLatentSparseAttention",
-        "pooledLightningIndexer",
+    /// `arch.family` values of the families retired on 2026-11-18 (see
+    /// `docs/RETIRED_FAMILIES.md`). Their installs on disk are left alone;
+    /// loading one fails with `ModelError.retiredFamily` instead of "unknown
+    /// arch.family", so the library and the CLI can say what happened.
+    public static let retiredFamilies: Set<String> = [
+        "gemma4", "deepseekV4Flash", "inklingSmall", "flint",
+        "qwen38flashnext", "qwen38flashnextudiq3xxs", "glm53Flash",
     ]
 
+    /// Retired checkpoints whose installs carry a kept `arch.family`, keyed by
+    /// `manifest.modelID`, valued with the retired family's name. Refused by
+    /// ID (`ModelError.retiredCheckpoint`) because their family would load.
+    public static let retiredCheckpoints: [String: String] = [
+        "swift-qwen3.8-27b-int4g64": "Swift-Qwen3.8",
+    ]
+
+    /// An install on disk that belongs to a retired family: the identifier a
+    /// library lists it under and the reason it is not served.
+    public struct RetiredInstall: Equatable, Sendable {
+        public let identifier: String
+        public let detail: String
+    }
+
+    /// Classifies a `manifest.json` as a retired install, or nil when it is
+    /// not one (or cannot be read: the caller's own checks report that).
+    /// Library probes use it ahead of `peekFamily` so a retired install is
+    /// listed as not runnable rather than as a broken one:
+    /// - a retired checkpoint ID (`retiredCheckpoints`), under that ID;
+    /// - a manifest without `arch.family` (the original Gemma 4 format) that
+    ///   names a `modelID`, under that ID;
+    /// - a retired `arch.family` (`retiredFamilies`), under that family name.
+    public static func retiredInstall(manifestURL: URL,
+                                      maxBytes: UInt64 = defaultMaxBytes) -> RetiredInstall? {
+        struct Peek: Decodable {
+            struct Arch: Decodable { let family: String? }
+            let arch: Arch?
+            let modelID: String?
+        }
+        guard let size = try? metadataFileSize(manifestURL, fileName: "manifest.json"),
+              size <= maxBytes,
+              let data = try? Data(contentsOf: manifestURL),
+              let peek = try? JSONDecoder().decode(Peek.self, from: data) else { return nil }
+        let notServed = "(docs/RETIRED_FAMILIES.md); the install is left on disk but not served"
+        if let id = peek.modelID, let name = retiredCheckpoints[id] {
+            return RetiredInstall(identifier: id,
+                                  detail: "\(id) is a \(name) checkpoint, a retired family \(notServed)")
+        }
+        guard let arch = peek.arch else { return nil }
+        guard let raw = arch.family else {
+            // Every Gemma 4 install names its checkpoint; a manifest without
+            // one is not an install of any family, so it stays incomplete.
+            guard let id = peek.modelID else { return nil }
+            return RetiredInstall(identifier: id,
+                                  detail: "\(id) has no arch.family: a Gemma 4 install, a retired family \(notServed)")
+        }
+        if retiredFamilies.contains(raw) {
+            return RetiredInstall(identifier: raw, detail: "\(raw) is a retired family \(notServed)")
+        }
+        return nil
+    }
+
     /// The gate lookup, factored out of `peekFamily` so it can be exercised
-    /// against an injected table: with `familiesWithoutRunner` empty there is
-    /// no shipped family left to prove the mechanism with, and the mechanism is
-    /// what the next family port depends on.
+    /// against an injected table, so the mechanism stays testable whatever the
+    /// shipped table holds.
     ///
     /// Returns the named refusal for a gated family, or nil for one the runtime
     /// can execute.

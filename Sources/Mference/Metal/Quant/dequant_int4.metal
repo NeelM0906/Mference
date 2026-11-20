@@ -498,11 +498,12 @@ static inline void dequant_int4_gemv_simd_multix_body(
     device const uint8_t* W,
     device const bfloat*  scales,
     device const bfloat*  biases,
-    device const half*    x,      // [T, N] row-major
+    device const half*    x,      // [T, XS] row-major, N used per row
     device OutT*          y,      // [T, M] row-major
     uint                  M,
     uint                  N,
     uint                  T_param,
+    uint                  XS,
     uint                  tg_idx,
     uint                  sg_idx,
     uint                  lane
@@ -535,7 +536,7 @@ static inline void dequant_int4_gemv_simd_multix_body(
         const uint b2 = (w4 >> 16) & 0xFFu;
         const uint b3 = (w4 >> 24) & 0xFFu;
         for (uint t = 0; t < T; ++t) {
-            device const half* xt = x + t * N;
+            device const half* xt = x + t * XS;
             const half4 xa = *((device const half4*)(xt + elem));
             const half4 xb = *((device const half4*)(xt + elem + 4u));
             const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
@@ -560,7 +561,7 @@ static inline void dequant_int4_gemv_simd_multix_body(
         const float b = float(b_row[g]);
         const uint8_t byte = W_row[elem / 2u];
         for (uint t = 0; t < T; ++t) {
-            device const half* xt = x + t * N;
+            device const half* xt = x + t * XS;
             const float x0 = float(xt[elem]);
             const float x1 = float(xt[elem + 1u]);
             float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
@@ -597,7 +598,7 @@ kernel void prefill_dequant_int4_multix_block(
     const uint first = tg.y * tile;
     if (first >= T) return;
     dequant_int4_gemv_simd_multix_body<half>(W, scales, biases,
-        X + first * K, Y + first * N, N, K, tile, tg.x, sg, lane);
+        X + first * K, Y + first * N, N, K, tile, K, tg.x, sg, lane);
 }
 
 kernel void dequant_int4_gemv_simd_multix(
@@ -614,7 +615,32 @@ kernel void dequant_int4_gemv_simd_multix(
     uint                  lane   [[thread_index_in_simdgroup]]
 ) {
     dequant_int4_gemv_simd_multix_body<half>(W, scales, biases, x, y,
-                                             M, N, T, tg_idx, sg_idx, lane);
+                                             M, N, T, N, tg_idx, sg_idx, lane);
+}
+
+// Grouped-input multi-token GEMV: the M rows form blocks of R rows, and block
+// g reads columns [g*N, (g+1)*N) of each token's XS-wide input row. With
+// T = 1 this is the grouped decode projection (DSV4's o_a); per-row
+// arithmetic is the multi-token body above, so rows stay bit-identical.
+kernel void dequant_int4_gemv_simd_multix_grouped(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    x      [[buffer(3)]],
+    device half*          y      [[buffer(4)]],
+    constant uint&        M      [[buffer(5)]],
+    constant uint&        N      [[buffer(6)]],
+    constant uint&        T      [[buffer(7)]],
+    constant uint&        R      [[buffer(8)]],
+    constant uint&        XS     [[buffer(9)]],
+    uint                  tg_idx [[threadgroup_position_in_grid]],
+    uint                  sg_idx [[simdgroup_index_in_threadgroup]],
+    uint                  lane   [[thread_index_in_simdgroup]]
+) {
+    const uint row = tg_idx * 8u + sg_idx;
+    if (row >= M) return;
+    dequant_int4_gemv_simd_multix_body<half>(W, scales, biases, x + (row / R) * N, y,
+                                             M, N, T, XS, tg_idx, sg_idx, lane);
 }
 
 kernel void dequant_int4_gemv_simd_multix_f32out(
@@ -631,5 +657,5 @@ kernel void dequant_int4_gemv_simd_multix_f32out(
     uint                  lane   [[thread_index_in_simdgroup]]
 ) {
     dequant_int4_gemv_simd_multix_body<float>(W, scales, biases, x, y,
-                                              M, N, T, tg_idx, sg_idx, lane);
+                                              M, N, T, N, tg_idx, sg_idx, lane);
 }

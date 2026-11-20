@@ -46,10 +46,31 @@ final class GDN {
         }
     }
 
+    /// How the checkpoint stores the value heads and the decay. `.vendor` is
+    /// every shipped family: value heads grouped by key head, decay as `A_log`.
+    /// `.gguf` is llama.cpp's conversion (WS4): value heads tiled across key
+    /// heads (`_reorder_v_heads`) and the decay stored as `A = -exp(A_log)` in
+    /// FP32 (`ssm_a`), bound where `A_log` is. Only the recurrence kernels
+    /// read either; `.vendor` builds them with no extra constants.
+    enum CheckpointLayout {
+        case vendor
+        case gguf
+
+        /// `FC_GDN_A_DIRECT` (97) and `FC_GDN_V_TILED` (98) in `gdn.metal`.
+        var constants: [MetalFunctionConstant] {
+            switch self {
+            case .vendor: return []
+            case .gguf: return [MetalFunctionConstant(index: 97, value: .bool(true)),
+                                MetalFunctionConstant(index: 98, value: .bool(true))]
+            }
+        }
+    }
+
     init(context: MetalContext, config: LinearAttentionConfig,
          specializedHiddenSize: Int? = nil,
          useQwenDecodeSpecialization: Bool = true,
-         outputGate: OutputGate = .silu) throws {
+         outputGate: OutputGate = .silu,
+         checkpointLayout: CheckpointLayout = .vendor) throws {
         precondition(config.keyHeadDim > 0 && config.keyHeadDim % 32 == 0,
                      "keyHeadDim must be a positive multiple of 32")
         precondition(config.keyHeadDim / 32 <= 8,
@@ -63,7 +84,9 @@ final class GDN {
         self.convPrefillPSO = try context.pipeline("gdn_conv_mix_prefill")
         self.convTailUpdatePSO = try context.pipeline("gdn_conv_tail_update")
         self.qkNormPSO = try context.pipeline("gdn_qk_norm")
-        self.deltaDecodePSO = try context.pipeline("gdn_delta_step_decode")
+        self.deltaDecodePSO = checkpointLayout == .vendor
+            ? try context.pipeline("gdn_delta_step_decode")
+            : try context.pipeline("gdn_delta_step_decode", constants: checkpointLayout.constants)
         let isQwenGeometry = config.numKHeads == 16
             && config.numVHeads == 32
             && config.keyHeadDim == 128
@@ -72,6 +95,9 @@ final class GDN {
             && config.numVHeads == 48
             && config.keyHeadDim == 128
             && config.valueHeadDim == 128
+        // The Qwen 3.6 kernel has no GGUF form; the GGUF family is Hv = 48.
+        precondition(checkpointLayout == .vendor || !isQwenGeometry,
+                     "GGUF GDN layout is wired for the Hv = 48 geometry only")
         self.qwenDeltaDecodePSO = useQwenDecodeSpecialization && isQwenGeometry
             ? try context.pipeline("gdn_delta_step_decode_qwen",
                                    constants: [],
@@ -81,12 +107,14 @@ final class GDN {
             self.qwenDeltaGatedDecodePSO = try context.pipeline(
                 isQwenGeometry ? "gdn_delta_gated_decode_qwen"
                                : "gdn_delta_gated_decode_qwen38",
-                constants: outputGate.constants,
+                constants: outputGate.constants + checkpointLayout.constants,
                 maxTotalThreadsPerThreadgroup: 256)
         } else {
             self.qwenDeltaGatedDecodePSO = nil
         }
-        self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
+        self.deltaPrefillPSO = checkpointLayout == .vendor
+            ? try context.pipeline("gdn_delta_step_prefill")
+            : try context.pipeline("gdn_delta_step_prefill", constants: checkpointLayout.constants)
         self.gatedNormPSO = try context.pipeline("gdn_gated_norm",
                                                  constants: outputGate.constants)
         self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",

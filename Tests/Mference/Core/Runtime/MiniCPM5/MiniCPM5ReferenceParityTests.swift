@@ -105,7 +105,7 @@ import Testing
             try await h.runner.produceExactPrefill(token: token, position: position,
                                                    into: h.logits)
             // Embedding row: exact up to the FP16 store.
-            let embed = FlashNextDelta.compare(
+            let embed = ParityDelta.compare(
                 h.captureRow(MiniCPM5ForwardRunner.captureEmbedSlot(config: cfg)),
                 try goldens.row("embed_out", position), atol: Self.atol, rtol: Self.rtol)
             #expect(embed.passes, "\(prompt) pos \(position) embed_out \(embed.description)")
@@ -115,18 +115,18 @@ import Testing
                     let actual = h.captureRow(
                         MiniCPM5ForwardRunner.captureSlot(layer: layer, kind: kind, config: cfg))
                     let expected = try goldens.row("\(key).\(name)", position)
-                    let delta = FlashNextDelta.compare(actual, expected,
+                    let delta = ParityDelta.compare(actual, expected,
                                                        atol: Self.atol, rtol: Self.rtol)
                     #expect(delta.passes,
                             "\(prompt) pos \(position) \(key).\(name) \(delta.description)")
                 }
             }
-            let finalNorm = FlashNextDelta.compare(
+            let finalNorm = ParityDelta.compare(
                 h.captureRow(MiniCPM5ForwardRunner.captureFinalNormSlot(config: cfg)),
                 try goldens.row("final_norm_out", position), atol: Self.atol, rtol: Self.rtol)
             #expect(finalNorm.passes, "\(prompt) pos \(position) final_norm_out \(finalNorm.description)")
             let logits = h.logitsRow()
-            let logitDelta = FlashNextDelta.compare(logits, try goldens.row("logits", position),
+            let logitDelta = ParityDelta.compare(logits, try goldens.row("logits", position),
                                                     atol: Self.atol, rtol: Self.rtol)
             #expect(logitDelta.passes, "\(prompt) pos \(position) logits \(logitDelta.description)")
             #expect(Self.argmax(logits) == expectedArgmax[position],
@@ -181,7 +181,7 @@ import Testing
             try await h.runner.produceExactPrefill(token: Int32(generated.last!),
                                                    position: position, into: h.logits)
             // Step logits within the same tier as the prefill logits.
-            let delta = FlashNextDelta.compare(h.logitsRow(),
+            let delta = ParityDelta.compare(h.logitsRow(),
                                                try goldens.row("step_logits", generated.count),
                                                atol: Self.atol, rtol: Self.rtol)
             #expect(delta.passes, "\(prompt) step \(generated.count) logits \(delta.description)")
@@ -253,7 +253,7 @@ import Testing
             let cfg = h.config
             var worst: [String: (abs: Float, rel: Float)] = [:]
             func note(_ key: String, _ actual: [Float], _ expected: [Float]) {
-                let delta = FlashNextDelta.compare(actual, expected, atol: 0, rtol: 0)
+                let delta = ParityDelta.compare(actual, expected, atol: 0, rtol: 0)
                 let previous = worst[key] ?? (0, 0)
                 worst[key] = (max(previous.abs, delta.maxAbs), max(previous.rel, delta.maxRel))
             }

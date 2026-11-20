@@ -1,0 +1,30 @@
+name: Nightly full tier
+
+# Engine program spec section 12, change 3: the production-shape cases marked
+# `.fullTier` (Tests/Mference/Core/Validation/TestTier.swift) are left out of
+# pull request and push CI and run here, with the default suite, once a day.
+# GitHub runs scheduled workflows from the default branch only.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-tier:
+    runs-on: macos-26
+    env:
+      MFERENCE_TEST_TIER: full
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Report toolchain
+        run: swift --version
+      - name: Run serial tests (full tier)
+        run: Scripts/test.sh

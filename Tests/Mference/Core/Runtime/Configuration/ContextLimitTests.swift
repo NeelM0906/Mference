@@ -3,25 +3,19 @@ import Testing
 @testable import Mference
 
 @Suite struct ContextLimitTests {
-    /// Each pinned checkpoint's own context: `max_position_embeddings`, and
-    /// `model_max_length` for Inkling, which has none.
+    /// Each pinned checkpoint's own context: `max_position_embeddings`.
     @Test func everyFamilyCarriesItsCheckpointsNativeContext() {
         let expected: [ModelFamily: Int] = [
-            .gemma4: 262_144,
             .qwen36: 262_144,
             .qwen38: 262_144,
-            .qwen38flashnext: 262_144,
             .minicpm5: 131_072,
             .maple: 128_000,
-            .deepseekV4Flash: 1_048_576,
-            .glm53Flash: 1_048_576,
-            .inklingSmall: 1_048_576,
         ]
         #expect(Set(expected.keys) == Set(ModelFamily.allCases))
         for (family, tokens) in expected {
             #expect(family.maximumContext == tokens, "\(family)")
         }
-        #expect(ModelFamily.largestMaximumContext == 1_048_576)
+        #expect(ModelFamily.largestMaximumContext == 262_144)
     }
 
     @Test func refusalNamesTheModelAndItsLimit() {

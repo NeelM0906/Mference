@@ -6,14 +6,17 @@ struct SubTensorEntry: Sendable, Equatable {
     let dtype: String?
     let shape: [Int]?
     let bits: Int?
+    /// GGUF block format name (`"IQ2_S"`, ...) of a `"GGML"` tensor.
+    let format: String?
 
     init(offset: UInt64, size: UInt64, dtype: String? = nil,
-         shape: [Int]? = nil, bits: Int? = nil) {
+         shape: [Int]? = nil, bits: Int? = nil, format: String? = nil) {
         self.offset = offset
         self.size = size
         self.dtype = dtype
         self.shape = shape
         self.bits = bits
+        self.format = format
     }
 }
 
@@ -145,9 +148,12 @@ enum PackedExpertsLayoutReader {
                     if let bits = t["bits"], !(bits is Int) {
                         throw ModelError.indexCorrupt(detail: "layout.json: malformed tensor bits \(role)")
                     }
+                    if let format = t["format"], !(format is String) {
+                        throw ModelError.indexCorrupt(detail: "layout.json: malformed tensor format \(role)")
+                    }
                     subTensors[role] = SubTensorEntry(offset: toff, size: tsize,
                         dtype: t["dtype"] as? String, shape: t["shape"] as? [Int],
-                        bits: t["bits"] as? Int)
+                        bits: t["bits"] as? Int, format: t["format"] as? String)
                 }
                 let expertID = expertObj["expert"] as? Int ?? experts.compactMap { $0 }.count
                 guard expertID >= 0 && expertID < expertsPerLayer else {

@@ -7,12 +7,8 @@ import Metal
 /// quirk). Qwen 3.6 interleaves 30 gated-DeltaNet linear-attention layers with
 /// 10 full-attention layers; linear layers keep a fixed-size recurrent state
 /// (owned by `GDNStateManager`) instead of per-token K/V rows. Sourced from
-/// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear,
-/// 3/4 = DeepSeek V4 CSA/HCA). DeepSeek-V4 architectures keep all attention
-/// state — including the sliding-window ring — in `DSV4StateManager`, so
-/// every layer of such a model is `.compressed` here with placeholder
-/// storage; this manager only supplies the position cursor.
-public enum LayerKind: Sendable { case swa, full, linear, compressed }
+/// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear).
+public enum LayerKind: Sendable { case swa, full, linear }
 
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
@@ -166,14 +162,12 @@ public final class KVCacheManager {
 
         // Linear-attention layers keep no per-token K/V rows; they share one
         // page-sized placeholder so the parallel arrays stay non-optional.
-        // DeepSeek-V4 models own all attention state in `DSV4StateManager`,
-        // so every layer (mask 0/3/4 alike) gets the placeholder there.
         var linearPlaceholder: MTLBuffer? = nil
-        let allPlaceholder = config.hasCompressedAttentionLayers
 
         for layer in 0..<config.numLayers {
             let maskValue = config.fullAttentionLayerMask[layer]
-            if maskValue == 2 || allPlaceholder || pagedFullAttention {
+            if maskValue == 2
+                || (pagedFullAttention && maskValue == 1) {
                 let placeholder: MTLBuffer
                 if let existing = linearPlaceholder {
                     placeholder = existing
@@ -193,12 +187,11 @@ public final class KVCacheManager {
                 st.append(0)
                 if maskValue == 2 {
                     kd.append(.linear)
-                } else if pagedFullAttention && maskValue == 1 {
-                    // Storage lives in KVPageStore; kind stays .full so
-                    // diagnostics report the layer's true attention variant.
-                    kd.append(.full)
                 } else {
-                    kd.append(.compressed)
+                    // Paged full attention: storage lives in KVPageStore; kind
+                    // stays .full so diagnostics report the layer's true
+                    // attention variant.
+                    kd.append(.full)
                 }
                 caps.append(0)
                 continue
@@ -253,117 +246,95 @@ public final class KVCacheManager {
         self.capacityTokens = caps
     }
 
-    // One server-owned recovery image. It contains only SWA rows; the full
-    // attention prefix remains in the original buffers. No per-tool copies.
-    private struct GemmaRecoveryImage {
-        let rows: MTLBuffer
-        let position: Int
-        let start: Int
-    }
-    private var gemmaRecoveryImage: GemmaRecoveryImage?
-    private var gemmaRecoveryStorage: MTLBuffer?
-    private var gemmaResidentFloor = 0
+    // MARK: Prefix snapshots (server multi-prefix cache)
+    //
+    // A prefix snapshot of this manager is rows [0, count) of every
+    // full-attention layer, laid out layer-major: layer L's K rows, then its V
+    // rows, for each full-attention layer in index order. Only all-linear
+    // full-attention storage qualifies: sliding rings overwrite old rows and
+    // paged layers keep their rows in a `KVPageStore`, so neither has a
+    // complete row image here. Linear-attention layers carry no rows (their state is the
+    // recurrent state, snapshotted separately).
 
-    var gemmaRecoveryBytes: UInt64 { UInt64(gemmaRecoveryStorage?.length ?? 0) }
-
-    func discardGemmaRecovery() {
-        gemmaRecoveryImage = nil
-        gemmaRecoveryStorage = nil
-    }
-
-    private func gemmaCurrentPrefixAvailable(_ target: Int) -> Bool {
-        guard config.family == .gemma4, target > 0, target <= position else { return false }
+    /// Whether every attention layer stores linear, unpaged FP16 rows here.
+    public var supportsPrefixSnapshots: Bool {
+        var hasRows = false
         for layer in 0..<config.numLayers {
-            guard kinds[layer] == .full || kinds[layer] == .swa,
-                  strides[layer] > 0 else { return false }
-            if kinds[layer] == .swa, fp16RingEnabled {
-                // The next query at target includes its own newly written row
-                // in the window. Its earliest required *old* row is target-W+1.
-                let requiredStart = max(0, target - config.slidingWindow + 1)
-                let residentStart = max(gemmaResidentFloor, position - capacityTokens[layer])
-                guard requiredStart >= residentStart else { return false }
+            switch kinds[layer] {
+            case .linear:
+                continue
+            case .full:
+                guard strides[layer] > 0 else { return false }
+                hasRows = true
+            case .swa:
+                return false
             }
         }
-        return true
+        return hasRows
     }
 
-    func gemmaRecoverablePrefix(upTo limit: Int) -> Int {
-        let target = min(limit, position)
-        if gemmaCurrentPrefixAvailable(target) { return target }
-        guard let image = gemmaRecoveryImage, image.position <= target else { return 0 }
-        return image.position
+    private var snapshotLayers: [Int] {
+        (0..<config.numLayers).filter { kinds[$0] == .full && strides[$0] > 0 }
     }
 
-    /// Caller has drained GPU work and holds the generation owner. Allocation
-    /// failure invalidates the image but leaves current KV available.
-    func captureGemmaRecovery(onLayer: ((Int) throws -> Void)? = nil) throws -> Bool {
-        try Task.checkCancellation()
-        gemmaRecoveryImage = nil
-        guard gemmaCurrentPrefixAvailable(position), fp16RingEnabled else { return false }
-        let count = min(position, max(0, config.slidingWindow - 1))
-        let start = position - count
-        let length = (0..<config.numLayers).filter { kinds[$0] == .swa }
-            .reduce(0) { $0 + 2 * count * strides[$1] }
-        guard length > 0 else { return false }
-        if gemmaRecoveryStorage?.length != length {
-            // Release before replacement: at most one bounded allocation.
-            gemmaRecoveryStorage = nil
-            gemmaRecoveryStorage = kBuffers[0].device.makeBuffer(length: length, options: .storageModeShared)
+    /// Bytes a snapshot of rows [0, tokens) occupies.
+    public func prefixSnapshotBytes(tokens: Int) -> Int {
+        snapshotLayers.reduce(0) { $0 + 2 * tokens * strides[$1] }
+    }
+
+    /// Copies rows [0, count) of every full-attention layer into `region`.
+    /// The caller has drained GPU work. Leaves the cache unchanged.
+    public func copyPrefixRows(count: Int, into region: PrefixSnapshotRegion) throws {
+        guard supportsPrefixSnapshots else {
+            throw PrefixSnapshotError.unsupported("KV layout has no complete linear row image")
         }
-        guard let storage = gemmaRecoveryStorage else { return false }
-        storage.label = "kv.gemma-recovery"
+        guard count > 0, count <= position else {
+            throw PrefixSnapshotError.outOfRange("rows 0..<\(count) with cursor at \(position)")
+        }
+        let needed = prefixSnapshotBytes(tokens: count)
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
         var offset = 0
-        for layer in 0..<config.numLayers where kinds[layer] == .swa {
-            try Task.checkCancellation()
+        for layer in snapshotLayers {
+            let bytes = count * strides[layer]
             for source in [kBuffers[layer], vBuffers[layer]] {
-                for logical in start..<position {
-                    let slot = physicalSlot(layer: layer, position: logical) * strides[layer]
-                    memcpy(storage.contents().advanced(by: offset), source.contents().advanced(by: slot), strides[layer])
-                    offset += strides[layer]
-                }
+                memcpy(region.base.advanced(by: offset), source.contents(), bytes)
+                offset += bytes
             }
-            try onLayer?(layer)
         }
-        try Task.checkCancellation()
-        gemmaRecoveryImage = GemmaRecoveryImage(rows: storage, position: position, start: start)
-        return true
     }
 
-    func recoverGemmaPrefix(to target: Int, onLayer: ((Int) throws -> Void)? = nil) throws -> GemmaPrefixRecoverySource {
-        try Task.checkCancellation()
-        if gemmaCurrentPrefixAvailable(target) {
-            if fp16RingEnabled {
-                for layer in 0..<config.numLayers where kinds[layer] == .swa {
-                    gemmaResidentFloor = max(gemmaResidentFloor, position - capacityTokens[layer])
-                }
-            }
-            if let image = gemmaRecoveryImage, image.position > target { discardGemmaRecovery() }
-            position = target
-            return .current
+    /// Replaces rows [0, count) of every full-attention layer with the
+    /// snapshot in `region` and moves the cursor to `position` (`<= count`).
+    /// Grows the full-attention layers first when `count` exceeds their
+    /// capacity; capacity never changes which rows attention reads. The
+    /// caller has drained GPU work. The cursor moves only after every row is
+    /// copied; a throw after copying began requires the owner's `reset()`.
+    public func restorePrefixRows(count: Int, from region: PrefixSnapshotRegion,
+                                  position target: Int) throws {
+        guard supportsPrefixSnapshots else {
+            throw PrefixSnapshotError.unsupported("KV layout has no complete linear row image")
         }
-        guard config.family == .gemma4, let image = gemmaRecoveryImage,
-              image.position == target, target <= position else {
-            throw PrefillError.prefillCursorMismatch("Gemma prefix state is unavailable")
+        guard count > 0, count <= maxContext, target > 0, target <= count else {
+            throw PrefixSnapshotError.outOfRange(
+                "restore of rows 0..<\(count) to position \(target) with maxContext \(maxContext)")
         }
-        // All geometry is fixed by this manager; full-attention rows below
-        // target have not been overwritten. Publish the cursor only after all
-        // K and V rows are restored. Any throw requires the owner's reset.
+        let needed = prefixSnapshotBytes(tokens: count)
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        try ensureCapacity(for: count)
         var offset = 0
-        for layer in 0..<config.numLayers where kinds[layer] == .swa {
-            try Task.checkCancellation()
+        for layer in snapshotLayers {
+            requireFullCapacity(layer: layer, tokens: count)
+            let bytes = count * strides[layer]
             for destination in [kBuffers[layer], vBuffers[layer]] {
-                for logical in image.start..<target {
-                    let slot = physicalSlot(layer: layer, position: logical) * strides[layer]
-                    memcpy(destination.contents().advanced(by: slot), image.rows.contents().advanced(by: offset), strides[layer])
-                    offset += strides[layer]
-                }
+                memcpy(destination.contents(), region.base.advanced(by: offset), bytes)
+                offset += bytes
             }
-            try onLayer?(layer)
         }
-        try Task.checkCancellation()
-        gemmaResidentFloor = image.start
         position = target
-        return .snapshot
     }
 
     public func layerKind(_ layer: Int) -> LayerKind { kinds[layer] }
@@ -387,7 +358,7 @@ public final class KVCacheManager {
 
     /// Write target for this layer's K projection at `position`.
     public func kSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
-        precondition(kinds[layer] != .linear && kinds[layer] != .compressed,
+        precondition(kinds[layer] != .linear,
                      "layer kind \(kinds[layer]) has no KV slots")
         validateRange(start: position, count: 1)
         return (kBuffers[layer], physicalSlot(layer: layer, position: position) * strides[layer])
@@ -397,7 +368,7 @@ public final class KVCacheManager {
     /// distinct from `kSlot` — full layers no longer alias K and V (Gemma 4
     /// applies different per-head norms + RoPE to K vs V; gemma4-block.md §2.2).
     public func vSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
-        precondition(kinds[layer] != .linear && kinds[layer] != .compressed,
+        precondition(kinds[layer] != .linear,
                      "layer kind \(kinds[layer]) has no KV slots")
         validateRange(start: position, count: 1)
         return (vBuffers[layer], physicalSlot(layer: layer, position: position) * strides[layer])
@@ -522,12 +493,6 @@ public final class KVCacheManager {
         precondition(position >= 0, "rewind position must be non-negative")
         precondition(position <= self.position,
                      "rewind \(position) is ahead of cursor \(self.position)")
-        if config.family == .gemma4, fp16RingEnabled {
-            for layer in 0..<config.numLayers where kinds[layer] == .swa {
-                gemmaResidentFloor = max(gemmaResidentFloor, self.position - capacityTokens[layer])
-            }
-            if let image = gemmaRecoveryImage, image.position > position { discardGemmaRecovery() }
-        }
         self.position = position
     }
 
@@ -537,8 +502,6 @@ public final class KVCacheManager {
     /// and `validTokenCount` is now 0. `MADV_DONTNEED` on the page-aligned span
     /// releases resident memory between turns; pages fault back in on next write.
     public func reset() {
-        discardGemmaRecovery()
-        gemmaResidentFloor = 0
         position = 0
         releaseGrowth()
         let pageSize = Int(getpagesize())

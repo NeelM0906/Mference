@@ -1,6 +1,6 @@
 import Foundation
-import Synchronization
 import Mference
+import MferenceEngine
 
 /// A model the library has loaded, and whose chat dialect the request validator
 /// needs before the request is rendered.
@@ -14,157 +14,198 @@ public protocol ServerLoadedModel: ServerInferenceBackend {
 
 /// Everything `GET /health`, `GET /v1/models`, and the unknown-model check need,
 /// readable synchronously from a NIO channel callback while a load is in flight
-/// on the library actor.
+/// on the engine host.
 public final class ServerLibrarySnapshot: Sendable {
-    private struct State {
-        var index: ServerLibraryIndex
-        var loaded: String?
-        var loading: String?
+    public let catalog: EngineCatalog
+    private let host: EngineHost
+
+    init(catalog: EngineCatalog, host: EngineHost) {
+        self.catalog = catalog
+        self.host = host
     }
 
-    private let state: Mutex<State>
-    /// `--max-context`; nil is each model's native context.
-    private let maxContext: Int?
-
-    init(index: ServerLibraryIndex, maxContext: Int?) {
-        state = Mutex(State(index: index, loaded: nil, loading: nil))
-        self.maxContext = maxContext
+    public func descriptor(for modelID: String) -> EngineModelDescriptor? {
+        catalog.descriptor(for: modelID)
     }
 
-    public var index: ServerLibraryIndex {
-        state.withLock { $0.index }
+    public func unavailableReason(for modelID: String) -> String? {
+        catalog.unavailableReason(for: modelID)
     }
 
-    public func entry(for modelID: String) -> ServerLibraryEntry? {
-        state.withLock { $0.index.entry(for: modelID) }
-    }
-
+    /// Each model's context is the one it loads with, resolved from the
+    /// descriptor alone, so listing loads nothing.
     public var modelList: OpenAIModelList {
-        state.withLock { $0.index }.modelList(maxContext: maxContext)
+        OpenAIModelList(
+            object: "list",
+            data: catalog.models.map {
+                .init(id: $0.id, object: "model", created: 0, ownedBy: "mference",
+                      maxModelLen: $0.resolvedContext(options: host.loadOptions),
+                      engine: $0.engine.rawValue)
+            })
     }
 
     /// `("loading", target)` while a model is being loaded or swapped in,
     /// otherwise `("ok", loaded model or nil)`. Reported so a client can tell a
     /// minutes-long first-touch verification from a wedged server.
     public var health: (status: String, model: String?) {
-        state.withLock {
-            if let loading = $0.loading { return ("loading", loading) }
-            return ("ok", $0.loaded)
-        }
+        let health = host.status.health
+        return (health.status, health.modelID)
     }
 
     var loadedModelID: String? {
-        state.withLock { $0.loaded }
-    }
-
-    func beginLoading(_ modelID: String) {
-        state.withLock {
-            $0.loading = modelID
-            $0.loaded = nil
-        }
-    }
-
-    func finishLoading(_ modelID: String?) {
-        state.withLock {
-            $0.loading = nil
-            $0.loaded = modelID
-        }
+        host.status.residentModelID
     }
 }
 
-/// Holds the one model that is loaded and swaps it in place.
+/// Library mode's model owner: an `EngineHost` over an `EngineCatalog`.
 ///
-/// Exactly one `ServerModelSession` exists at a time and no second model
-/// process is ever spawned: a request for a different model releases the
-/// resident session — Metal buffers, expert cache, and KV with it — before the
-/// replacement is loaded, so peak memory is one model, not two.
-///
-/// Serialization is the caller's: `resolve` runs inside the generation
-/// coordinator's turn, so the generation that was in flight when the request
-/// arrived has finished and nothing else can start until this request releases.
-/// The `isLoading` gate below is a second belt for the startup preload and for
-/// any future caller outside that turn.
-public actor ServerModelLibrary {
+/// Exactly one model is resident at a time and no second model process is
+/// ever spawned: a request for a different model releases the resident one —
+/// Metal buffers, expert cache, and KV with it — before the replacement is
+/// loaded, so peak memory is one model, not two. The host serializes requests,
+/// loads, and unloads through one gate; the HTTP layer additionally runs every
+/// library request inside its generation coordinator's turn, which keeps the
+/// server's queue limit and its committed-stream behavior unchanged.
+public final class ServerModelLibrary: Sendable {
     /// Loads the install at a directory. Injected so tests can record load and
     /// release ordering without a real model.
-    public typealias Loader = @Sendable (URL) async throws -> any ServerLoadedModel
+    public typealias Loader = ServerLoaderBackend.Loader
 
-    public nonisolated let snapshot: ServerLibrarySnapshot
+    public let host: EngineHost
+    public let snapshot: ServerLibrarySnapshot
+    /// Which catalog the library serves; reported on the ready line.
+    public let catalogScope: EngineCatalogScope
 
-    private let index: ServerLibraryIndex
-    private let loader: Loader
-    private var current: (modelID: String, backend: any ServerLoadedModel)?
-    private var isLoading = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    /// `maxContext` is the server's `--max-context`, nil for `max`; the
-    /// loader applies the same value when it loads a model.
-    public init(index: ServerLibraryIndex,
-                maxContext: Int? = ServerArguments.defaultMaxContext,
-                loader: @escaping Loader) {
-        self.index = index
-        self.loader = loader
-        self.snapshot = ServerLibrarySnapshot(index: index, maxContext: maxContext)
+    /// Serves `catalog` with `backends`; the production entry point.
+    public init(catalog: EngineCatalog,
+                backends: [any EngineBackend],
+                loadOptions: EngineLoadOptions,
+                catalogScope: EngineCatalogScope = .all) {
+        self.catalogScope = catalogScope
+        let host = EngineHost(catalog: catalog,
+                              backends: backends,
+                              loadOptions: loadOptions,
+                              observer: { ServerLog.hostEvent($0) })
+        self.host = host
+        self.snapshot = ServerLibrarySnapshot(catalog: catalog, host: host)
     }
 
-    /// Returns the loaded backend for `modelID`, swapping it in if a different
-    /// model is resident. Blocks for the whole load — tens of seconds to
-    /// minutes with first-touch SHA-256 verification — rather than returning a
-    /// `503` with `Retry-After`, because an OpenAI-compatible client already
-    /// tolerates a long time to first token and would otherwise have to
-    /// implement a retry loop the API does not describe.
+    /// Serves every entry of `index` through `loader`. `maxContext` is the
+    /// server's `--max-context`, nil for `max`; the loader applies the same
+    /// value when it loads a model.
+    public convenience init(index: ServerLibraryIndex,
+                            maxContext: Int? = ServerArguments.defaultMaxContext,
+                            loader: @escaping Loader) {
+        self.init(catalog: ServerEngineCatalog.catalog(for: index),
+                  backends: [ServerLoaderBackend(loader: loader)],
+                  loadOptions: EngineLoadOptions(nativeMaxContext: maxContext))
+    }
+
+    /// Runs `body` with `modelID` resident and held, swapping it in first if
+    /// another model is resident. Blocks for the whole load — tens of seconds
+    /// to minutes with first-touch SHA-256 verification — rather than
+    /// returning a `503` with `Retry-After`, because an OpenAI-compatible
+    /// client already tolerates a long time to first token and would otherwise
+    /// have to implement a retry loop the API does not describe.
+    ///
+    /// Validation, rendering, and generation all belong inside one body: the
+    /// model must not be kept after it returns.
+    public func withModel<T: Sendable>(
+        _ modelID: String,
+        _ body: @escaping @Sendable (_ modelID: String, _ model: any ServerLoadedModel) async throws -> T
+    ) async throws -> T {
+        do {
+            return try await host.withModel(modelID) { model in
+                try await body(model.descriptor.id, try serverLoadedModel(for: model))
+            }
+        } catch {
+            throw serverError(error)
+        }
+    }
+
+    /// Library mode as `MferenceServer --library` runs it: the engine's own
+    /// discovery over `roots` (and the GGUF directories), the scope
+    /// `--catalog` selects, and the engine's backends (`NativeBackend` for
+    /// `.gturbo`, `LlamaBackend` for `.gguf`) with the server's runtime flags
+    /// as load options. Only engines with a backend in this
+    /// build are served; see `ServerEngineCatalog.servable`.
+    ///
+    /// `explicitModel` is `--model` alongside `--library`: discovery considers
+    /// it first, so it is the install served for its product model.
+    public static func serving(
+        roots: [URL],
+        explicitModel: URL? = nil,
+        arguments: ServerArguments,
+        ggufDirectories: [URL]? = nil,
+        fileSystem: EngineCatalogDiscovery.FileSystem = .live,
+        backends: [any EngineBackend]? = nil
+    ) -> ServerModelLibrary {
+        // Production: the engine's native backend (its notices in the server
+        // log) and llama.cpp for GGUF models. Tests pass scripted backends.
+        let backends = backends ?? [NativeBackend(onNotice: { ServerLog.nativeBackendNotice($0) }),
+                                    LlamaBackend()]
+        let discovered = EngineCatalogDiscovery.discover(
+            roots: roots,
+            ggufDirectories: ggufDirectories ?? EngineCatalogDiscovery.defaultGGUFDirectories(roots: roots),
+            scope: arguments.catalogScope,
+            explicitModel: explicitModel,
+            fileSystem: fileSystem)
+        let catalog = ServerEngineCatalog.servable(discovered, engines: Set(backends.map(\.engine)))
+        return ServerModelLibrary(catalog: catalog,
+                                  backends: backends,
+                                  loadOptions: arguments.engineLoadOptions,
+                                  catalogScope: arguments.catalogScope)
+    }
+
+    /// `--list-models` output.
+    public var listing: String { ServerLibraryListing.text(for: snapshot.catalog) }
+
+    /// What the catalog declined and what it serves, on stderr.
+    public func logDiscovery() { ServerEngineCatalog.logDiscovery(snapshot.catalog) }
+
+    /// The ready line's library fields.
+    public var readyDetail: String {
+        "catalog=\(catalogScope.rawValue) models=\(snapshot.catalog.models.count)"
+    }
+
+    /// Preloads the catalog model at `directory` (`--model` with `--library`).
+    public func preload(directory: URL) async throws {
+        // Compared by path: a directory URL may or may not carry a trailing
+        // slash depending on how it was made.
+        let path = directory.standardizedFileURL.path
+        guard let model = snapshot.catalog.models.first(where: {
+            $0.location.standardizedFileURL.path == path
+        }) else {
+            // Say why: a declined install's reason names --catalog all.
+            let reason = snapshot.catalog.skipped.first {
+                $0.location.standardizedFileURL.path == path
+            }?.reason ?? "not a completed install"
+            throw ServerArgumentError.invalid("--model \(path): \(reason)")
+        }
+        try await preload(modelID: model.id)
+    }
+
+    /// Makes `modelID` resident and returns it. For tests and diagnostics: a
+    /// request path uses `withModel`, which holds the model for its duration.
     public func resolve(modelID: String) async throws
         -> (modelID: String, backend: any ServerLoadedModel) {
-        guard let entry = index.entry(for: modelID) else {
-            if let reason = index.unavailableReason(for: modelID) {
-                throw ServerRequestError.invalid(message: reason, param: "model", code: "model_not_runnable")
-            }
-            throw ServerRequestError.unknownModel
-        }
-        while isLoading {
-            await withCheckedContinuation { waiters.append($0) }
-        }
-        if let current, current.modelID == entry.modelID { return current }
-
-        isLoading = true
-        defer {
-            isLoading = false
-            let resumable = waiters
-            waiters.removeAll()
-            for waiter in resumable { waiter.resume() }
-        }
-        snapshot.beginLoading(entry.modelID)
-        // Only the identifier is kept: binding the session itself to a local
-        // would hold a strong reference for the rest of this call and keep the
-        // outgoing model alive through the load, which is exactly the two-models
-        // -at-once peak this swap exists to avoid.
-        let previousModelID = current?.modelID
-        current = nil
-        if let previousModelID {
-            ServerLog.modelSwapStarted(from: previousModelID, to: entry.modelID)
-        } else {
-            ServerLog.modelLoadStarted(entry.modelID)
-        }
-        let started = ContinuousClock.now
-        do {
-            let backend = try await loader(entry.directory)
-            current = (modelID: entry.modelID, backend: backend)
-            snapshot.finishLoading(entry.modelID)
-            ServerLog.modelSwapFinished(model: entry.modelID,
-                                        duration: started.duration(to: .now))
-            return (modelID: entry.modelID, backend: backend)
-        } catch {
-            snapshot.finishLoading(nil)
-            ServerLog.modelSwapFailed(model: entry.modelID, error: error)
-            throw error
-        }
+        try await withModel(modelID) { id, model in (modelID: id, backend: model) }
     }
 
     /// Startup preload for `--model` alongside `--library`. Without it the
     /// first request pays the load.
     public func preload(modelID: String) async throws {
-        _ = try await resolve(modelID: modelID)
+        do {
+            try await host.load(modelID)
+        } catch {
+            throw serverError(error)
+        }
     }
 
-    var loadedModelID: String? { current?.modelID }
+    /// Releases the resident model and refuses further work.
+    public func shutdown() async {
+        await host.shutdown()
+    }
+
+    var loadedModelID: String? { snapshot.loadedModelID }
 }
