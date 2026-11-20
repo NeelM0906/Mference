@@ -70,6 +70,75 @@ import Testing
         #expect(h.view.document == doc(.heading(level: .title, runs: [TextRun("Second")])))
     }
 
+    /// Two notes: A ("A" title, "Call" line), B.
+    func twoNotes() throws -> (NoteStore, Note, Note, NoteEditorController, Harness) {
+        let store = try store()
+        let a = try store.createNote()
+        try store.save(doc(.heading(level: .title, runs: [TextRun("A")]), .paragraph(runs: [TextRun("Call")])), to: a)
+        let b = try store.createNote()
+        try store.save(doc(.heading(level: .title, runs: [TextRun("B")])), to: b)
+        let controller = NoteEditorController(store: store, autosaveDelay: .seconds(60))
+        let h = Harness()
+        controller.attach(h.view)
+        controller.open(a)
+        return (store, a, b, controller, h)
+    }
+
+    @Test func aPhraseHandedBackToItsReopenedNoteKeepsNewerEdits() throws {
+        let (store, a, b, controller, h) = try twoNotes()
+        let phrase = UUID()
+        controller.beginPhrase(phrase)            // after "Call"
+        controller.open(b)
+        controller.open(a)                        // the phrase comes back to the live editor
+        #expect(h.view.pendingPhraseIDs == [phrase])
+        h.view.setSelectedRange(NSRange(location: 2, length: 0))
+        h.type("Notes\n")                        // a newer edit before the phrase
+        controller.finishPhrase(phrase, text: "the dentist.")
+        controller.saveNow(force: true)
+        #expect(store.document(of: a) == doc(.heading(level: .title, runs: [TextRun("A")]),
+                                             .paragraph(runs: [TextRun("Notes")]),
+                                             .paragraph(runs: [TextRun("Call the dentist.")])))
+        #expect(a.hasDictation)
+    }
+
+    @Test func aPhraseFinishingAwayFromAChangedNoteGoesAtItsEnd() throws {
+        let (store, a, b, controller, h) = try twoNotes()
+        let phrase = UUID()
+        h.view.setSelectedRange(NSRange(location: 2, length: 0))   // before "Call"
+        controller.beginPhrase(phrase)
+        controller.open(b)
+        // Meanwhile the note changes elsewhere (a meeting title, another window).
+        try store.setTitle("A renamed", of: a)
+        controller.finishPhrase(phrase, text: "the dentist.")
+        #expect(store.document(of: a) == doc(.heading(level: .title, runs: [TextRun("A renamed")]),
+                                             .paragraph(runs: [TextRun("Call the dentist.")])))
+    }
+
+    @Test func phrasesFollowTheirNoteWhenTheViewGoesAwayOrIsReplaced() throws {
+        let (store, a, _, controller, h) = try twoNotes()
+        let (first, second) = (UUID(), UUID())
+        controller.beginPhrase(first)
+        controller.beginPhrase(second)
+        // Leaving Notes tears the view down: no phrase is lost or lands elsewhere.
+        let scroll = NSScrollView()
+        scroll.documentView = h.view
+        NoteEditorView.dismantleNSView(scroll, coordinator: NoteEditorView.Coordinator(controller: controller))
+        #expect(h.view.pendingPhraseIDs.isEmpty)
+        controller.finishPhrase(first, text: "the dentist.")
+        #expect(store.document(of: a).blocks.last == .paragraph(runs: [TextRun("Call the dentist.")]))
+        // Back in Notes with a new view: the other phrase is handed back.
+        let other = Harness()
+        controller.attach(other.view)
+        #expect(other.view.pendingPhraseIDs == [second])
+        // Replacing the view moves it again.
+        let third = Harness()
+        controller.attach(third.view)
+        #expect(other.view.pendingPhraseIDs.isEmpty)
+        #expect(third.view.pendingPhraseIDs == [second])
+        controller.finishPhrase(second, text: "Tomorrow.")
+        #expect(third.view.document.blocks.last == .paragraph(runs: [TextRun("Call the dentist. Tomorrow.")]))
+    }
+
     @Test func editsAreSavedWhenTheAppDeactivatesOrTheViewGoesAway() throws {
         let store = try store()
         let note = try store.createNote()
@@ -115,6 +184,10 @@ import Testing
         controller.open(note)
         #expect(!h.view.isEditable)
         #expect(controller.readOnlyReason == .newerVersion)
+        #expect(h.view.notice == "This note was made by a newer version of Mference and opens read-only.")
+        h.view.dateLine = "19 November 2026 at 11:40"
+        #expect(h.view.textContainerInset.height > NoteEditorMetrics.topInset + NoteEditorMetrics.dateLineHeight
+                + NoteEditorMetrics.titleSpacingBefore)
     }
 
     // MARK: Paste (HIGH 3, MEDIUM 6, 7)

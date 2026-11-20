@@ -47,6 +47,25 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         }
     }
 
+    /// One plain line under the date: why a note opens read-only.
+    var notice = "" {
+        didSet {
+            noticeLabel.stringValue = notice
+            noticeLabel.isHidden = notice.isEmpty
+            updateInsets()
+        }
+    }
+
+    private lazy var noticeLabel: NSTextField = {
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.font = NoteEditorStyle.geist(NoteEditorMetrics.dateSize, .regular)
+        label.textColor = NoteEditorStyle.secondary
+        label.alignment = .center
+        label.isHidden = true
+        label.autoresizingMask = [.width]
+        return label
+    }()
+
     private lazy var dateLabel: NSTextField = {
         let label = NSTextField(labelWithString: "")
         label.font = NoteEditorStyle.geist(NoteEditorMetrics.dateSize, .regular)
@@ -60,9 +79,16 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     private func updateInsets() {
         if dateLabel.superview == nil { addSubview(dateLabel) }
+        if noticeLabel.superview == nil { addSubview(noticeLabel) }
         dateLabel.frame = CGRect(x: 0, y: NoteEditorMetrics.topInset, width: bounds.width,
                                  height: NoteEditorMetrics.dateLineHeight)
-        let dateHeight = dateLine.isEmpty ? 0 : NoteEditorMetrics.dateLineHeight + NoteEditorMetrics.titleSpacingBefore
+        let noticeTop = NoteEditorMetrics.topInset + (dateLine.isEmpty ? 0 : NoteEditorMetrics.dateLineHeight)
+        noticeLabel.frame = CGRect(x: NoteEditorMetrics.horizontalInset, y: noticeTop,
+                                   width: max(0, bounds.width - 2 * NoteEditorMetrics.horizontalInset),
+                                   height: notice.isEmpty ? 0 : NoteEditorMetrics.noticeHeight)
+        let noticeHeight = notice.isEmpty ? 0 : NoteEditorMetrics.noticeHeight
+        let dateHeight = (dateLine.isEmpty ? 0 : NoteEditorMetrics.dateLineHeight + NoteEditorMetrics.titleSpacingBefore)
+            + noticeHeight
         textContainerInset = NSSize(width: NoteEditorMetrics.horizontalInset - NoteEditorMetrics.lineFragmentPadding,
                                     height: NoteEditorMetrics.topInset + dateHeight)
     }
