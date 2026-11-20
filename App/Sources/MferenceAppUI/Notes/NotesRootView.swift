@@ -77,6 +77,11 @@ struct NotesScreen: View {
                 .frame(maxWidth: .infinity)
         }
         .background(MFColor.surface)
+        // Audio or video dropped anywhere on Notes becomes transcribed notes
+        // (spec 4.6); the editor takes its own drops (images attach).
+        .dropDestination(for: URL.self) { (urls: [URL], _: CGPoint) -> Bool in
+            model.voice.transcribe?(urls) ?? false
+        }
         .task {
             await model.purgeExpired()
             model.selectFirstIfNeeded()
