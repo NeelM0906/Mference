@@ -12,7 +12,7 @@ public struct MeetingLayoutView<Notes: View>: View {
     let voice: VoiceModels
     let onShowSidebar: () -> Void
     let notes: (_ onTimeChip: @escaping (TimeInterval) -> Void) -> Notes
-    @State private var scrollTarget: TimeInterval?
+    @State private var scrollRequest: TranscriptScrollRequest?
 
     public init(session: MeetingSession, voice: VoiceModels, onShowSidebar: @escaping () -> Void,
                 @ViewBuilder notes: @escaping (_ onTimeChip: @escaping (TimeInterval) -> Void) -> Notes) {
@@ -24,10 +24,14 @@ public struct MeetingLayoutView<Notes: View>: View {
 
     public var body: some View {
         VStack(spacing: 0) {
+            // This meeting's options, not the defaults (which may change meanwhile).
+            let started = voice.recordMeetingModel.lastStarted
             RecordingBar(session: session, live: voice.liveMeeting,
-                         microphoneName: voice.recordMeetingModel.microphoneName,
-                         callSourceName: Self.callSourceName(voice.preferences.callAudio),
-                         summaryOn: voice.preferences.writesMeetingSummary,
+                         microphoneName: SpeechSettingsModel.microphoneName(
+                            id: started?.microphoneID ?? voice.preferences.microphoneID,
+                            devices: voice.recordMeetingModel.devices),
+                         callSourceName: Self.callSourceName(started?.callAudio ?? voice.preferences.callAudio),
+                         summaryOn: started?.summaryWhenYouStop ?? voice.preferences.writesMeetingSummary,
                          onToggleSidebar: onShowSidebar)
             if let message = Self.notice(session) {
                 Label(message, systemImage: "exclamationmark.circle")
@@ -39,7 +43,7 @@ public struct MeetingLayoutView<Notes: View>: View {
                     .background(MFColor.previewFill)
             }
             HStack(spacing: 0) {
-                notes { time in scrollTarget = time }
+                notes { time in scrollRequest = TranscriptScrollRequest(time: time) }
                     .padding(.horizontal, LiveMetrics.notesPadding.width)
                     .padding(.vertical, LiveMetrics.notesPadding.height)
                     .frame(width: LiveMetrics.notesWidth)
@@ -47,7 +51,7 @@ public struct MeetingLayoutView<Notes: View>: View {
                     .background(MFColor.surface)
                 Rectangle().fill(MFColor.chromeDivider).frame(width: MFLayout.hairline)
                 if let transcript = session.transcript {
-                    LiveTranscriptView(transcript: transcript, scrollTarget: scrollTarget)
+                    LiveTranscriptView(transcript: transcript, scrollRequest: scrollRequest)
                 } else {
                     Color.clear.background(MFColor.canvas)
                 }
@@ -90,6 +94,8 @@ extension VoiceModels {
     /// through it, and the menu bar and quit control it.
     public func connect(meetings: MeetingSession) {
         recordingControls = meetings
+        meetingIsActive = { meetings.isActive }
+        meetingIsFinishing = { if case .finishing = meetings.phase { true } else { false } }
         startMeeting = { request in
             try await meetings.start(MeetingStartOptions(
                 microphoneID: request.microphoneID, callAudio: request.callAudio,

@@ -29,15 +29,23 @@ public final class RecordMeetingModel {
     public private(set) var isStarting = false
     /// Why Start did not start (microphone denied, busy, low disk), as one line.
     public private(set) var errorMessage: String?
+    /// What the meeting now recording started with (the recording bar shows
+    /// these, not the defaults, which the person may change meanwhile).
+    public private(set) var lastStarted: Request?
 
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let permissions: any PermissionBroker
     @ObservationIgnored private let start: @MainActor (Request) async throws -> Void
+    @ObservationIgnored private let speakerLabelsReady: @MainActor () -> Bool
 
     /// - Parameter start: starts the meeting (N4's `MeetingSession.start`)
     ///   and opens its note; throws a `SpeechError` when it cannot.
+    /// - Parameter speakerLabelsReady: whether the speaker-labels download is
+    ///   installed, read from an observed status so the switch updates.
     public init(speech: any SpeechServicing, permissions: any PermissionBroker, preferences: SpeechPreferences,
+                speakerLabelsReady: (@MainActor () -> Bool)? = nil,
                 start: @escaping @MainActor (Request) async throws -> Void) {
+        self.speakerLabelsReady = speakerLabelsReady ?? { speech.status.speakerLabels.isReady }
         self.speech = speech
         self.permissions = permissions
         self.preferences = preferences
@@ -59,7 +67,7 @@ public final class RecordMeetingModel {
 
     /// Speaker labels needs its download; without it the switch shows off
     /// and the meeting labels "You" and "Others".
-    public var speakerLabelsAvailable: Bool { speech.status.speakerLabels.isReady }
+    public var speakerLabelsAvailable: Bool { speakerLabelsReady() }
 
     /// Start recording. Returns true when the meeting started (the popover closes).
     @discardableResult
@@ -84,6 +92,7 @@ public final class RecordMeetingModel {
                               language: preferences.language)
         do {
             try await start(request)
+            lastStarted = request
             return true
         } catch {
             errorMessage = (error as? SpeechError)?.message ?? "The recording didn't start. Try again."

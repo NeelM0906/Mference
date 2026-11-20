@@ -96,7 +96,29 @@ public final class ShellModel {
     /// The section to return to when Settings closes.
     public private(set) var sectionBeforeSettings: AppSection = .chat
 
+    /// Work that must finish before a section is left, or nil when nothing
+    /// waits. Notes sets it so dictation lands its last phrase before the
+    /// editor goes away (spec 4.2); the switch happens when it returns.
+    @ObservationIgnored public var finishBeforeLeaving: (@MainActor (AppSection) -> (@MainActor () async -> Void)?)?
+    @ObservationIgnored private var pendingLeave: Task<Void, Never>?
+
     public func show(_ section: AppSection) {
+        if section != selection, let finish = finishBeforeLeaving?(selection) {
+            pendingLeave?.cancel()
+            pendingLeave = Task { [weak self] in
+                await finish()
+                guard !Task.isCancelled else { return }
+                self?.switchTo(section)
+            }
+            return
+        }
+        switchTo(section)
+    }
+
+    /// Waits for a section switch that is finishing work first (tests).
+    func waitForPendingSwitch() async { await pendingLeave?.value }
+
+    private func switchTo(_ section: AppSection) {
         if section == .settings, selection != .settings {
             sectionBeforeSettings = selection
         }

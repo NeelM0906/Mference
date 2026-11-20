@@ -26,6 +26,10 @@ public final class VoiceModels {
 
     /// Starts a meeting and returns its note (N4's `MeetingSession.start`).
     @ObservationIgnored public var startMeeting: (@MainActor (RecordMeetingModel.Request) async throws -> UUID)?
+    /// Whether N4's `MeetingSession` is active (recording, paused or
+    /// finishing), and whether it is finishing; set by `connect(meetings:)`.
+    @ObservationIgnored public var meetingIsActive: (@MainActor () -> Bool)?
+    @ObservationIgnored public var meetingIsFinishing: (@MainActor () -> Bool)?
     /// Pause, resume and stop for the menu bar and quit (N4's `MeetingSession`).
     @ObservationIgnored public var recordingControls: (any LiveRecordingControls)?
     /// Shows a note in Notes (N1's navigation): the timer chip, Open note.
@@ -40,7 +44,9 @@ public final class VoiceModels {
         setup = SpeechSetupModel(speech: speech, isOffline: isOffline)
         settings = SpeechSettingsModel(setup: setup, preferences: preferences, speech: speech,
                                        permissions: permissions)
-        recordMeetingModel = RecordMeetingModel(speech: speech, permissions: permissions, preferences: preferences) {
+        let setup = setup
+        recordMeetingModel = RecordMeetingModel(speech: speech, permissions: permissions, preferences: preferences,
+                                                speakerLabelsReady: { setup.status.speakerLabels.isReady }) {
             [weak self] request in
             guard let self, let startMeeting = self.startMeeting else {
                 throw MeetingsUnavailable()
@@ -107,11 +113,25 @@ public final class VoiceModels {
         if let noteID = liveMeeting?.noteID { openNote?(noteID) }
     }
 
-    /// Quit and the menu bar's Stop: stops the meeting and waits until its
-    /// transcript is saved; then any dictation (its last phrase lands).
+    /// A meeting records, is paused, or is still finishing (last phrases,
+    /// speaker labels): quit asks first and waits for it.
+    public var isMeetingActive: Bool { liveMeeting != nil || meetingIsActive?() == true }
+    public var isMeetingFinishing: Bool { meetingIsFinishing?() == true }
+
+    /// Quit and the menu bar's Stop: stops the meeting (or lets it finish)
+    /// and waits until its transcript is saved; then any dictation (its last
+    /// phrase lands).
     public func stopLiveSessions() async {
-        if liveMeeting != nil { await recordingControls?.stopRecording() }
+        if isMeetingActive { await recordingControls?.stopRecording() }
         await dictation.stop()
+    }
+
+    /// The shell's hook: leaving Notes while dictating stops dictation first,
+    /// so its last phrase lands in its note before the editor goes away.
+    public static func finishBeforeLeaving(_ section: AppSection,
+                                           voice: VoiceModels) -> (@MainActor () async -> Void)? {
+        guard section == .notes, voice.dictation.isActive else { return nil }
+        return { await voice.stopDictation() }
     }
 
     /// Switching notes or leaving Notes: the last phrase lands in the note

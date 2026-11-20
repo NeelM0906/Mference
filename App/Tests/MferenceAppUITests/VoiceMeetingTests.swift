@@ -101,6 +101,29 @@ import Testing
         await h.voice.stopLiveSessions()
     }
 
+    @Test func followingPausesAfterAChipJumpThenResumes() {
+        let now = Date.now
+        #expect(LiveTranscriptView.follows(pausedUntil: nil, now: now))
+        #expect(!LiveTranscriptView.follows(pausedUntil: now.addingTimeInterval(LiveTranscriptView.followPause), now: now))
+        #expect(LiveTranscriptView.follows(pausedUntil: now, now: now.addingTimeInterval(1)), "auto-follow comes back")
+        #expect(TranscriptScrollRequest(time: 10) != TranscriptScrollRequest(time: 10), "the same chip scrolls again")
+    }
+
+    @Test func connectReportsActiveAndFinishing() async throws {
+        let h = try harness(stepped: true)
+        defer { h.voice.setup.stop() }
+        #expect(!h.voice.isMeetingActive)
+        #expect(await h.voice.recordMeetingModel.startRecording())
+        #expect(h.voice.isMeetingActive && !h.voice.isMeetingFinishing)
+        #expect(h.voice.recordMeetingModel.lastStarted?.callAudio == .app(bundleID: "us.zoom.xos", name: "Zoom"))
+        h.voice.preferences.callAudio = .off
+        #expect(MeetingLayoutView<EmptyView>.callSourceName(h.voice.recordMeetingModel.lastStarted!.callAudio) == "Zoom",
+                "the bar keeps this meeting's source")
+        await h.session.stop()
+        await h.session.waitUntilFinished()
+        #expect(!h.voice.isMeetingActive)
+    }
+
     @Test func barAndLayoutCopy() {
         #expect(RecordingBar.title(phase: .recording) == "Recording")
         #expect(RecordingBar.title(phase: .paused) == "Paused")
