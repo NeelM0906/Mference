@@ -160,6 +160,7 @@ public final class NoteEditorController {
         self.textView = textView
         textView.onTextChange = { [weak self] in self?.textDidChange() }
         textView.onFocusChange = { [weak self] focused in self?.onFocusChange?(focused) }
+        textView.transcribeFiles = { [weak self] urls in self?.onMediaDropped?(urls) ?? false }
         textView.onCancel = { [weak self] in self?.onCancel?() ?? false }
         textView.onTimeChipClick = onTimeChipClick
         textView.importImage = { [weak self] data, ext in
@@ -350,6 +351,9 @@ public final class NoteEditorController {
     /// The editor gained or lost keyboard focus (⇧⌘D dictates into the
     /// focused editor).
     @ObservationIgnored public var onFocusChange: ((Bool) -> Void)?
+    /// Audio or video dropped on the note; returns true when queued for
+    /// transcription (otherwise the files attach).
+    @ObservationIgnored public var onMediaDropped: (([URL]) -> Bool)?
     /// Esc in the editor; returns true when handled (dictation stopped).
     @ObservationIgnored public var onCancel: (() -> Bool)?
 
@@ -379,7 +383,14 @@ public final class NoteEditorController {
     // MARK: Dictation and meetings
 
     /// Holds the caret's place for a dictated phrase.
+    /// Binds the dictation now starting to the note shown (so even a phrase
+    /// flushed after a switch, before any phrase began, lands here).
+    public func dictationWillStart() {
+        dictationNote = note
+    }
+
     public func beginPhrase(_ id: UUID) {
+        // Without a start call (older drivers): the first phrase binds.
         if dictationNote == nil { dictationNote = note }
         guard let target = dictationNote else { return }
         if target.id == note?.id, let textView {
@@ -436,6 +447,7 @@ public final class NoteEditorController {
         }
         // A phrase never begun (its start was missed) still goes to the
         // dictation's note, not to whichever note shows.
+        if dictationNote == nil { dictationNote = note }
         if let target = dictationNote, target.id != note?.id || textView == nil,
            textView?.pendingPhraseIDs.contains(id) != true {
             let holder = holder(for: target)

@@ -35,11 +35,12 @@ struct NoteEditorPane: View {
                 // A newer or damaged body explains itself in the editor.
                 if note.deletedAt != nil { deletedBanner(note) }
                 NoteEditorView(controller: model.editor,
-                               dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar))
+                               dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar),
+                               bottomInset: showsDictationBar ? NoteEditorMetrics.dictationBarInset : 0)
                     .accessibilityLabel("Note text")
                     // Dictation's bar sits over the bottom of the note (board 2).
                     .overlay(alignment: .bottom) {
-                        if let voice, voice.dictation.isActive || voice.dictation.error != nil {
+                        if let voice, showsDictationBar {
                             DictationBar(controller: voice.dictation)
                                 .padding(.horizontal, MFSpacing.l)
                                 .padding(.bottom, MFSpacing.m)
@@ -63,6 +64,11 @@ struct NoteEditorPane: View {
                             message: "Choose a note, or start a new one with ⌘N.")
                 .background(MFColor.surface)
         }
+    }
+
+    private var showsDictationBar: Bool {
+        guard let voice else { return false }
+        return voice.dictation.isActive || voice.dictation.error != nil
     }
 
     /// "19 November 2026 at 11:40".

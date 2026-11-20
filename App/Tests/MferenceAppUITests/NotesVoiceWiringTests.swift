@@ -108,6 +108,55 @@ import Testing
         #expect(target.noteID == dentist.id)
     }
 
+    @Test func aDictationBindsWhenItStartsNotAtItsFirstPhrase() throws {
+        let model = try Self.smallModel()
+        let h = NoteEditorTests.Harness()
+        model.editor.attach(h.view)
+        let lisbon = try #require(model.selectedNote)
+        let target: any DictationInsertionTarget = model.editor
+        target.dictationWillStart()                              // the controller starts into Lisbon
+        model.selectAdjacent(1)                                  // before any phrase, the person switches
+        let dentist = try #require(model.selectedNote)
+        #expect(target.noteID == lisbon.id)
+        // The stop flushes a phrase that never began: it still lands in Lisbon.
+        target.finishPhrase(UUID(), text: "and the hotel")
+        #expect(model.store.document(of: lisbon).blocks.first
+                == .heading(level: .title, runs: [TextRun("Lisbon trip, March and the hotel")]))
+        #expect(h.view.document == model.store.document(of: dentist))
+        target.dropAllPhrases()
+        #expect(target.noteID == dentist.id)
+    }
+
+    @Test func audioDroppedOnTheNoteIsTranscribedImagesAttach() throws {
+        let model = try Self.smallModel()
+        let h = NoteEditorTests.Harness()
+        model.editor.attach(h.view)
+        let folder = FileManager.default.temporaryDirectory.appending(path: "mference-drop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let audio = folder.appending(path: "memo.m4a")
+        let image = folder.appending(path: "photo.png")
+        try Data([0]).write(to: audio)
+        try Data([0]).write(to: image)
+        var queued: [URL] = []
+        model.voice.transcribe = { queued += $0; return true }
+        let board = NSPasteboard(name: NSPasteboard.Name("mference-test-\(UUID().uuidString)"))
+        board.clearContents()
+        board.writeObjects([audio as NSURL, image as NSURL])
+        let before = h.view.document
+        #expect(h.view.readSelection(from: board, type: .fileURL))
+        #expect(queued.map(\.lastPathComponent) == ["memo.m4a"])
+        let added = h.view.document.blocks.filter { !before.blocks.contains($0) }
+        #expect(added.count == 1)
+        if case .image? = added.first {} else { Issue.record("the image did not attach") }
+        // Without transcription, audio attaches like before.
+        model.voice.transcribe = nil
+        board.clearContents()
+        board.writeObjects([audio as NSURL])
+        #expect(h.view.readSelection(from: board, type: .fileURL))
+        #expect(h.view.document.blocks.contains { if case .audio = $0 { true } else { false } })
+        board.releaseGlobally()
+    }
+
     @Test func leavingNotesClearsTheFocusedEditor() throws {
         let model = try Self.smallModel()
         var focused: [NoteEditorController?] = []
