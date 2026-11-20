@@ -11,9 +11,13 @@ public final class AppleServices {
     public let assistant: AppleModelService
     public let scan: ScanSession
     public let calendar: CalendarWeekModel
+    #if os(macOS)
+    /// Apple Mail is read on the Mac only.
     public let mail: MailInboxModel
+    #endif
     public let connections: AppleConnections
 
+    #if os(macOS)
     public init(assistant: AppleModelService, scan: ScanSession, calendar: CalendarWeekModel, mail: MailInboxModel,
                 connections: AppleConnections) {
         self.assistant = assistant
@@ -22,6 +26,15 @@ public final class AppleServices {
         self.mail = mail
         self.connections = connections
     }
+    #else
+    public init(assistant: AppleModelService, scan: ScanSession, calendar: CalendarWeekModel,
+                connections: AppleConnections) {
+        self.assistant = assistant
+        self.scan = scan
+        self.calendar = calendar
+        self.connections = connections
+    }
+    #endif
 
     /// The app's: Vision, EventKit and this Mac's Apple Mail, one calendar
     /// service and one mail source shared by the screens and Connections.
@@ -32,44 +45,62 @@ public final class AppleServices {
                             useAppleModel: @escaping @Sendable () async -> Bool) -> AppleServices {
         let assistant = AppleModelService.live(engine: engine, useAppleModel: useAppleModel)
         let calendarService = EventKitService(broker: broker)
-        let mailSource = AppleMailSource()
         let calendar = CalendarWeekModel(service: calendarService, store: plannerStore)
+        let scan = ScanSession(scanner: VisionScanner(), assistant: assistant, context: container.mainContext)
+        #if os(macOS)
+        let mailSource = AppleMailSource()
         let mail = MailInboxModel(source: mailSource, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine), sender: AppleMailSender(broker: broker),
                                   broker: broker,
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
-        return AppleServices(assistant: assistant,
-                             scan: ScanSession(scanner: VisionScanner(), assistant: assistant,
-                                               context: container.mainContext),
-                             calendar: calendar, mail: mail,
+        return AppleServices(assistant: assistant, scan: scan, calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
+        #else
+        return AppleServices(assistant: assistant, scan: scan, calendar: calendar,
+                             connections: AppleConnections(calendar: calendarService, broker: broker))
+        #endif
     }
 
     /// Previews, snapshots and tests: in-memory calendar, mail and planner, a
     /// scanner that reads nothing, Apple's model reported off (Quick through
     /// `engine`, a fake one in tests), no prompts, no Mail store, no EventKit,
     /// no network.
+    #if os(macOS)
     public static func preview(engine: any EngineServicing, container: ModelContainer,
                                calendar calendarService: any CalendarServicing = InMemoryCalendarService(
                                    calendarAccess: .notDetermined),
                                mail mailSource: any MailSource = InMemoryMailSource()) -> AppleServices {
         let broker = PreviewPermissionBroker()
+        let (assistant, scan, calendar) = previewParts(engine: engine, container: container, calendar: calendarService)
+        let mail = MailInboxModel(source: mailSource, assistant: assistant,
+                                  drafter: MailReplyDrafter(engine: engine), sender: RecordingMailSender(),
+                                  broker: broker, mailApp: FixedMailApp(),
+                                  onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
+        return AppleServices(assistant: assistant, scan: scan, calendar: calendar, mail: mail,
+                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
+    }
+    #else
+    public static func preview(engine: any EngineServicing, container: ModelContainer,
+                               calendar calendarService: any CalendarServicing = InMemoryCalendarService(
+                                   calendarAccess: .notDetermined)) -> AppleServices {
+        let (assistant, scan, calendar) = previewParts(engine: engine, container: container, calendar: calendarService)
+        return AppleServices(assistant: assistant, scan: scan, calendar: calendar,
+                             connections: AppleConnections(calendar: calendarService, broker: PreviewPermissionBroker()))
+    }
+    #endif
+
+    private static func previewParts(engine: any EngineServicing, container: ModelContainer,
+                                     calendar calendarService: any CalendarServicing)
+        -> (AppleModelService, ScanSession, CalendarWeekModel) {
         let assistant = AppleModelService(
             primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
                                                 availability: .unavailable(reason: "Apple's on-device model is off in previews."),
                                                 answer: ""),
             fallback: QuickTextModel(engine: engine))
+        let scan = ScanSession(scanner: PreviewScanner(), assistant: assistant, context: container.mainContext,
+                               imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans"))
         let calendar = CalendarWeekModel(service: calendarService, store: PlannerStore(url: nil))
-        let mail = MailInboxModel(source: mailSource, assistant: assistant,
-                                  drafter: MailReplyDrafter(engine: engine), sender: RecordingMailSender(),
-                                  broker: broker, mailApp: FixedMailApp(),
-                                  onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
-        return AppleServices(assistant: assistant,
-                             scan: ScanSession(scanner: PreviewScanner(), assistant: assistant,
-                                               context: container.mainContext,
-                                               imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans")),
-                             calendar: calendar, mail: mail,
-                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
+        return (assistant, scan, calendar)
     }
 }
 

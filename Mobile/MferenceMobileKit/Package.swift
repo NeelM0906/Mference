@@ -10,6 +10,10 @@ import PackageDescription
 // download, the Mac-link client, camera, Files export, memory budget, app
 // lifecycle); no SwiftUI views. MferenceMobileUI is SwiftUI only. The shared
 // Mac core (MferenceAppCore) joins once it builds for iOS (decision M5).
+// MferenceMobileSamples holds the sample screen models (SampleCalendarModel,
+// SampleScanModel, ...) for previews, tests and, until each owner's live model
+// lands, the skeleton app. MferenceMobileUI and MferenceMobileCore never
+// import it, and it does not ship at C-final.
 // This target layout is a mobile contract (Mobile/CONTRACTS.md).
 //
 // iOS only: build and test with xcodebuild against an iOS Simulator (see
@@ -29,6 +33,7 @@ let package = Package(
     products: [
         .library(name: "MferenceMobileCore", targets: ["MferenceMobileCore"]),
         .library(name: "MferenceMobileUI", targets: ["MferenceMobileUI"]),
+        .library(name: "MferenceMobileSamples", targets: ["MferenceMobileSamples"]),
     ],
     dependencies: [
         .package(name: "MferenceApp", path: "../../App"),
@@ -45,13 +50,21 @@ let package = Package(
                 .product(name: "MferenceDesign", package: "MferenceApp"),
             ],
             swiftSettings: settings),
+        .target(
+            name: "MferenceMobileSamples",
+            dependencies: ["MferenceMobileUI"],
+            swiftSettings: settings),
         .testTarget(
             name: "MferenceMobileCoreTests",
             dependencies: ["MferenceMobileCore"],
             swiftSettings: settings),
         .testTarget(
             name: "MferenceMobileUITests",
-            dependencies: ["MferenceMobileUI"],
+            dependencies: ["MferenceMobileUI", "MferenceMobileSamples"],
+            swiftSettings: settings),
+        .testTarget(
+            name: "MferenceMobileSamplesTests",
+            dependencies: ["MferenceMobileSamples"],
             swiftSettings: settings),
     ]
 )

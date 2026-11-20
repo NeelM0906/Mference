@@ -33,9 +33,9 @@ public struct MemoryFit: Sendable, Hashable {
     }
 
     /// Why it is not offered, for the library row; the engine applies the
-    /// same rule at load (`EngineService.memoryGateReason`).
+    /// same rule at load (`EngineMemoryGate`).
     public func notOfferedReason(_ model: AppModel) -> String? {
-        EngineService.memoryGateReason(model, physicalMemory: physicalMemory)
+        EngineMemoryGate.reason(model, physicalMemory: physicalMemory)
     }
 
     /// The share of the install that stays resident, and the headroom for

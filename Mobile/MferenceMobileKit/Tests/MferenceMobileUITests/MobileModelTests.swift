@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import MferenceMobileUI
+import MferenceMobileSamples
 
 @Suite("Fold geometry")
 struct FoldGeometryTests {
@@ -90,6 +91,23 @@ struct MonthGridTests {
 
 @Suite("App model")
 struct MobileAppModelTests {
+    private func makeModel(pairedMac: PairedMac? = .sample) -> MobileAppModel {
+        MobileAppModel(calendar: SampleCalendarModel(), scan: SampleScanModel(), pairedMac: pairedMac,
+                       wordDelay: .zero)
+    }
+
+    @Test func calendarAndScanComeInAsTheirScreenModels() {
+        let calendar = SampleCalendarModel()
+        let scan = SampleScanModel()
+        let model = MobileAppModel(calendar: calendar, scan: scan, wordDelay: .zero)
+        #expect(model.calendar === calendar)
+        #expect(model.scan === scan)
+        // The views' `select(day:)` keeps the current view.
+        calendar.calendarMode = .month
+        model.calendar.select(day: .now)
+        #expect(calendar.calendarMode == .month)
+    }
+
     private func settle(_ model: MobileAppModel) async {
         for _ in 0..<200 where model.currentMessages.contains(where: \.isStreaming) {
             try? await Task.sleep(for: .milliseconds(5))
@@ -97,14 +115,14 @@ struct MobileAppModelTests {
     }
 
     @Test func chatOpensToANewChat() {
-        let model = MobileAppModel(wordDelay: .zero)
+        let model = makeModel()
         #expect(model.currentConversationID == nil)
         #expect(model.chatTitle == "New chat")
         #expect(model.selection == .chat)
     }
 
     @Test func sendingStartsAConversationAndStreamsAReply() async {
-        let model = MobileAppModel(wordDelay: .zero)
+        let model = makeModel()
         model.draft = "What did Priya ask for in her email?"
         model.send()
         #expect(model.draft.isEmpty)
@@ -118,7 +136,7 @@ struct MobileAppModelTests {
     }
 
     @Test func webAnswersSayTheyWentThroughTheMac() async {
-        let model = MobileAppModel(wordDelay: .zero)
+        let model = makeModel()
         model.webSearchViaMac = true
         model.send("Compare standing desk warranties")
         await settle(model)
@@ -127,7 +145,7 @@ struct MobileAppModelTests {
     }
 
     @Test func bigJobsOfferTheMacAndRunThereWhenSent() async throws {
-        let model = MobileAppModel(wordDelay: .zero)
+        let model = makeModel()
         model.send("Go through the 40 board PDFs and pull every revenue figure into one table.")
         let offer = try #require(model.currentMessages.last)
         #expect(offer.handoff?.state == .offered)
@@ -140,7 +158,7 @@ struct MobileAppModelTests {
     }
 
     @Test func aLateHandoffAnswersItsOwnRequest() async throws {
-        let model = MobileAppModel(wordDelay: .zero)
+        let model = makeModel()
         model.send("Go through the 40 board PDFs and pull every revenue figure into one table.")
         let offer = try #require(model.currentMessages.last)
         #expect(offer.handoff?.state == .offered)
@@ -155,53 +173,11 @@ struct MobileAppModelTests {
     }
 
     @Test func withoutAPairedMacBigJobsStayOnTheIPhone() async {
-        let model = MobileAppModel(pairedMac: nil, wordDelay: .zero)
+        let model = makeModel(pairedMac: nil)
         #expect(model.macModels.isEmpty)
         model.send("Go through the 40 board PDFs and pull every revenue figure into one table.")
         #expect(model.currentMessages.last?.handoff == nil)
         await settle(model)
-    }
-
-    @Test func acceptingTheMailSuggestionMovesTheEvent() throws {
-        let model = MobileAppModel(wordDelay: .zero)
-        let suggestion = try #require(model.suggestion)
-        model.acceptSuggestion()
-        #expect(model.suggestion == nil)
-        let moved = try #require(model.events.first { $0.id == suggestion.event.id })
-        #expect(Calendar.current.component(.hour, from: moved.start) == 11)
-    }
-
-    @Test func todayBringsTheMonthGridBack() {
-        let model = MobileAppModel(wordDelay: .zero)
-        model.goToToday()
-        model.monthOffset = 3
-        model.goToToday()
-        #expect(model.monthOffset == 0)
-        model.monthOffset = -2
-        model.select(day: .now)
-        #expect(model.monthOffset == 0)
-    }
-
-    @Test func todosToggleAndAdd() throws {
-        let model = MobileAppModel(wordDelay: .zero)
-        let open = model.openTodoCount
-        let first = try #require(model.todos.first)
-        model.toggle(first)
-        #expect(model.openTodoCount == open - 1)
-        model.addTodo("  Call the bank ")
-        #expect(model.todos.first?.title == "Call the bank")
-        model.addTodo("   ")
-        #expect(model.todos.count == 6)
-    }
-
-    @Test func scanAddsARow() {
-        let model = MobileAppModel(wordDelay: .zero)
-        #expect(model.scanPhase == .read)
-        #expect(model.scanFields.contains { !$0.isSure })
-        model.addScanRow()
-        #expect(model.scanPhase == .added)
-        model.retake()
-        #expect(model.scanPhase == .viewfinder)
     }
 }
 

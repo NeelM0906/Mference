@@ -4,7 +4,7 @@ import SwiftUI
 /// Scan on iPhone and Duo closed: the camera on top, the fields in a panel
 /// below.
 struct ScanScreen: View {
-    @Bindable var model: MobileAppModel
+    let model: any ScanScreenModel
 
     var body: some View {
         GeometryReader { geometry in
@@ -33,7 +33,7 @@ struct ScanScreen: View {
 /// The camera area. The simulator has no camera, so it shows the sample
 /// receipt; the shutter "reads" it again.
 struct ScanCameraView: View {
-    @Bindable var model: MobileAppModel
+    let model: any ScanScreenModel
 
     static let darkGround = Color(red: 0.086, green: 0.09, blue: 0.106)
 
@@ -63,7 +63,7 @@ struct ScanCameraView: View {
                 SampleReceipt(isReading: model.scanPhase == .reading)
                     .scaleEffect(model.scanPhase == .viewfinder ? 1.25 : 1)
                 Spacer(minLength: 0)
-                SegmentedPills(options: ScanKind.allCases, selection: $model.scanKind, title: \.rawValue, onDark: true)
+                SegmentedPills(options: ScanKind.allCases, selection: Binding(get: { model.scanKind }, set: { model.scanKind = $0 }), title: \.rawValue, onDark: true)
                 if model.scanPhase == .viewfinder {
                     Button {
                         model.capture()
@@ -131,7 +131,7 @@ struct SampleReceipt: View {
 
 /// The fields read from the scan, the destination and Add row.
 struct ScanFieldsView: View {
-    @Bindable var model: MobileAppModel
+    let model: any ScanScreenModel
     var compact: Bool
 
     var body: some View {
@@ -159,7 +159,7 @@ struct ScanFieldsView: View {
                     .foregroundStyle(MFColor.secondary)
                     .padding(.bottom, MFSpacing.s)
             }
-            ForEach($model.scanFields) { $field in
+            ForEach(Binding(get: { model.scanFields }, set: { model.scanFields = $0 })) { $field in
                 HStack(spacing: MFSpacing.compact) {
                     Text(field.label)
                         .font(MFPhoneFont.callout)

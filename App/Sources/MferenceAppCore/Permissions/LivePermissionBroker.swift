@@ -1,10 +1,12 @@
-import AppKit
 import AVFoundation
-import CoreServices
 import EventKit
 import Foundation
 import os
 import Synchronization
+#if os(macOS)
+import AppKit
+import CoreServices
+#endif
 
 /// The real `PermissionBroker` (decision L6). It never prompts on its own:
 /// `state(of:)` only reads, and `request(_:)` runs only when a feature asks,
@@ -24,6 +26,13 @@ import Synchronization
 /// `NSRemindersFullAccessUsageDescription`, `NSCameraUsageDescription`,
 /// `NSMicrophoneUsageDescription`, `NSAppleEventsUsageDescription`), or the
 /// system refuses the request without asking.
+///
+/// The same broker serves the iPhone (mobile decision M5). There, Full Disk
+/// Access and Mail automation do not exist (they read `.denied` and are never
+/// asked), and Settings is one page per app rather than a pane per
+/// permission: the phone layer opens it (`UIApplication.openSettingsURLString`)
+/// through `System.live(eventStore:openAppSettings:)`, since this core does
+/// not import UIKit.
 public struct LivePermissionBroker: PermissionBroker {
     /// Shows `permission.reason` and returns whether the person chose to go
     /// on. Required: the system prompt never appears without the reason (L6).
@@ -37,14 +46,25 @@ public struct LivePermissionBroker: PermissionBroker {
         /// person switches it on in System Settings). Throws what the system
         /// reports, so it is logged rather than swallowed.
         public var prompt: @Sendable (AppPermission) async throws -> Void
-        public var openURL: @Sendable (URL) async -> Void
+        /// Opens the place where the person changes `permission`.
+        public var openSettings: @Sendable (AppPermission) async -> Void
 
         public init(state: @escaping @Sendable (AppPermission) async -> PermissionState,
                     prompt: @escaping @Sendable (AppPermission) async throws -> Void,
-                    openURL: @escaping @Sendable (URL) async -> Void) {
+                    openSettings: @escaping @Sendable (AppPermission) async -> Void) {
             self.state = state
             self.prompt = prompt
-            self.openURL = openURL
+            self.openSettings = openSettings
+        }
+
+        #if os(macOS)
+        /// `openURL` receives the permission's System Settings pane
+        /// (`settingsURL(for:)`).
+        public init(state: @escaping @Sendable (AppPermission) async -> PermissionState,
+                    prompt: @escaping @Sendable (AppPermission) async throws -> Void,
+                    openURL: @escaping @Sendable (URL) async -> Void) {
+            self.init(state: state, prompt: prompt,
+                      openSettings: { await openURL(LivePermissionBroker.settingsURL(for: $0)) })
         }
 
         /// The real calls. EventKit requests go through `eventStore`, which
@@ -76,6 +96,35 @@ public struct LivePermissionBroker: PermissionBroker {
                     await MainActor.run { _ = NSWorkspace.shared.open(url) }
                 })
         }
+        #else
+        /// The real calls on the iPhone. EventKit requests go through
+        /// `eventStore`, which must outlive the request (the broker keeps it).
+        /// `openAppSettings` opens the app's page in Settings
+        /// (`UIApplication.openSettingsURLString`), for every permission.
+        public static func live(eventStore: EventStoreBox = EventStoreBox(),
+                                openAppSettings: @escaping @Sendable () async -> Void) -> System {
+            System(
+                state: { permission in
+                    switch permission {
+                    case .calendar: LivePermissionBroker.state(EKEventStore.authorizationStatus(for: .event))
+                    case .reminders: LivePermissionBroker.state(EKEventStore.authorizationStatus(for: .reminder))
+                    case .camera: LivePermissionBroker.state(AVCaptureDevice.authorizationStatus(for: .video))
+                    case .microphone: LivePermissionBroker.state(AVCaptureDevice.authorizationStatus(for: .audio))
+                    case .fullDiskAccess, .mailAutomation: .denied
+                    }
+                },
+                prompt: { permission in
+                    switch permission {
+                    case .calendar: _ = try await eventStore.store.requestFullAccessToEvents()
+                    case .reminders: _ = try await eventStore.store.requestFullAccessToReminders()
+                    case .camera: _ = await AVCaptureDevice.requestAccess(for: .video)
+                    case .microphone: _ = await AVCaptureDevice.requestAccess(for: .audio)
+                    case .fullDiskAccess, .mailAutomation: break
+                    }
+                },
+                openSettings: { _ in await openAppSettings() })
+        }
+        #endif
     }
 
     private let presentReason: ReasonPresenter
@@ -86,6 +135,7 @@ public struct LivePermissionBroker: PermissionBroker {
 
     static let log = Logger(subsystem: "ai.mference.app", category: "permissions")
 
+    #if os(macOS)
     /// - Parameters:
     ///   - eventStore: the one EventKit store used for requests; share it
     ///     with the Calendar service.
@@ -96,6 +146,27 @@ public struct LivePermissionBroker: PermissionBroker {
         self.storeBox = eventStore
         self.system = system ?? .live(eventStore: eventStore)
     }
+    #else
+    /// The live broker on the iPhone.
+    /// - Parameters:
+    ///   - eventStore: the one EventKit store used for requests; share it
+    ///     with the Calendar service.
+    ///   - openAppSettings: opens the app's page in Settings
+    ///     (`UIApplication.openSettingsURLString`).
+    public init(presentReason: @escaping ReasonPresenter, eventStore: EventStoreBox = EventStoreBox(),
+                openAppSettings: @escaping @Sendable () async -> Void) {
+        self.init(presentReason: presentReason, eventStore: eventStore,
+                  system: .live(eventStore: eventStore, openAppSettings: openAppSettings))
+    }
+
+    /// Injected system calls (tests, previews).
+    public init(presentReason: @escaping ReasonPresenter, eventStore: EventStoreBox = EventStoreBox(),
+                system: System) {
+        self.presentReason = presentReason
+        self.storeBox = eventStore
+        self.system = system
+    }
+    #endif
 
     /// The EventKit store requests go through.
     public var eventStore: EKEventStore { storeBox.store }
@@ -103,7 +174,8 @@ public struct LivePermissionBroker: PermissionBroker {
     // MARK: PermissionBroker
 
     public func state(of permission: AppPermission) async -> PermissionState {
-        await system.state(permission)
+        guard Self.isAvailable(permission) else { return .denied }
+        return await system.state(permission)
     }
 
     /// Reason first; the system prompt only if the person goes on. A
@@ -111,6 +183,8 @@ public struct LivePermissionBroker: PermissionBroker {
     /// system prompt that did not settle the state answers
     /// `.needsSystemSettings`, and the reason is not shown again this session.
     public func request(_ permission: AppPermission) async -> PermissionState {
+        // Full Disk Access and Mail automation exist only on the Mac.
+        guard Self.isAvailable(permission) else { return .denied }
         let current = await state(of: permission)
         let mayAsk = current == .notDetermined || (permission == .fullDiskAccess && current != .granted)
         guard mayAsk else { return current }
@@ -152,7 +226,18 @@ public struct LivePermissionBroker: PermissionBroker {
     }
 
     public func openSystemSettings(for permission: AppPermission) async {
-        await system.openURL(Self.settingsURL(for: permission))
+        guard Self.isAvailable(permission) else { return }
+        await system.openSettings(permission)
+    }
+
+    /// Whether `permission` exists on this platform: on the iPhone, Full
+    /// Disk Access and Mail automation do not.
+    static func isAvailable(_ permission: AppPermission) -> Bool {
+        #if os(macOS)
+        true
+        #else
+        permission != .fullDiskAccess && permission != .mailAutomation
+        #endif
     }
 
     // MARK: Mapping (pure, tested)
@@ -180,6 +265,7 @@ public struct LivePermissionBroker: PermissionBroker {
         }
     }
 
+    #if os(macOS)
     /// `AEDeterminePermissionToAutomateTarget` results. Mail not running
     /// (`procNotFound`) leaves the answer open.
     static func automationState(_ status: OSStatus) -> PermissionState {
@@ -250,6 +336,7 @@ public struct LivePermissionBroker: PermissionBroker {
         configuration.hides = true
         _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
+    #endif
 }
 
 /// The broker's EventKit store, kept for the broker's lifetime. EventKit

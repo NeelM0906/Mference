@@ -14,8 +14,10 @@ public struct PairedMac: Hashable, Sendable {
 /// The whole phone app's state. One instance per window scene, so folding or
 /// unfolding a Duo keeps the chat, draft, calendar day and scan.
 ///
-/// This first slice runs on sample data and `ScriptedReplies`; nothing here
-/// loads a model or touches the network.
+/// Calendar and Scan come in as their screen models (`CalendarScreenModel`,
+/// `ScanScreenModel`), live or sample, chosen by whoever builds the app.
+/// Chat still runs on `ScriptedReplies` until its own screen model lands;
+/// nothing here loads a model or touches the network.
 @Observable
 public final class MobileAppModel {
     // MARK: Shell
@@ -39,38 +41,23 @@ public final class MobileAppModel {
     public var pairedMac: PairedMac?
     public var memoryCount = 12
 
-    // MARK: Calendar
-    public var calendarMode: CalendarMode = .day
-    public var selectedDay: Date
-    public var events: [PhoneEvent]
-    public var todos: [PhoneTodo]
-    public var suggestion: CalendarSuggestion?
+    // MARK: Calendar and Scan
+    public let calendar: any CalendarScreenModel
+    public let scan: any ScanScreenModel
 
-    // MARK: Scan
-    public var scanKind: ScanKind = .receipt
-    public var scanPhase: ScanPhase = .read
-    public var scanFields: [ScanField]
-    public var scanMerchant = "Blue Door Cafe"
-
-    let calendar: Calendar
     let replies: ScriptedReplies
     /// Seconds between streamed words; tests set 0.
     let wordDelay: Duration
 
-    public init(now: Date = .now, calendar: Calendar = .current, showFirstRun: Bool = false,
+    public init(calendar: any CalendarScreenModel, scan: any ScanScreenModel, showFirstRun: Bool = false,
                 pairedMac: PairedMac? = .sample, wordDelay: Duration = .milliseconds(28)) {
         self.calendar = calendar
+        self.scan = scan
         self.replies = ScriptedReplies()
         self.wordDelay = wordDelay
         self.isFirstRunPresented = showFirstRun
         self.pairedMac = pairedMac
         self.conversations = SampleContent.conversations()
-        self.selectedDay = calendar.startOfDay(for: now)
-        let planner = SampleContent.planner(today: now, calendar: calendar)
-        self.events = planner.events
-        self.todos = planner.todos
-        self.suggestion = planner.suggestion
-        self.scanFields = SampleContent.scanFields(today: now)
     }
 
     // MARK: - Chat
@@ -137,68 +124,6 @@ public final class MobileAppModel {
         }
         stream(replies.reply(to: request, webSearch: webSearchViaMac, model: model), into: conversationID)
     }
-
-    // MARK: - Calendar
-
-    public func events(on day: Date) -> [PhoneEvent] {
-        events.filter { calendar.isDate($0.start, inSameDayAs: day) }.sorted { $0.start < $1.start }
-    }
-
-    public func hasEvents(on day: Date) -> Bool { !events(on: day).isEmpty }
-
-    /// Months away from `selectedDay` that the month grid shows (the arrows).
-    public var monthOffset = 0
-
-    public func select(day: Date, switchToDay: Bool = false) {
-        monthOffset = 0
-        selectedDay = calendar.startOfDay(for: day)
-        if switchToDay { calendarMode = .day }
-    }
-
-    /// Today: selects today and brings the month grid back to its month,
-    /// even when today was already selected.
-    public func goToToday() {
-        selectedDay = calendar.startOfDay(for: .now)
-        monthOffset = 0
-    }
-
-    public func acceptSuggestion() {
-        guard let suggestion else { return }
-        if let index = events.firstIndex(where: { $0.id == suggestion.event.id }) {
-            events[index] = suggestion.event
-        }
-        self.suggestion = nil
-    }
-
-    public func dismissSuggestion() { suggestion = nil }
-
-    public func toggle(_ todo: PhoneTodo) {
-        guard let index = todos.firstIndex(where: { $0.id == todo.id }) else { return }
-        todos[index].isDone.toggle()
-    }
-
-    public func addTodo(_ title: String) {
-        let trimmed = title.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        todos.insert(PhoneTodo(title: trimmed, detail: "Added on iPhone"), at: 0)
-    }
-
-    public var openTodoCount: Int { todos.filter { !$0.isDone }.count }
-
-    // MARK: - Scan
-
-    /// The shutter: read the sample receipt after a short pause.
-    public func capture() {
-        scanPhase = .reading
-        Task {
-            try? await Task.sleep(for: .milliseconds(900))
-            if scanPhase == .reading { scanPhase = .read }
-        }
-    }
-
-    public func retake() { scanPhase = .viewfinder }
-
-    public func addScanRow() { scanPhase = .added }
 
     // MARK: - Private
 

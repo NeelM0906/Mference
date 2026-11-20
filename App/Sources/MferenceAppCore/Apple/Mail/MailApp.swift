@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import Foundation
+#endif
 
 /// Apple Mail itself: whether it runs (it is what downloads new mail) and
 /// opening it.
@@ -14,15 +18,21 @@ public struct SystemMailApp: MailAppControlling {
     public init() {}
 
     @MainActor public func isRunning() -> Bool {
+        #if os(macOS)
         !NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).isEmpty
+        #else
+        false
+        #endif
     }
 
     /// Opens Mail behind Mference, so the person stays where they are.
     @MainActor public func open() {
+        #if os(macOS)
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleIdentifier) else { return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+        #endif
     }
 }
 

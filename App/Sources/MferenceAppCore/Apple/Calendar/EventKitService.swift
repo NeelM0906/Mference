@@ -1,6 +1,9 @@
-import AppKit
+import CoreGraphics
 import EventKit
 import Foundation
+#if os(macOS)
+import AppKit
+#endif
 
 /// Apple Calendar and Reminders through EventKit. Access is asked through the
 /// `PermissionBroker` the first time it is needed (L6); Reminders only after
@@ -172,15 +175,36 @@ public actor EventKitService: CalendarServicing {
                              end: event.endDate,
                              isAllDay: event.isAllDay,
                              calendarName: event.calendar?.title ?? "Calendar",
-                             calendarColor: event.calendar?.color.flatMap(hex),
+                             calendarColor: color(of: event.calendar),
                              location: event.location)
     }
 
+    /// The calendar's color as 0xRRGGBB: through `NSColor` on the Mac, through
+    /// `CGColor` on the iPhone (EventKit has no `color` there).
+    static func color(of calendar: EKCalendar?) -> UInt32? {
+        #if os(macOS)
+        calendar?.color.flatMap(hex)
+        #else
+        calendar?.cgColor.flatMap(hex)
+        #endif
+    }
+
+    #if os(macOS)
     static func hex(_ color: NSColor) -> UInt32? {
         guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
         let r = UInt32((rgb.redComponent * 255).rounded()), g = UInt32((rgb.greenComponent * 255).rounded())
         let b = UInt32((rgb.blueComponent * 255).rounded())
         return r << 16 | g << 8 | b
+    }
+    #endif
+
+    /// sRGB 0xRRGGBB; channels outside sRGB are clamped.
+    static func hex(_ color: CGColor) -> UInt32? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let rgb = color.converted(to: space, intent: .defaultIntent, options: nil),
+              let components = rgb.components, components.count >= 3 else { return nil }
+        let channel = { (value: CGFloat) in UInt32((min(max(value, 0), 1) * 255).rounded()) }
+        return channel(components[0]) << 16 | channel(components[1]) << 8 | channel(components[2])
     }
 
     // MARK: Reminders
@@ -246,7 +270,7 @@ public actor EventKitService: CalendarServicing {
         try requireAccess(.reminder)
         let defaultID = store.defaultCalendarForNewReminders()?.calendarIdentifier
         return store.calendars(for: .reminder)
-            .map { ReminderList(id: $0.calendarIdentifier, title: $0.title, color: $0.color.flatMap(Self.hex),
+            .map { ReminderList(id: $0.calendarIdentifier, title: $0.title, color: Self.color(of: $0),
                                 isDefault: $0.calendarIdentifier == defaultID) }
             .sorted { ($0.isDefault ? 0 : 1, $0.title) < ($1.isDefault ? 0 : 1, $1.title) }
     }
