@@ -1,7 +1,8 @@
 import Foundation
 
-/// The sample conversations, events, to-dos and scan used by this first
-/// slice, matching the Mac mockups' examples.
+/// The sample conversations used by this first slice, matching the Mac
+/// mockups' examples. They move to MferenceMobileSamples with the chat screen
+/// model (mobile-chat); the calendar and scan samples are there already.
 enum SampleContent {
     static let deskTable = AnswerTable(
         headers: ["Desk", "Price", "Warranty"],
@@ -48,57 +49,6 @@ enum SampleContent {
             Conversation(title: "Receipt to spreadsheet row", group: .skills),
             Conversation(title: "Weekly review", group: .skills),
             Conversation(title: "Lab results questions", group: .privateChats),
-        ]
-    }
-
-    struct Planner {
-        var events: [PhoneEvent]
-        var todos: [PhoneTodo]
-        var suggestion: CalendarSuggestion?
-    }
-
-    static func planner(today now: Date, calendar: Calendar) -> Planner {
-        let today = calendar.startOfDay(for: now)
-        func at(_ dayOffset: Int, _ hour: Int, _ minute: Int = 0) -> Date {
-            let day = calendar.date(byAdding: .day, value: dayOffset, to: today) ?? today
-            return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day) ?? day
-        }
-        let review = PhoneEvent(title: "Design review", start: at(1, 10), end: at(1, 10, 45), tint: .blue)
-        let events = [
-            PhoneEvent(title: "Coffee with Tom", start: at(0, 9, 30), end: at(0, 10), tint: .orange),
-            PhoneEvent(title: "Focus time", start: at(0, 10), end: at(0, 11), tint: .grey),
-            PhoneEvent(title: "Lunch", start: at(0, 12), end: at(0, 13), tint: .green),
-            PhoneEvent(title: "Weekly planning", start: at(0, 13), end: at(0, 14), tint: .blue),
-            review,
-            PhoneEvent(title: "Launch check-in", start: at(2, 11), end: at(2, 12), tint: .purple),
-            PhoneEvent(title: "Team sync", start: at(-1, 10), end: at(-1, 10, 30), tint: .blue),
-            PhoneEvent(title: "Contract call", start: at(3, 13), end: at(3, 13, 30), tint: .orange),
-        ]
-        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
-        let weekday = tomorrow.formatted(.dateTime.weekday(.abbreviated))
-        var moved = review
-        moved.start = at(1, 11)
-        moved.end = at(1, 11, 45)
-        let suggestion = CalendarSuggestion(
-            question: "Move the design review to \(weekday) 11:00?",
-            detail: "From Priya's email this morning. Priya gets an update.",
-            event: moved)
-        let todos = [
-            PhoneTodo(title: "Send copy decisions to Priya", detail: "Mail · due \(weekday)"),
-            PhoneTodo(title: "Review contract section 4", detail: "Mail · due Fri"),
-            PhoneTodo(title: "Pick a dentist appointment", detail: "Mail · Northside Dental"),
-            PhoneTodo(title: "Share the launch checklist", detail: "Meeting · Weekly product sync"),
-            PhoneTodo(title: "Expense the team lunch", detail: "Scan", isDone: true),
-        ]
-        return Planner(events: events, todos: todos, suggestion: suggestion)
-    }
-
-    static func scanFields(today: Date) -> [ScanField] {
-        [
-            ScanField(id: "date", label: "Date", value: today.formatted(date: .abbreviated, time: .omitted), isSure: true),
-            ScanField(id: "total", label: "Total", value: "$105.47", isSure: true),
-            ScanField(id: "tip", label: "Tip", value: "$16.40", isSure: true),
-            ScanField(id: "category", label: "Category", value: "Team meals", isSure: false),
         ]
     }
 }

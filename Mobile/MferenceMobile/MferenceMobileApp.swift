@@ -1,8 +1,13 @@
+import MferenceMobileSamples
 import MferenceMobileUI
 import SwiftUI
 
 /// Mference for iPhone and iPhone Duo. A thin entry point over
 /// MferenceMobileUI; this first slice runs on sample data.
+///
+/// Temporary: the sample screen models come from MferenceMobileSamples until
+/// each owner's live model lands (Mobile/CONTRACTS.md); then each is swapped
+/// here and the link to MferenceMobileSamples goes.
 ///
 /// Launch arguments: `-MferenceShowFirstRun YES` shows first run again.
 @main
@@ -23,7 +28,9 @@ struct MferenceMobileApp: App {
         WindowGroup {
             // Sample build: a finished first run is paired with the sample Mac;
             // a fresh one starts unpaired and pairs in step 3.
-            MobileRootView(model: MobileAppModel(showFirstRun: showsFirstRun,
+            MobileRootView(model: MobileAppModel(calendar: SampleCalendarModel(),
+                                                 scan: SampleScanModel(),
+                                                 showFirstRun: showsFirstRun,
                                                  pairedMac: showsFirstRun ? nil : .sample))
         }
     }

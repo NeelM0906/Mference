@@ -43,6 +43,12 @@ public struct CalendarSuggestion: Hashable, Sendable {
     public var question: String
     public var detail: String
     public var event: PhoneEvent
+
+    public init(question: String, detail: String, event: PhoneEvent) {
+        self.question = question
+        self.detail = detail
+        self.event = event
+    }
 }
 
 /// Day, Month or the to-do list (the phone's Calendar views).
@@ -102,6 +108,13 @@ public struct ScanField: Identifiable, Hashable, Sendable {
     public var value: String
     /// False shows the amber "Check" badge and field.
     public var isSure: Bool
+
+    public init(id: String, label: String, value: String, isSure: Bool) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.isSure = isSure
+    }
 }
 
 /// Where the scan is in its life.

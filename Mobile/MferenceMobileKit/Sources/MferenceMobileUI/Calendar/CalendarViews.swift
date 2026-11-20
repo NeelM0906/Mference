@@ -4,14 +4,14 @@ import SwiftUI
 /// Calendar on iPhone and Duo closed: the month title, Today and New event,
 /// then Day / Month / To-dos.
 struct CalendarScreen: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
     @State private var isAddingEvent = false
 
     var body: some View {
         VStack(spacing: 0) {
             CalendarHeader(model: model, title: monthTitle, isAddingEvent: $isAddingEvent)
                 .padding(.horizontal, MFPhoneMetrics.screenMargin)
-            SegmentedPills(options: CalendarMode.allCases, selection: $model.calendarMode) { mode in
+            SegmentedPills(options: CalendarMode.allCases, selection: Binding(get: { model.calendarMode }, set: { model.calendarMode = $0 })) { mode in
                 mode == .todos ? "To-dos · \(model.openTodoCount)" : mode.rawValue
             }
             .padding(.horizontal, MFPhoneMetrics.screenMargin)
@@ -60,7 +60,7 @@ struct CalendarScreen: View {
 
 /// Title, Today and the ink + button.
 struct CalendarHeader: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
     let title: String
     @Binding var isAddingEvent: Bool
     var titleFont: Font = MFPhoneFont.largeTitle
@@ -93,7 +93,7 @@ struct CalendarHeader: View {
 
 /// The seven days around the selected day; swipe for the next or last week.
 struct WeekStrip: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
 
     var body: some View {
         let days = MonthGrid.week(containing: model.selectedDay, calendar: model.calendar)
@@ -136,7 +136,7 @@ struct WeekStrip: View {
 
 /// The full 24-hour day, scrolled to the morning, with the now line on today.
 struct DayTimeline: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
     var margin: CGFloat
 
     private let gutter: CGFloat = 54
@@ -239,7 +239,7 @@ struct EventBlock: View {
 
 /// "Move the design review to Thu 11:00?" with Dismiss and Add.
 struct SuggestionBanner: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
 
     var body: some View {
         if let suggestion = model.suggestion {
@@ -267,7 +267,7 @@ struct SuggestionBanner: View {
 
 /// The month grid. Week start follows the device setting.
 struct MonthGridView: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
     var switchesToDay = false
 
     var body: some View {
@@ -327,7 +327,7 @@ struct MonthGridView: View {
 
 /// The selected day's events as a list (under the month grid).
 struct DayAgenda: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
 
     var body: some View {
         let events = model.events(on: model.selectedDay)
@@ -357,7 +357,7 @@ struct DayAgenda: View {
 
 /// To-dos from mail and meetings, plus a field to add one.
 struct TodoListView: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
     @State private var newTitle = ""
 
     var body: some View {
@@ -422,7 +422,7 @@ struct TodoListView: View {
 
 /// A small form for a new event on the selected day.
 struct NewEventSheet: View {
-    @Bindable var model: MobileAppModel
+    let model: any CalendarScreenModel
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var start = Date()
