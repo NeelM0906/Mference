@@ -36,6 +36,17 @@ public final class AppServices {
     public let speechPreferences: SpeechPreferences
     /// The one consumer of dictation events (stream ownership, team N3).
     public let dictation: DictationController
+    /// The meeting being recorded (Notes spec 4.4): the one consumer of
+    /// `MeetingRecording.events`, so a meeting keeps going outside Notes.
+    public let meetings: MeetingSession
+    /// Summaries, titles, Redo and Add to To-dos for meeting and file notes (spec 4.5, 6.5).
+    public let summaries: MeetingSummaries
+    /// Audio files being transcribed (spec 4.6): the one consumer of `FileJob.events`.
+    public let files: FileTranscriptionQueue
+    /// Launch recovery of meetings and files the app quit in (spec 6.3),
+    /// started once by `startLaunchRecovery()`. Anything that deletes notes
+    /// or recordings at launch (the Recently deleted purge) waits for it.
+    public private(set) var launchRecovery: Task<Void, Never>?
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -53,6 +64,7 @@ public final class AppServices {
                 speech: (any SpeechServicing)? = nil,
                 speechPreferences: SpeechPreferences? = nil,
                 noteAttachments: NoteAttachments? = nil,
+                meetingWriter: (any MeetingNoteWriting)? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -71,11 +83,28 @@ public final class AppServices {
         self.speech = speech
         // Without a folder given (tests that build this by hand), attachments
         // go to a temporary folder, never the person's.
-        self.notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
-                               speech: speech)
+        let notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
+                              speech: speech)
+        self.notes = notes
         let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
         self.speechPreferences = speechPreferences
         dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
+        // Meeting and file notes write through the one Notes store (its
+        // context, its revision), so an open editor takes their writes in.
+        let writer = meetingWriter ?? notes
+        let meetings = MeetingSession(speech: speech, writer: writer)
+        let summaries = MeetingSummaries(
+            engine: engine,
+            summarizer: MeetingSummarizer(engine: engine, prompt: try? MeetingSummaryPrompt.load()),
+            assistant: apple?.assistant, writer: writer, todos: apple?.calendar)
+        let files = FileTranscriptionQueue(speech: speech, writer: writer)
+        meetings.afterMeeting = { [weak summaries] noteID, summarize in
+            if summarize { summaries?.summarize(noteID) }
+        }
+        files.afterTranscript = { [weak summaries] noteID in summaries?.summarize(noteID) }
+        self.meetings = meetings
+        self.summaries = summaries
+        self.files = files
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -127,11 +156,39 @@ public final class AppServices {
                                    appleChat: FoundationChatModel(),
                                    storeError: storeError,
                                    idleUnload: idleUnload)
-        // Recently deleted keeps notes 30 days; purge the expired ones (and
-        // their audio) once at launch. Notes repeats it when it opens.
+        // Close meetings and re-queue files the app quit in first; only then
+        // purge Recently deleted (notes kept 30 days, with their audio), so
+        // a purge never deletes recordings recovery is about to attach.
+        let recovery = services.startLaunchRecovery()
         let notes = services.notes
-        Task { @MainActor in _ = try? await notes.purgeExpired() }
+        Task { @MainActor in
+            await recovery.value
+            _ = try? await notes.purgeExpired()
+        }
         return services
+    }
+
+    /// The voice part of quitting (spec 6.1), after the person confirmed:
+    /// stops a meeting and waits until its transcript is saved, then shuts
+    /// the speech service down (capture stopped, files closed, file jobs
+    /// cancelled). `AppRuntime` runs it before web and the engine.
+    public func shutDownVoice() async {
+        await meetings.stopForQuit()
+        await speech.shutdown()
+    }
+
+    /// Closes meetings and re-queues files the app quit in, once, before any
+    /// new session (spec 6.3). `live()` calls it; returns the running task.
+    /// Anything that purges notes or recordings awaits `launchRecovery` first.
+    @discardableResult
+    public func startLaunchRecovery() -> Task<Void, Never> {
+        if let launchRecovery { return launchRecovery }
+        let task = Task { [meetings, files] in
+            await meetings.recoverInterruptedMeetings()
+            await files.recoverInterruptedJobs()
+        }
+        launchRecovery = task
+        return task
     }
 
     /// Previews and tests: an in-memory store and settings, fake permissions,

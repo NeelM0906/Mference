@@ -76,18 +76,30 @@ public final class MeetingSession {
     @ObservationIgnored private var consumer: Task<Void, Never>?
     @ObservationIgnored private var options = MeetingStartOptions()
     @ObservationIgnored private var didRecover = false
+    /// The mic-only line was written for the current meeting.
+    @ObservationIgnored private var wroteCallAudioLine = false
     /// Finished notes' transcripts, so a rename shows everywhere at once.
     @ObservationIgnored private var transcripts: [UUID: TranscriptModel] = [:]
 
-    public init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
+    /// Recordings are read and saved on `writer.context`, the Notes store's
+    /// own, so note bodies and recordings never live on separate contexts.
+    public init(speech: any SpeechServicing, writer: any MeetingNoteWriting,
                 now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
                 timeZone: TimeZone = .current) {
         self.speech = speech
-        self.context = context
+        self.context = writer.context
         self.writer = writer
         self.now = now
         self.locale = locale
         self.timeZone = timeZone
+    }
+
+    /// For callers that pass the context too; it must be the writer's.
+    public convenience init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
+                            now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
+                            timeZone: TimeZone = .current) {
+        precondition(context === writer.context, "MeetingSession must use its writer's context")
+        self.init(speech: speech, writer: writer, now: now, locale: locale, timeZone: timeZone)
     }
 
     // MARK: Recording
@@ -123,6 +135,7 @@ public final class MeetingSession {
         } catch {
             await started.stop()
             for await _ in started.events {}
+            try? await speech.deleteRecordings(for: noteID)
             phase = .idle
             lastError = "Couldn't create the meeting note."
             throw error
@@ -138,13 +151,16 @@ public final class MeetingSession {
         micLevel = 0
         callLevel = nil
         callAudioAvailable = false
+        wroteCallAudioLine = false
         phase = .recording
+        // The consumer works on this meeting's own note and model, so a late
+        // event can never land in a later meeting; it stops at `.ended`.
         consumer = Task { [weak self] in
             for await event in started.events {
                 guard let self else { return }
-                self.handle(event, noteID: noteID)
+                if self.handle(event, noteID: noteID, model: live) { break }
             }
-            self?.streamFinished(noteID: noteID)
+            self?.streamFinished(noteID: noteID, model: live)
         }
         return noteID
     }
@@ -175,6 +191,14 @@ public final class MeetingSession {
         await recording.stop()
     }
 
+    /// Quit (spec 6.1): stops a meeting being recorded and waits until its
+    /// last phrases and transcript are saved. Does nothing when idle.
+    public func stopForQuit() async {
+        guard isActive else { return }
+        await stop()
+        await waitUntilFinished()
+    }
+
     /// Waits until the current meeting's events are all handled (tests, quit).
     public func waitUntilFinished() async {
         await consumer?.value
@@ -200,6 +224,15 @@ public final class MeetingSession {
         transcripts[noteID] = nil
     }
 
+    /// A note's kept audio for the player: its track files, where they are,
+    /// and the recording's length. Nil while recording, or when no audio was kept.
+    public func audio(for noteID: UUID) -> MeetingAudio? {
+        guard noteID != self.noteID, let record = fetchNote(noteID)?.recording, record.endedAt != nil,
+              record.audioKept, !record.tracks.isEmpty else { return nil }
+        return MeetingAudio(tracks: record.tracks, directory: speech.recordingsDirectory(for: noteID),
+                            duration: record.duration)
+    }
+
     // MARK: Launch recovery (spec 6.3)
 
     /// Once at launch, before any new session: closes meetings the app quit
@@ -211,7 +244,18 @@ public final class MeetingSession {
         didRecover = true
         var closed: [UUID] = []
         for interrupted in await speech.recoverInterruptedRecordings() {
-            guard let record = fetchNote(interrupted.noteID)?.recording, record.endedAt == nil else { continue }
+            guard interrupted.noteID != noteID, let record = fetchNote(interrupted.noteID)?.recording else { continue }
+            guard record.endedAt == nil else {
+                // Closed when its stream failed: attach the audio the speech
+                // service closed, so the player has it.
+                if record.tracks.isEmpty, !interrupted.tracks.isEmpty {
+                    record.tracks = interrupted.tracks
+                    record.duration = max(record.duration,
+                                          interrupted.tracks.map { $0.startOffset + $0.duration }.max() ?? 0)
+                    try? context.save()
+                }
+                continue
+            }
             if !interrupted.tracks.isEmpty { record.tracks = interrupted.tracks }
             closeInterrupted(record, noteID: interrupted.noteID, endedAt: interrupted.endedAt)
             closed.append(interrupted.noteID)
@@ -230,7 +274,11 @@ public final class MeetingSession {
         let saved = record.segments.filter(\.isFinal)
         let trackLength = record.tracks.map { $0.startOffset + $0.duration }.max() ?? 0
         let length = max(record.duration, trackLength, saved.map(\.end).max() ?? 0)
-        let end = endedAt ?? record.startedAt.addingTimeInterval(length)
+        // Recording time leaves out pauses and sleep, so the start plus the
+        // length can be too early: never before the last gap's end or the
+        // note's last edit.
+        let floor = ([record.gaps.map(\.end).max(), record.note?.updatedAt].compactMap { $0 }).max()
+        let end = endedAt ?? max(record.startedAt.addingTimeInterval(length), floor ?? .distantPast)
         record.segments = saved
         record.duration = length
         record.endedAt = end
@@ -244,22 +292,29 @@ public final class MeetingSession {
 
     // MARK: Events
 
-    private func handle(_ event: MeetingEvent, noteID: UUID) {
-        guard let transcript else { return }
+    /// Handles one event of the meeting in `noteID`; true after `.ended`.
+    private func handle(_ event: MeetingEvent, noteID: UUID, model transcript: TranscriptModel) -> Bool {
         switch event {
         case .started(let callAudio):
             callAudioAvailable = callAudio
         case .callAudioUnavailable:
+            let wasRecordingCalls = callAudioAvailable
             callAudioAvailable = false
             callLevel = nil
-            try? writer.appendParagraph(MeetingCopy.micOnly, to: noteID)
+            if !wroteCallAudioLine {
+                wroteCallAudioLine = true
+                let line = wasRecordingCalls
+                    ? MeetingCopy.callAudioStopped(at: now(), locale: locale, timeZone: timeZone)
+                    : MeetingCopy.micOnly
+                try? writer.appendParagraph(line, to: noteID)
+            }
         case .segment(let segment):
             transcript.upsert(segment)
-            if segment.isFinal { saveSegments(noteID: noteID) }
+            if segment.isFinal { saveSegments(transcript, noteID: noteID) }
         case .segmentRemoved(let id):
             let wasSaved = transcript.segments.contains { $0.id == id && $0.isFinal }
             transcript.remove(id)
-            if wasSaved { saveSegments(noteID: noteID) }
+            if wasSaved { saveSegments(transcript, noteID: noteID) }
         case .levels(let microphone, let call):
             micLevel = microphone
             callLevel = call
@@ -281,12 +336,13 @@ public final class MeetingSession {
         case .failed(let error):
             lastError = error.message
         case .ended(let result):
-            finish(result, noteID: noteID)
+            finish(result, noteID: noteID, model: transcript)
+            return true
         }
+        return false
     }
 
-    private func finish(_ result: TranscriptResult, noteID: UUID) {
-        guard let transcript else { return }
+    private func finish(_ result: TranscriptResult, noteID: UUID, model transcript: TranscriptModel) {
         transcript.applyFinal(result)
         if let record = fetchNote(noteID)?.recording {
             record.segments = transcript.segments
@@ -308,15 +364,21 @@ public final class MeetingSession {
     }
 
     /// The stream ended. Without an `.ended` (a failure), close the note
-    /// with what was saved.
-    private func streamFinished(noteID: UUID) {
+    /// with what was saved and say so; the next launch's recovery attaches
+    /// the audio files the speech service closed.
+    private func streamFinished(noteID: UUID, model: TranscriptModel) {
         guard self.noteID == noteID else { return }
         if let record = fetchNote(noteID)?.recording, record.endedAt == nil {
-            record.segments = transcript?.finalSegments ?? record.segments
-            record.duration = max(record.duration, transcript?.duration ?? 0)
-            record.endedAt = now()
+            let end = now()
+            record.segments = model.finalSegments
+            record.speakers = model.speakers
+            record.gaps = model.gaps
+            record.duration = max(record.duration, model.duration)
+            record.endedAt = end
             record.transcriptionState = .done
             try? context.save()
+            try? writer.appendParagraph(MeetingCopy.endedUnexpectedly(at: end, locale: locale, timeZone: timeZone),
+                                        to: noteID)
             writer.transcriptDidChange(in: noteID)
         }
         reset(endedNoteID: noteID)
@@ -335,8 +397,8 @@ public final class MeetingSession {
 
     // MARK: Saving
 
-    private func saveSegments(noteID: UUID) {
-        guard let transcript, let record = fetchNote(noteID)?.recording else { return }
+    private func saveSegments(_ transcript: TranscriptModel, noteID: UUID) {
+        guard let record = fetchNote(noteID)?.recording else { return }
         record.segments = transcript.finalSegments
         record.speakers = transcript.speakers
         record.duration = max(record.duration, transcript.duration)
@@ -351,6 +413,34 @@ public final class MeetingSession {
 
     private func fetchNote(_ id: UUID) -> Note? {
         try? context.fetch(FetchDescriptor<Note>(predicate: #Predicate { $0.id == id })).first
+    }
+}
+
+/// A finished note's kept audio, for the player (spec 4.5).
+public struct MeetingAudio: Sendable, Hashable {
+    public var tracks: [RecordedTrack]
+    /// `Recordings/<note-id>/`, where `tracks` live.
+    public var directory: URL
+    /// Recording time, pauses excluded.
+    public var duration: TimeInterval
+
+    public init(tracks: [RecordedTrack], directory: URL, duration: TimeInterval) {
+        self.tracks = tracks
+        self.directory = directory
+        self.duration = duration
+    }
+
+    public func url(of track: RecordedTrack) -> URL { directory.appending(path: track.fileName) }
+}
+
+extension MeetingStartOptions {
+    /// The record popover's defaults from the one shared `SpeechPreferences`;
+    /// "Summary when you stop" is off when Settings turned summaries off.
+    @MainActor
+    public init(preferences: SpeechPreferences) {
+        self.init(microphoneID: preferences.microphoneID, callAudio: preferences.callAudio,
+                  speakerLabels: preferences.speakerLabels, keepAudio: preferences.keepAudio == .keep,
+                  language: preferences.language, summaryWhenStopped: preferences.writesMeetingSummary)
     }
 }
 
@@ -369,6 +459,23 @@ public enum MeetingCopy {
     }
 
     public static let micOnly = "Call audio was off, so only your microphone was recorded."
+
+    /// Call audio failed partway through a meeting.
+    public static func callAudioStopped(at date: Date, locale: Locale = .current,
+                                        timeZone: TimeZone = .current) -> String {
+        "Call audio stopped at " + date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).hour().minute())
+            + ", so only your microphone was recorded after that."
+    }
+
+    /// The transcript's marker for a stretch with no capture: "Gap: 10:05–11:00 (Mac asleep)".
+    public static func gapLabel(_ gap: RecordingGap, locale: Locale = .current,
+                                timeZone: TimeZone = .current) -> String {
+        let style = Date.FormatStyle(locale: locale, timeZone: timeZone).hour().minute()
+        let reason = switch gap.reason {
+        case .sleep: "Mac asleep"
+        }
+        return "Gap: \(gap.start.formatted(style))–\(gap.end.formatted(style)) (\(reason))"
+    }
 
     /// A transcribed file's title until the summary names it: the file name
     /// without its extension (spec 4.6).

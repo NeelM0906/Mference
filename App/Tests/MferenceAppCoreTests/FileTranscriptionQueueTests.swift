@@ -24,7 +24,7 @@ import Testing
         let container = try AppModelContainer.inMemory()
         let writer = InMemoryMeetingNoteWriter(context: container.mainContext)
         return Harness(container: container, writer: writer,
-                       queue: FileTranscriptionQueue(speech: speech, context: container.mainContext, writer: writer),
+                       queue: FileTranscriptionQueue(speech: speech, writer: writer),
                        speech: speech)
     }
 
@@ -66,6 +66,7 @@ import Testing
         #expect(record.segments.map(\.text) == ["Welcome to week three."])
         #expect(record.duration == 4_680 && record.languageCode == "en" && record.audioKept)
         #expect(h.queue.rows.first?.phase == .done)
+        #expect(h.queue.rows.first?.speakerCount == 1)
         #expect(!h.queue.isBusy)
         #expect(summarized.isEmpty)
         #expect(h.writer.searchRefreshes[id] == 1)
@@ -128,6 +129,15 @@ import Testing
         for _ in 0..<50 { await Task.yield() }
         #expect(h.queue.rows.first?.phase == .paused)
         await meeting.stop()
+    }
+
+    @Test func launchRecoveryLeavesAFileAlreadyQueued() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let h = try harness(speech)
+        let ids = await h.queue.add([URL(filePath: "/tmp/early.m4a")], options: FileImportOptions())
+        #expect(await h.queue.recoverInterruptedJobs().isEmpty)
+        #expect(speech.calls.filter { if case .transcribeFile = $0 { true } else { false } }.count == 1)
+        #expect(h.queue.rows.map(\.noteID) == ids)
     }
 
     @Test func launchRequeuesFilesWithACopyAndFailsTheRest() async throws {
