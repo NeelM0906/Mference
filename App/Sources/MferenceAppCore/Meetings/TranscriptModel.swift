@@ -60,12 +60,12 @@ public final class TranscriptModel {
 
     /// Adds a segment or replaces the one with the same id.
     func upsert(_ segment: TranscriptSegment) {
-        if let index = segments.firstIndex(where: { $0.id == segment.id }) {
+        // Updates are nearly always to the newest segments: look from the back.
+        if let index = segments.lastIndex(where: { $0.id == segment.id }) {
             segments[index] = segment
-            if index > 0, segments[index - 1].start > segment.start || (index + 1 < segments.count
-                && segments[index + 1].start < segment.start) {
-                segments = Self.ordered(segments)
-            }
+            let before = index > 0 && segments[index - 1].start > segment.start
+            let after = index + 1 < segments.count && segments[index + 1].start < segment.start
+            if before || after { segments = Self.ordered(segments) }
         } else {
             // Most segments arrive in order: append, and sort only when not.
             let outOfOrder = segments.last.map { $0.start > segment.start } ?? false
@@ -97,12 +97,15 @@ public final class TranscriptModel {
     /// The finished recording replaces the live state. Segment ids are
     /// stable; speaker ids may change in the final pass. Renames follow
     /// `mapping` (live id → final id) and, for live speakers it leaves out,
-    /// the final speaker their segments overlap most (spec 6.3).
+    /// the final speaker their segments overlap most (spec 6.3). A result
+    /// without segments keeps the live final segments rather than erasing them.
     func applyFinal(_ result: TranscriptResult) {
-        let carried = Self.carriedRenames(renames, liveSegments: segments, finalSegments: result.segments,
+        let finals = result.segments.filter(\.isFinal)
+        let kept = finals.isEmpty ? finalSegments : finals
+        let carried = Self.carriedRenames(renames, liveSegments: segments, finalSegments: kept,
                                           mapping: result.speakerMapping)
         renames = carried
-        segments = Self.ordered(result.segments.filter(\.isFinal))
+        segments = Self.ordered(kept)
         var finalSpeakers = result.speakers.map(applyingRename)
         for segment in segments where !finalSpeakers.contains(where: { $0.id == segment.speakerID }) {
             finalSpeakers.append(applyingRename(speaker(for: segment)))

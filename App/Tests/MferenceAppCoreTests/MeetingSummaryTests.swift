@@ -248,6 +248,72 @@ import Testing
         #expect(h.note(id)?.title == "Design review: Notes")
     }
 
+    @Test func aRequestTooLargeIsRetriedInSmallerChunks() async throws {
+        let h = try harness(replies: [.init(content: "", error: .requestTooLarge("too long"))], chunkCharacters: 4_000)
+        let id = try meeting(h, lines: 40)
+        h.summaries.summarize(id)
+        await h.summaries.waitUntilIdle()
+        #expect(h.summaries.status(for: id) == .written)
+        // First the single pass (refused), then parts of half the size and their combination.
+        #expect(h.engine.requests.count > 2)
+        let prompt = try MeetingSummaryPrompt.load()
+        #expect(h.engine.requests.dropFirst().contains { $0.turns.first?.content?.hasPrefix(prompt.mapSystem) == true })
+    }
+
+    @Test func aNoteDeletedWhileWaitingIsLeftAlone() async throws {
+        let h = try harness()
+        let id = try meeting(h)
+        h.engine.setStatus(EngineServiceStatus(phase: .ready, residentModel: .quick, isGenerating: true))
+        h.summaries.summarize(id)
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.summaries.status(for: id) == .waitingForChat)
+        if let note = h.note(id) { h.context.delete(note) }
+        try h.context.save()
+        h.engine.setStatus(EngineServiceStatus(phase: .ready, residentModel: .quick, isGenerating: false))
+        await h.summaries.waitUntilIdle()
+        #expect(h.engine.requests.isEmpty)
+        #expect(h.summaries.status(for: id) == .none)
+    }
+
+    @Test func aFileStillTranscribingWaitsForItsTranscript() async throws {
+        let h = try harness()
+        let id = try meeting(h)
+        let record = try #require(h.note(id)?.recording)
+        record.transcriptionState = .running
+        record.summaryState = .pending
+        try h.context.save()
+        #expect(h.summaries.status(for: id) == .queued)
+        h.summaries.summarize(id)
+        await h.summaries.waitUntilIdle()
+        #expect(h.engine.requests.isEmpty)
+        #expect(h.summaries.status(for: id) == .queued)
+        record.transcriptionState = .done
+        h.summaries.summarize(id)
+        await h.summaries.waitUntilIdle()
+        #expect(h.summaries.status(for: id) == .written)
+    }
+
+    @Test func aWrittenSummaryIsReplacedOnlyThroughRedo() async throws {
+        let h = try harness()
+        let id = try meeting(h)
+        h.summaries.summarize(id)
+        await h.summaries.waitUntilIdle()
+        h.summaries.summarize(id)
+        h.summaries.retry(id)
+        await h.summaries.waitUntilIdle()
+        #expect(h.engine.requests.count == 1)
+    }
+
+    @Test func typedNotesGoWithTheTranscript() async throws {
+        let h = try harness()
+        let id = try meeting(h)
+        h.writer.typedNotes[id] = "Remember the budget."
+        h.summaries.summarize(id)
+        await h.summaries.waitUntilIdle()
+        let input = try #require(h.engine.requests.first?.turns.last?.content)
+        #expect(input.contains("The person's own notes:\nRemember the budget."))
+    }
+
     // MARK: Title chain
 
     @Test func quickWritesTheTitleWhenApplesModelIsUnavailable() async throws {

@@ -56,6 +56,9 @@ public protocol MeetingNoteWriting: AnyObject {
     func replaceMeetingSections(_ sections: MeetingSections, in noteID: UUID) throws
     /// The Action items checklist rows as they are now, in order.
     func actionItems(in noteID: UUID) -> [MeetingActionItemRow]
+    /// What the person typed in the note (outside the title and the
+    /// sections), sent with the transcript to the summary.
+    func personalNotes(in noteID: UUID) -> String
     /// Adds a paragraph at the end of the body ("Recording ended unexpectedly at 10:42").
     func appendParagraph(_ text: String, to noteID: UUID) throws
     /// Adds a Mark moment marker at the end of the body.
@@ -119,6 +122,11 @@ public final class InMemoryMeetingNoteWriter: MeetingNoteWriting {
     }
 
     public func actionItems(in noteID: UUID) -> [MeetingActionItemRow] { body(of: noteID).actionItems }
+
+    /// Typed notes for the summary; tests set them.
+    public var typedNotes: [UUID: String] = [:]
+
+    public func personalNotes(in noteID: UUID) -> String { typedNotes[noteID] ?? "" }
 
     public func appendParagraph(_ text: String, to noteID: UUID) throws {
         try takeFailure()
