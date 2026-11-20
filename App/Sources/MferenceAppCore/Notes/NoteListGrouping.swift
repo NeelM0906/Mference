@@ -70,8 +70,8 @@ public enum NoteListGrouping {
         }
     }
 
-    /// The row's time: "11:40" today and yesterday, the weekday within a
-    /// week ("Mon"), the date before that.
+    /// The row's time: "11:40" today and yesterday, the weekday in the
+    /// Previous 7 days group ("Mon"), the date before that.
     public static func timeLabel(for date: Date, now: Date, calendar: Calendar = .current,
                                  locale: Locale = .current) -> String {
         let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
@@ -80,7 +80,7 @@ public enum NoteListGrouping {
         switch days {
         case ...1:
             style = Date.FormatStyle(date: .omitted, time: .shortened)
-        case 2...6:
+        case 2...7:
             style = Date.FormatStyle().weekday(.abbreviated)
         default:
             style = Date.FormatStyle(date: .numeric, time: .omitted)

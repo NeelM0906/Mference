@@ -4,6 +4,16 @@ import Testing
 
 /// NoteDocument (spec 8.2), list grouping, PhraseJoiner and search helpers.
 @Suite struct NoteDocumentTests {
+    @Test func attachmentIDsStayInsideTheNoteFolder() {
+        let attachments = NoteAttachments(root: URL(fileURLWithPath: "/tmp/notes"))
+        let note = UUID()
+        for bad in ["../../Mference.store", "..", ".hidden", "a/b", ""] {
+            #expect(!NoteAttachments.isValidID(bad))
+            #expect(attachments.url(of: bad, in: note).lastPathComponent == "invalid-attachment-id")
+        }
+        #expect(NoteAttachments.isValidID("6F9619FF.png"))
+    }
+
     static let everyBlock = NoteDocument(blocks: [
         .heading(level: .title, runs: [TextRun("Lisbon trip, March")]),
         .heading(level: .heading, runs: [TextRun("To do")]),
@@ -26,7 +36,7 @@ import Testing
     ])
 
     @Test func everyBlockAndRunStyleRoundTripsThroughJSON() throws {
-        let data = Self.everyBlock.encoded()
+        let data = try Self.everyBlock.encoded()
         #expect(NoteDocument.decode(data) == Self.everyBlock)
         let json = try #require(String(data: data, encoding: .utf8))
         #expect(json.contains(#""v":1"#))
@@ -34,13 +44,29 @@ import Testing
 
     @Test func unreadableOrMissingBodiesOpenAsEmptyNotes() {
         #expect(NoteDocument.decode(nil) == .empty)
-        #expect(NoteDocument.decode(Data("not json".utf8)) == .empty)
+        // Unreadable: shown empty, but read-only so nothing saves over it.
+        let damaged = NoteDocument.decode(Data("not json".utf8))
+        #expect(damaged.blocks.isEmpty)
+        #expect(damaged.readOnlyReason == .damaged)
     }
 
-    @Test func aBlockFromANewerBuildKeepsItsText() throws {
-        let json = #"{"v":2,"blocks":[{"type":"table","runs":[{"t":"cell"}]},{"type":"paragraph","runs":[{"t":"ok"}]}]}"#
+    @Test func aBlockThisBuildDoesNotKnowIsKeptExactly() throws {
+        let json = #"{"blocks":[{"runs":[{"t":"cell"}],"type":"table","x":[1,true,null]},{"runs":[{"t":"ok"}],"type":"paragraph"}],"v":1}"#
         let document = NoteDocument.decode(Data(json.utf8))
-        #expect(document.blocks == [.paragraph(runs: [TextRun("cell")]), .paragraph(runs: [TextRun("ok")])])
+        #expect(document.readOnlyReason == nil)
+        #expect(document.blocks.count == 2)
+        #expect(document.blocks[0].text == "cell")
+        #expect(document.blocks[1] == .paragraph(runs: [TextRun("ok")]))
+        #expect(String(data: try document.encoded(), encoding: .utf8) == json)
+        // Its text still counts for search and the preview.
+        #expect(document.plainText == "cell\nok")
+    }
+
+    @Test func newerVersionsAndDamagedBodiesAreReadOnly() {
+        let newer = NoteDocument.decode(Data(#"{"v":2,"blocks":[]}"#.utf8))
+        #expect(newer.readOnlyReason == .newerVersion)
+        #expect(NoteDocument.decode(Data("[1,2".utf8)).readOnlyReason == .damaged)
+        #expect(NoteDocument.decode(Data(#"{"blocks":[]}"#.utf8)).readOnlyReason == nil)
     }
 
     @Test func derivedText() {
@@ -123,6 +149,8 @@ import Testing
         #expect(NoteListGrouping.timeLabel(for: date(2026, 11, 19, 11, 40), now: now, calendar: calendar, locale: locale) == "11:40")
         #expect(NoteListGrouping.timeLabel(for: date(2026, 11, 18, 16, 15), now: now, calendar: calendar, locale: locale) == "16:15")
         #expect(NoteListGrouping.timeLabel(for: date(2026, 11, 16), now: now, calendar: calendar, locale: locale) == "Mon")
+        // Seven days ago is still in "Previous 7 days": a weekday too.
+        #expect(NoteListGrouping.timeLabel(for: date(2026, 11, 12), now: now, calendar: calendar, locale: locale) == "Thu")
         #expect(NoteListGrouping.timeLabel(for: date(2026, 10, 2), now: now, calendar: calendar, locale: locale) == "02/10/2026")
     }
 }
@@ -160,5 +188,12 @@ import Testing
 
     @Test func aPhraseWithNoWordsInsertsNothing() {
         #expect(join("   ", "Hello") == "")
+    }
+
+    @Test func capitalsOnlyForAPlainLowercaseFirstWord() {
+        #expect(join("3 apples", "") == "3 apples")
+        #expect(join("iPhone case", "") == "iPhone case")
+        #expect(join("then go", #"He said "stop.""#) == " Then go")
+        #expect(join("then go", "(See above.)") == " Then go")
     }
 }

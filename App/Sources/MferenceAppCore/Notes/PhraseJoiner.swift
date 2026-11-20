@@ -16,13 +16,15 @@ public enum PhraseJoiner {
         let before = preceding.last
         let atLineStart = before == nil || before!.isNewline
         let lastVisible = preceding.last { !$0.isWhitespace || $0.isNewline }
-        let afterSentence = lastVisible.map { sentenceEnds.contains($0) } ?? false
+        // A sentence end may sit inside closing quotes or brackets ('." ', '.)').
+        let lastMeaningful = preceding.last { !($0.isWhitespace && !$0.isNewline) && !closingQuotes.contains($0) }
+        let afterSentence = lastMeaningful.map { sentenceEnds.contains($0) } ?? false
 
         if atLineStart || afterSentence || (lastVisible?.isNewline ?? false) {
             words = capitalizingFirstLetter(words)
         }
         let leading: String
-        if atLineStart || before!.isWhitespace || openers.contains(before!) || startsWithClosingPunctuation(words) {
+        if atLineStart || before!.isWhitespace || isOpening(before!, in: preceding) || startsWithClosingPunctuation(words) {
             leading = ""
         } else {
             leading = " "
@@ -37,8 +39,18 @@ public enum PhraseJoiner {
     }
 
     private static let sentenceEnds: Set<Character> = [".", "!", "?", "…", "。", "！", "？"]
+    private static let closingQuotes: Set<Character> = ["\"", "'", "”", "’", "»", ")", "]"]
     private static let openers: Set<Character> = ["(", "[", "{", "\"", "'", "“", "‘", "«", "/", "-", "—"]
     private static let closers: Set<Character> = [".", ",", ";", ":", "!", "?", ")", "]", "}", "\"", "'", "”", "’", "»", "…"]
+
+    /// An opening bracket or quote. A straight quote opens only after a
+    /// space or at the start ("said \"" opens; "stop.\"" closes).
+    private static func isOpening(_ character: Character, in preceding: some StringProtocol) -> Bool {
+        guard openers.contains(character) else { return false }
+        guard character == "\"" || character == "'" else { return true }
+        let beforeQuote = preceding.dropLast().last
+        return beforeQuote == nil || beforeQuote!.isWhitespace || openers.contains(beforeQuote!)
+    }
 
     private static func startsWithClosingPunctuation(_ text: String) -> Bool {
         guard let first = text.first else { return false }
@@ -49,8 +61,12 @@ public enum PhraseJoiner {
         text.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
     }
 
+    /// Capitalises a first word that starts with a lowercase letter and is
+    /// all lowercase ("next" → "Next"); leaves "3 apples", "iPhone", "eBay".
     private static func capitalizingFirstLetter(_ text: String) -> String {
-        guard let index = text.firstIndex(where: \.isLetter) else { return text }
-        return text.replacingCharacters(in: index...index, with: String(text[index]).uppercased())
+        guard let first = text.first, first.isLetter, first.isLowercase else { return text }
+        let word = text.prefix { !$0.isWhitespace }
+        guard !word.dropFirst().contains(where: \.isUppercase) else { return text }
+        return first.uppercased() + text.dropFirst()
     }
 }
