@@ -366,6 +366,36 @@ import Testing
         #expect(h.writer.body(of: id).sections == nil)
     }
 
+    @Test func pendingSummariesOfFinishedNotesResumeAtLaunch() async throws {
+        let h = try harness()
+        let ended = try meeting(h)
+        h.note(ended)?.recording?.summaryState = .pending
+        let transcribing = try meeting(h)
+        h.note(transcribing)?.recording?.summaryState = .pending
+        h.note(transcribing)?.recording?.transcriptionState = .running
+        let none = try meeting(h)
+        try h.context.save()
+        #expect(h.summaries.resumePending() == [ended])
+        await h.summaries.waitUntilIdle()
+        #expect(h.summaries.status(for: ended) == .written)
+        #expect(h.summaries.status(for: transcribing) == .queued)
+        #expect(h.summaries.status(for: none) == .none)
+        #expect(h.engine.requests.count == 1)
+    }
+
+    @Test func aSummaryTheAppDiesInIsNotRetriedByItselfAtLaunch() async throws {
+        let h = try harness(replies: [.init(content: Self.good, delay: .milliseconds(20))])
+        let id = try meeting(h)
+        h.note(id)?.recording?.summaryState = .pending
+        h.summaries.resumePending()
+        for _ in 0..<200 where h.engine.requests.isEmpty { await Task.yield() }
+        // While Quick runs, the store says failed: dying now leaves Retry, not a loop.
+        #expect(h.note(id)?.recording?.summaryState == .failed)
+        #expect(h.summaries.resumePending().isEmpty)
+        await h.summaries.waitUntilIdle()
+        #expect(h.note(id)?.recording?.summaryState == .written)
+    }
+
     @Test func typedNotesGoWithTheTranscript() async throws {
         let h = try harness()
         let id = try meeting(h)

@@ -22,6 +22,43 @@ import Testing
         await services.summaries.waitUntilIdle()
     }
 
+    @Test func aMeetingEndedAtQuitIsSummarisedAtTheNextLaunch() async throws {
+        let speech = FakeSpeechService()
+        let segment = TranscriptSegment(track: .microphone, start: 0, end: 2, speakerID: SpeakerInfo.youID,
+                                        text: "Ship it on Friday.", isFinal: true)
+        speech.setMeetingScript(FakeSpeechService.MeetingScript(
+            live: [.segment(segment)], result: TranscriptResult(segments: [segment], speakers: [.you], duration: 2)))
+        let services = AppServices.preview(speech: speech)
+        let noteID = try await services.meetings.start(MeetingStartOptions(summaryWhenStopped: true))
+        await services.shutDownVoice()
+        #expect(services.summaries.status(for: noteID) != .queued)
+        #expect(try services.notes.note(id: noteID)?.recording?.summaryState == .pending)
+        // Next launch (same store): recovery, then the pending summary is queued.
+        await services.startLaunchRecovery().value
+        #expect(services.summaries.status(for: noteID) != .none)
+        await services.summaries.waitUntilIdle()
+    }
+
+    @Test func aTranscriptShownWhileTheFileWasQueuedFillsInWhenItFinishes() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let segment = TranscriptSegment(track: .file, start: 0, end: 4, speakerID: SpeakerInfo.othersID,
+                                        text: "Welcome to week three.", isFinal: true)
+        speech.setFileResult(.success(TranscriptResult(segments: [segment], speakers: [.others], duration: 4)),
+                             forFileNamed: "lecture.m4a")
+        let services = AppServices.preview(speech: speech)
+        let id = try #require(await services.files.add([URL(filePath: "/tmp/lecture.m4a")],
+                                                       options: FileImportOptions()).first)
+        // The note is opened while the file is still queued: an empty transcript.
+        let shown = try #require(services.meetings.transcript(for: id))
+        #expect(shown.segments.isEmpty)
+        while speech.advance() {}
+        await services.files.waitUntilIdle()
+        // The same model, now with the transcript.
+        #expect(services.meetings.transcript(for: id) === shown)
+        #expect(shown.segments.map(\.text) == ["Welcome to week three."])
+        #expect(shown.speaker(for: shown.segments[0]).name == "Others")
+    }
+
     @Test func launchRecoveryRunsOnce() async throws {
         let speech = FakeSpeechService()
         let services = AppServices.preview(speech: speech)

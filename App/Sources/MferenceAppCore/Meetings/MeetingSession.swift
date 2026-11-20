@@ -80,6 +80,8 @@ public final class MeetingSession {
     @ObservationIgnored private var consumer: Task<Void, Never>?
     @ObservationIgnored private var options = MeetingStartOptions()
     @ObservationIgnored private var didRecover = false
+    /// Quitting: the meeting's end is saved but its summary waits for the next launch.
+    @ObservationIgnored private var quitting = false
     /// The mic-only line was written for the current meeting.
     @ObservationIgnored private var wroteCallAudioLine = false
     /// Finished notes' transcripts, so a rename shows everywhere at once.
@@ -141,7 +143,7 @@ public final class MeetingSession {
         self.recording = started
         self.noteID = noteID
         let live = TranscriptModel()
-        live.onChange = { [weak self] model in self?.saveSpeakers(model, noteID: noteID) }
+        live.onChange = { [weak self] model in self?.saveRenames(model, noteID: noteID) }
         transcript = live
         transcripts[noteID] = live
         marks = []
@@ -190,11 +192,17 @@ public final class MeetingSession {
         await recording.stop()
     }
 
-    /// Quit (spec 6.1): stops a meeting being recorded and waits until its
-    /// last phrases and transcript are saved. Does nothing when idle.
+    /// Quit (spec 6.1): ends a meeting that is recording, paused or already
+    /// finishing within the quit deadline. It never does the normal stop
+    /// (last phrases, speaker pass, conversion, which can take minutes):
+    /// `speech.shutdown()` stops capture and closes the files, the meeting's
+    /// quick `.ended` is saved, and conversion runs at the next launch. The
+    /// summary is not started now; `MeetingSummaries.resumePending()` runs it
+    /// at the next launch. Does nothing when idle.
     public func stopForQuit() async {
         guard isActive else { return }
-        await stop()
+        quitting = true
+        await speech.shutdown()
         await waitUntilFinished()
     }
 
@@ -215,7 +223,7 @@ public final class MeetingSession {
         }
         guard let record = fetchNote(noteID)?.recording else { return nil }
         let model = TranscriptModel(recording: record)
-        model.onChange = { [weak self] model in self?.saveSpeakers(model, noteID: noteID) }
+        model.onChange = { [weak self] model in self?.saveRenames(model, noteID: noteID) }
         transcripts[noteID] = model
         touch(noteID)
         return model
@@ -233,6 +241,16 @@ public final class MeetingSession {
             transcriptOrder.removeAll { $0 == oldest }
             transcripts[oldest] = nil
         }
+    }
+
+    /// The saved transcript changed outside the live meeting (a file job
+    /// finished, a meeting closed at launch): the note's model, if one is
+    /// shown, takes it in, so it never stays at the empty snapshot it was
+    /// made from while the file was still queued.
+    public func transcriptDidChange(for noteID: UUID) {
+        guard noteID != self.noteID, let model = transcripts[noteID],
+              let record = fetchNote(noteID)?.recording else { return }
+        model.reload(from: record)
     }
 
     /// Forgets a cached transcript (the note was purged or re-transcribed).
@@ -306,6 +324,7 @@ public final class MeetingSession {
         try? writer.appendParagraph(MeetingCopy.endedUnexpectedly(at: end, locale: locale, timeZone: timeZone),
                                     to: noteID)
         writer.transcriptDidChange(in: noteID)
+        transcriptDidChange(for: noteID)
     }
 
     // MARK: Events
@@ -379,7 +398,10 @@ public final class MeetingSession {
         // A summary asked for while recording (with "Summary when you stop"
         // off) waited for the transcript: it runs now.
         let summarize = options.summaryWhenStopped || fetchNote(noteID)?.recording?.summaryState == .pending
+        let quit = quitting
         reset(endedNoteID: noteID)
+        // At quit nothing may load a model: the summary stays pending.
+        guard !quit else { return }
         afterMeeting?(noteID, summarize)
     }
 
@@ -413,6 +435,7 @@ public final class MeetingSession {
         callLevel = nil
         phase = .idle
         lastEndedNoteID = endedNoteID
+        quitting = false
     }
 
     // MARK: Saving
@@ -423,6 +446,28 @@ public final class MeetingSession {
         record.speakers = transcript.speakers
         record.duration = max(record.duration, transcript.duration)
         try? context.save()
+    }
+
+    /// A rename saves only that model's names into the stored list, so an
+    /// older model of the same note (one a view still holds after the cache
+    /// let it go) can never put back names renamed since.
+    private func saveRenames(_ model: TranscriptModel, noteID: UUID) {
+        guard let record = fetchNote(noteID)?.recording else { return }
+        var stored = record.speakers
+        for (id, name) in model.renames {
+            if let index = stored.firstIndex(where: { $0.id == id }) {
+                stored[index].name = name
+            } else if let speaker = model.speakers.first(where: { $0.id == id }) {
+                stored.append(speaker)
+            }
+        }
+        for speaker in model.speakers where !stored.contains(where: { $0.id == speaker.id }) {
+            stored.append(speaker)
+        }
+        record.speakers = stored
+        try? context.save()
+        // A cached model of this note other than `model` shows the new name too.
+        if let cached = transcripts[noteID], cached !== model { cached.reload(from: record) }
     }
 
     private func saveSpeakers(_ model: TranscriptModel, noteID: UUID) {

@@ -34,6 +34,15 @@ public final class TranscriptModel {
         self.init(segments: recording.segments, speakers: speakers, gaps: recording.gaps)
     }
 
+    /// Takes in what is saved now (a file's transcript arrived, a meeting
+    /// was closed at launch), so a view already showing this model updates.
+    func reload(from recording: NoteRecording) {
+        segments = Self.ordered(recording.segments)
+        speakers = recording.speakers
+        gaps = recording.gaps
+        renames = [:]
+    }
+
     // MARK: Reading
 
     /// The final segments only (what is saved).
