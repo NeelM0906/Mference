@@ -167,6 +167,8 @@ public final class NotesModel {
         self.init(store: services.notes, speech: services.speech, now: now)
         meetings = services.meetings
         summaries = services.summaries
+        // Mark moment goes in at the editor's caret when it shows the meeting's note.
+        services.meetings.noteTarget = editor
         waitForLaunchRecovery = { [weak services] in await services?.launchRecovery?.value }
     }
 

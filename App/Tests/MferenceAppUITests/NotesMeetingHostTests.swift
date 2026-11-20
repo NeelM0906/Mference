@@ -46,6 +46,7 @@ import Testing
         model.open(noteID: noteID)
         #expect(model.liveMeetingNoteID == noteID)
         #expect(model.showsMeetingLayout)
+        #expect(services.meetings.noteTarget === model.editor, "Mark moment goes in at the editor's caret")
         // The sidebar button brings back the panes; another note leaves the layout.
         model.showsPanesDuringMeeting = true
         #expect(!model.showsMeetingLayout)
