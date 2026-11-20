@@ -112,7 +112,10 @@ import Testing
         #expect(SpeechSetupCard.approvalMessage(bytes: 653_388_064).contains("(653 MB)"))
         #expect(VoiceFormat.size(66_591_913) == "67 MB")
         #expect(VoiceFormat.size(1_234_000_000) == "1.2 GB")
-        #expect(!SpeechSetupCard.modelLine(bytes: 1).contains("["), "bracketed values never ship")
+        #expect(SpeechSetupCard.modelLine(bytes: 0)
+                == "Runs on the Neural Engine, so chat and the model you use there keep running",
+                "no service, no size: never \"0 MB\"")
+        #expect(!SpeechSetupCard.approvalMessage(bytes: 0).contains("MB"))
     }
 
     // MARK: Settings › Speech

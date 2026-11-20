@@ -22,7 +22,7 @@ struct VoiceMenuField<Items: View>: View {
                 Text(title)
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: VoiceMetrics.chevron, weight: .semibold))
+                    .font(MFFont.micro)
                     .foregroundStyle(MFColor.secondary)
                     .accessibilityHidden(true)
             }
@@ -48,5 +48,4 @@ struct VoiceMenuField<Items: View>: View {
 enum VoiceMetrics {
     /// A drop-down field's height and chevron.
     static let fieldHeight: CGFloat = 30
-    static let chevron: CGFloat = 9
 }

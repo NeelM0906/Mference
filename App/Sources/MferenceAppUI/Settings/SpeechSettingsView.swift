@@ -57,7 +57,7 @@ public struct SpeechSettingsView: View {
     private var modelCard: some View {
         MFCard {
             cardHeader("Model")
-            MFListRow("Fluid Speech Pro", subtitle: Self.speechLine(model.speechState, bytes: model.speechBytes)) {
+            MFListRow("Fluid Speech Pro", subtitle: Self.speechSubtitle(model)) {
                 speechTrailing
             }
             MFListRow("Language", subtitle: "25 European languages, detected per recording") {
@@ -69,8 +69,7 @@ public struct SpeechSettingsView: View {
                     }
                 }
             }
-            MFListRow("Speaker labels",
-                      subtitle: "Extra \(VoiceFormat.size(model.speakerLabelsBytes)) download, used for meetings and files") {
+            MFListRow("Speaker labels", subtitle: Self.speakerLabelsSubtitle(model)) {
                 speakerLabelsTrailing
             }
             Text(Self.credit)
@@ -87,8 +86,31 @@ public struct SpeechSettingsView: View {
     /// The credit the licence asks for (spec 3).
     static let credit = "Fluid Speech Pro by FluidVoice, built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra. Licensed CC BY 4.0."
 
+    /// The size line, then a failure or the Offline line when there is one.
+    static func speechSubtitle(_ model: SpeechSettingsModel) -> String {
+        var lines = [speechLine(model.speechState, bytes: model.speechBytes)]
+        if let failure = model.speechFailure, failure != lines[0] {
+            lines.append(failure)
+        } else if model.setup.offline, !model.speechState.isReady {
+            lines.append(SpeechError.offline.message)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func speakerLabelsSubtitle(_ model: SpeechSettingsModel) -> String {
+        let size = model.speakerLabelsBytes > 0 ? "Extra \(VoiceFormat.size(model.speakerLabelsBytes)) download"
+                                                : "Extra download"
+        var lines = ["\(size), used for meetings and files"]
+        if let failure = model.speakerLabelsFailure {
+            lines.append(failure)
+        } else if model.setup.offline, !model.speakerLabelsState.isReady {
+            lines.append(SpeechError.offline.message)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func speechLine(_ state: SpeechModelState, bytes: Int64) -> String {
-        let base = "\(VoiceFormat.size(bytes)) · Neural Engine · CC BY 4.0"
+        let base = (bytes > 0 ? "\(VoiceFormat.size(bytes)) · " : "") + "Neural Engine · CC BY 4.0"
         switch state {
         case .downloading(let progress): return "\(base) · downloading \(SpeechSetupCard.percent(progress))"
         case .paused(let progress): return "\(base) · paused at \(SpeechSetupCard.percent(progress))"
@@ -113,22 +135,29 @@ public struct SpeechSettingsView: View {
             Button("Remove") { confirmsRemove = true }
                 .buttonStyle(.mfSecondary)
                 .disabled(model.isRemoving)
+                .accessibilityLabel("Remove Fluid Speech Pro")
         case .notInstalled, .failed:
             MFBadge(.custom("Not installed", .neutral))
-            Button("Download") { confirmsDownload = true }
+            Button(model.speechFailure == nil ? "Download" : "Try again") { confirmsDownload = true }
                 .buttonStyle(.mfPrimary)
                 .disabled(model.setup.offline)
-                .help(model.setup.offline ? "Turn off Offline mode in Settings to download." : "")
+                .accessibilityLabel("Download Fluid Speech Pro")
         case .downloading(let progress):
             MFProgressBadge("Downloading", fraction: progress)
             Button("Pause") { model.setup.pause() }
                 .buttonStyle(.mfSecondary)
+                .accessibilityLabel("Pause the Fluid Speech Pro download")
+            Button("Cancel") { model.setup.cancel() }
+                .buttonStyle(.mfQuiet)
+                .accessibilityLabel("Cancel the Fluid Speech Pro download")
         case .paused:
             Button("Resume") { model.setup.download() }
                 .buttonStyle(.mfPrimary)
                 .disabled(model.setup.offline)
+                .accessibilityLabel("Resume the Fluid Speech Pro download")
             Button("Cancel") { model.setup.cancel() }
                 .buttonStyle(.mfQuiet)
+                .accessibilityLabel("Cancel the Fluid Speech Pro download")
         case .preparing:
             MFBadge(.custom("Preparing…", .neutral))
         }
@@ -140,20 +169,26 @@ public struct SpeechSettingsView: View {
         case .ready:
             MFBadge(.installed)
         case .notInstalled, .failed:
-            Button("Download") { confirmsLabelsDownload = true }
+            Button(model.speakerLabelsFailure == nil ? "Download" : "Try again") { confirmsLabelsDownload = true }
                 .buttonStyle(.mfSecondary)
                 .disabled(model.setup.offline || !model.speechState.isReady)
-                .help(model.setup.offline ? "Turn off Offline mode in Settings to download." : "")
+                .accessibilityLabel("Download speaker labels")
         case .downloading(let progress):
             MFProgressBadge("Downloading", fraction: progress)
             Button("Pause") { model.pauseSpeakerLabels() }
                 .buttonStyle(.mfSecondary)
+                .accessibilityLabel("Pause the speaker labels download")
+            Button("Cancel") { model.cancelSpeakerLabels() }
+                .buttonStyle(.mfQuiet)
+                .accessibilityLabel("Cancel the speaker labels download")
         case .paused:
             Button("Resume") { model.downloadSpeakerLabels() }
                 .buttonStyle(.mfSecondary)
                 .disabled(model.setup.offline)
+                .accessibilityLabel("Resume the speaker labels download")
             Button("Cancel") { model.cancelSpeakerLabels() }
                 .buttonStyle(.mfQuiet)
+                .accessibilityLabel("Cancel the speaker labels download")
         case .preparing:
             MFBadge(.custom("Preparing…", .neutral))
         }
