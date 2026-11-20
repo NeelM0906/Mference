@@ -54,7 +54,13 @@ public final class RecordingStore: Sendable {
     // MARK: Manifest
 
     struct Manifest: Codable, Hashable {
-        enum State: String, Codable { case recording, finished, recovered }
+        enum State: String, Codable {
+            case recording
+            /// Capture stopped cleanly at quit; the tracks convert to AAC at the next launch.
+            case converting
+            case finished
+            case recovered
+        }
         var noteID: UUID
         var startedAt: Date
         var state: State
@@ -94,9 +100,13 @@ public final class RecordingStore: Sendable {
 
     // MARK: Crash recovery
 
-    /// Meetings whose app quit while recording: their CAF files are
-    /// repaired and converted, and the folder is marked recovered. Audio of
-    /// a meeting set to "Delete after transcribing" is deleted instead.
+    /// Run once at launch. Meetings whose app died while recording: their
+    /// CAF files are repaired and converted (or deleted when the audio was
+    /// not to be kept), the folder is marked recovered, and they are
+    /// returned. Meetings closed at quit (`converting`) are converted and
+    /// marked finished without being reported: their result was delivered.
+    /// The manifest is saved after each track, so dying mid-conversion
+    /// never leaves it naming a deleted file.
     public func recoverInterrupted() async -> [InterruptedRecording] {
         guard let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
             return []
@@ -104,33 +114,36 @@ public final class RecordingStore: Sendable {
         var recovered: [InterruptedRecording] = []
         for folder in folders {
             guard let noteID = UUID(uuidString: folder.lastPathComponent),
-                  var manifest = readManifest(noteID), manifest.state == .recording else { continue }
-            var tracks: [RecordedTrack] = []
+                  var manifest = readManifest(noteID), manifest.state == .recording || manifest.state == .converting
+            else { continue }
+            let crashed = manifest.state == .recording
             var endedAt = manifest.updatedAt
-            for var track in manifest.tracks {
+            for (index, track) in manifest.tracks.enumerated() {
                 let url = folder.appending(path: track.fileName)
                 guard FileManager.default.fileExists(atPath: url.path) else { continue }
                 if let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
                     endedAt = max(endedAt, modified)
                 }
-                if url.pathExtension == "caf" {
-                    guard let duration = try? TrackWriter.repair(url) else { continue }
-                    track.duration = duration
-                    if manifest.keepAudio, let m4a = try? await AudioFileConverter.convertToM4A(url) {
-                        track.fileName = m4a.lastPathComponent
+                guard url.pathExtension == "caf" else { continue }
+                if crashed, let duration = try? TrackWriter.repair(url) { manifest.tracks[index].duration = duration }
+                if manifest.keepAudio {
+                    // A failed conversion keeps the CAF, which plays too.
+                    if let m4a = try? await AudioFileConverter.convertToM4A(url) {
+                        manifest.tracks[index].fileName = m4a.lastPathComponent
                     }
+                } else {
+                    try? FileManager.default.removeItem(at: url)
                 }
-                tracks.append(track)
+                try? writeManifest(manifest)
             }
-            if !manifest.keepAudio {
-                for track in tracks { try? FileManager.default.removeItem(at: folder.appending(path: track.fileName)) }
-                tracks = []
+            let existing = manifest.tracks.filter {
+                FileManager.default.fileExists(atPath: folder.appending(path: $0.fileName).path)
             }
-            manifest.tracks = tracks
-            manifest.state = .recovered
-            manifest.updatedAt = endedAt
+            manifest.tracks = manifest.keepAudio ? existing : []
+            manifest.state = crashed ? .recovered : .finished
+            if crashed { manifest.updatedAt = endedAt }
             try? writeManifest(manifest)
-            recovered.append(InterruptedRecording(noteID: noteID, tracks: tracks, endedAt: endedAt))
+            if crashed { recovered.append(InterruptedRecording(noteID: noteID, tracks: manifest.tracks, endedAt: endedAt)) }
         }
         return recovered.sorted { $0.endedAt < $1.endedAt }
     }
@@ -201,27 +214,52 @@ final class RecordingSession: @unchecked Sendable {
     }
 
     /// Ends the recording: converts every track to `.m4a` when the audio is
-    /// kept, or deletes it, and marks the folder finished.
-    func finish(keepAudio: Bool) async throws -> [RecordedTrack] {
-        try closeAll()
-        var kept: [RecordedTrack] = []
-        for var track in manifest.tracks {
-            let url = directory.appending(path: track.fileName)
-            if keepAudio {
-                if url.pathExtension == "caf" {
-                    track.fileName = try await AudioFileConverter.convertToM4A(url).lastPathComponent
-                }
-                kept.append(track)
-            } else {
-                try? FileManager.default.removeItem(at: url)
-            }
+    /// kept, or deletes it. The manifest is saved after each track. A track
+    /// that fails to convert stays as its CAF (it plays too) and the failure
+    /// is returned. When `stopEarly` says so (the app is quitting, spec 6.1)
+    /// the remaining tracks are left as CAF and the folder is marked
+    /// `converting`: `recoverInterrupted()` converts them at the next launch,
+    /// and the returned tracks already name the `.m4a` files they will be.
+    func finish(keepAudio: Bool, stopEarly: @Sendable () async -> Bool = { false }) async
+        -> (tracks: [RecordedTrack], failure: SpeechError?) {
+        var failure: SpeechError?
+        do {
+            try closeAll()
+        } catch {
+            failure = .failed("closing the recording: \(error.localizedDescription)")
         }
-        manifest.tracks = kept
-        manifest.state = .finished
         manifest.keepAudio = keepAudio
+        guard keepAudio else {
+            for track in manifest.tracks { try? FileManager.default.removeItem(at: directory.appending(path: track.fileName)) }
+            manifest.tracks = []
+            manifest.state = .finished
+            manifest.updatedAt = .now
+            try? saveManifest()
+            return ([], failure)
+        }
+        var deferred = false
+        for (index, track) in manifest.tracks.enumerated() where (track.fileName as NSString).pathExtension == "caf" {
+            if !deferred, await stopEarly() { deferred = true }
+            if deferred { continue }
+            do {
+                let url = directory.appending(path: track.fileName)
+                manifest.tracks[index].fileName = try await AudioFileConverter.convertToM4A(url).lastPathComponent
+            } catch {
+                failure = failure ?? .failed("converting \(track.fileName): \(error.localizedDescription)")
+            }
+            try? saveManifest()
+        }
+        manifest.state = deferred ? .converting : .finished
         manifest.updatedAt = .now
-        try saveManifest()
-        return kept
+        try? saveManifest()
+        guard deferred else { return (manifest.tracks, failure) }
+        return (manifest.tracks.map { track in
+            var named = track
+            if (track.fileName as NSString).pathExtension == "caf" {
+                named.fileName = (track.fileName as NSString).deletingPathExtension + ".m4a"
+            }
+            return named
+        }, failure)
     }
 
     private func saveManifest() throws { try store.writeManifest(manifest) }

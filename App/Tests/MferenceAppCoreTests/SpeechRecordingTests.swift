@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import Synchronization
 @testable import MferenceAppCore
 import Testing
 
@@ -67,7 +68,8 @@ import Testing
         try session.write(FakeAudioSource.tone(seconds: 1), to: .microphone)
         #expect(session.tracks.map(\.fileName) == ["microphone-1.caf", "call-1.caf", "microphone-2.caf"])
         #expect(session.files(of: .call).map(\.startOffset) == [0])
-        let tracks = try await session.finish(keepAudio: true)
+        let (tracks, failure) = await session.finish(keepAudio: true)
+        #expect(failure == nil)
         #expect(tracks.map(\.fileName) == ["microphone-1.m4a", "call-1.m4a", "microphone-2.m4a"])
         #expect(tracks.map(\.startOffset) == [0, 0, 2])
         for track in tracks {
@@ -90,7 +92,7 @@ import Testing
         let session = try store.begin(noteID: note, startedAt: .now, keepAudio: false)
         try session.openTrack(.microphone, at: 0)
         try session.write(FakeAudioSource.tone(seconds: 1), to: .microphone)
-        #expect(try await session.finish(keepAudio: false).isEmpty)
+        #expect(await session.finish(keepAudio: false).tracks.isEmpty)
         let files = try FileManager.default.contentsOfDirectory(atPath: store.directory(for: note).path)
         #expect(files == [RecordingStore.manifestName])
     }
@@ -111,7 +113,7 @@ import Testing
         }
         let finished = UUID()
         let done = try store.begin(noteID: finished, startedAt: .now, keepAudio: true)
-        _ = try await done.finish(keepAudio: true)
+        _ = await done.finish(keepAudio: true)
 
         let recovered = await RecordingStore(root: root).recoverInterrupted()
         #expect(recovered.map(\.noteID) == [note], "only the meeting left open")
@@ -122,6 +124,51 @@ import Testing
         #expect(try AVAudioFile(forReading: store.directory(for: note).appending(path: "call-1.m4a")).length > 0)
         // Recovered once only.
         #expect(await store.recoverInterrupted().isEmpty)
+    }
+
+    @Test func quitClosesTheFilesAndTheNextLaunchConverts() async throws {
+        let root = Self.root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingStore(root: root, availableBytes: { _ in 10 << 30 })
+        let note = UUID()
+        let session = try store.begin(noteID: note, startedAt: .now, keepAudio: true)
+        try session.openTrack(.microphone, at: 0)
+        try session.openTrack(.call, at: 0)
+        try session.write(FakeAudioSource.tone(seconds: 1), to: .microphone)
+        try session.write(FakeAudioSource.tone(seconds: 1), to: .call)
+        // Quitting: nothing is converted now.
+        let (tracks, failure) = await session.finish(keepAudio: true, stopEarly: { true })
+        #expect(failure == nil)
+        #expect(tracks.map(\.fileName) == ["microphone-1.m4a", "call-1.m4a"], "the names they will have")
+        #expect(store.readManifest(note)?.state == .converting)
+        let folder = store.directory(for: note)
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "call-1.caf").path))
+        // Next launch: converted, finished, and not reported as interrupted.
+        #expect(await store.recoverInterrupted().isEmpty)
+        #expect(store.readManifest(note)?.state == .finished)
+        #expect(store.readManifest(note)?.tracks.map(\.fileName) == ["microphone-1.m4a", "call-1.m4a"])
+        #expect(try AVAudioFile(forReading: folder.appending(path: "call-1.m4a")).length > 0)
+        #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "call-1.caf").path))
+    }
+
+    @Test func theManifestFollowsEachConvertedTrack() async throws {
+        // Review #223: dying between two conversions must not orphan the first .m4a.
+        let root = Self.root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingStore(root: root, availableBytes: { _ in 10 << 30 })
+        let note = UUID()
+        let session = try store.begin(noteID: note, startedAt: .now, keepAudio: true)
+        try session.openTrack(.microphone, at: 0)
+        try session.openTrack(.call, at: 0)
+        try session.write(FakeAudioSource.tone(seconds: 1), to: .microphone)
+        try session.write(FakeAudioSource.tone(seconds: 1), to: .call)
+        let calls = Counter()
+        // Stop after the first track, as a quit mid-conversion would.
+        _ = await session.finish(keepAudio: true, stopEarly: { calls.next() > 0 })
+        let manifest = try #require(store.readManifest(note))
+        #expect(manifest.tracks.map(\.fileName) == ["microphone-1.m4a", "call-1.caf"])
+        let folder = store.directory(for: note)
+        for track in manifest.tracks { #expect(FileManager.default.fileExists(atPath: folder.appending(path: track.fileName).path)) }
     }
 
     @Test func recordingRefusesUnderOneGigabyteFree() throws {
@@ -173,4 +220,10 @@ import Testing
         try Data("not audio".utf8).write(to: url)
         await #expect(throws: SpeechError.unsupportedFile("notes.m4a")) { _ = try await FileAudioDecoder(url: url) }
     }
+}
+
+final class Counter: Sendable {
+    private let value = Mutex(0)
+    /// The count before this call.
+    func next() -> Int { value.withLock { v in defer { v += 1 }; return v } }
 }

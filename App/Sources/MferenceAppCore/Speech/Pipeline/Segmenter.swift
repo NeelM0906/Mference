@@ -110,6 +110,20 @@ public struct Segmenter: Sendable {
             return [.started(id: id, start: frameStart - SpeechAudio.seconds(pad))]
         }
 
+        // The 15 s cap (the model's window): cut before the frame that would
+        // cross it, so no phrase is ever longer; if the voice goes on, the
+        // next phrase starts with this frame.
+        if open.samples.count + frame.count > SpeechAudio.samples(configuration.maxPhrase) {
+            let stillSpeaking = probability >= configuration.negativeThreshold
+            events += finish(keepingTrailingSilence: true)
+            if stillSpeaking {
+                let id = UUID()
+                current = Open(id: id, start: frameStart, samples: frame, trailingSilence: 0, voiced: frame.count)
+                events.append(.started(id: id, start: frameStart))
+            }
+            return events
+        }
+
         open.samples += frame
         if probability < configuration.negativeThreshold {
             open.trailingSilence += frame.count
@@ -121,16 +135,6 @@ public struct Segmenter: Sendable {
 
         if SpeechAudio.seconds(open.trailingSilence) >= configuration.endOfSpeechSilence {
             events += finish(keepingTrailingSilence: false)
-        } else if SpeechAudio.seconds(open.samples.count) >= configuration.maxPhrase {
-            // The 15 s cap: cut here; if the voice goes on, the next phrase
-            // starts at the cut.
-            let stillSpeaking = open.trailingSilence == 0
-            events += finish(keepingTrailingSilence: true)
-            if stillSpeaking {
-                let id = UUID()
-                current = Open(id: id, start: position, samples: [], trailingSilence: 0, voiced: 0)
-                events.append(.started(id: id, start: position))
-            }
         }
         return events
     }
