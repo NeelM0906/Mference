@@ -1,7 +1,8 @@
 import Foundation
 import SwiftData
 
-// SHARED CONTRACT (App Program spec sections 4.4 and 8). The SwiftData schema
+// SHARED CONTRACT (App Program spec sections 4.4 and 8; Notes program spec 8
+// adds V2). The SwiftData schema
 // for everything the app stores under ~/Library/Application Support/Mference/.
 // U2 owns this file. Adding, renaming or removing a stored property is a new
 // `VersionedSchema` plus a migration stage, through one PR the coordinator
@@ -180,17 +181,166 @@ public enum MferenceSchemaV1: VersionedSchema {
     }
 }
 
+/// Version 2 (Notes program spec section 8): V1 unchanged, plus notes,
+/// folders and recordings. Migration V1 → V2 is lightweight (models added
+/// only). Rich note values (the `NoteDocument` body, transcript segments,
+/// speakers, track lists) are Codable types owned by `Notes/`, `Speech/` and
+/// `Meetings/`, stored as `Data`.
+public enum MferenceSchemaV2: VersionedSchema {
+    public static let versionIdentifier = Schema.Version(2, 0, 0)
+
+    public static var models: [any PersistentModel.Type] {
+        MferenceSchemaV1.models + [NoteFolder.self, Note.self, NoteRecording.self]
+    }
+
+    /// A folder in the Notes sidebar (one level, no nesting in v1).
+    @Model
+    public final class NoteFolder {
+        @Attribute(.unique) public var id: UUID
+        public var name: String
+        /// Position in the sidebar; the person reorders by dragging.
+        public var sortOrder: Int
+        public var createdAt: Date
+        /// Deleting a folder leaves its notes in All notes.
+        @Relationship(deleteRule: .nullify, inverse: \Note.folder)
+        public var notes: [Note] = []
+
+        public init(id: UUID = UUID(), name: String, sortOrder: Int, createdAt: Date = .now) {
+            self.id = id
+            self.name = name
+            self.sortOrder = sortOrder
+            self.createdAt = createdAt
+        }
+    }
+
+    /// One note: typed, dictated, a meeting, or a transcribed file.
+    @Model
+    public final class Note {
+        @Attribute(.unique) public var id: UUID
+        /// The title the person gave it; empty means the list shows the first line.
+        public var title: String
+        /// JSON `NoteDocument` (block list, versioned; owned by Notes, N1).
+        public var bodyJSON: Data?
+        /// Title, body text and transcript text, flattened for search
+        /// (spec 6.6); rewritten on every save.
+        public var searchText: String
+        public var createdAt: Date
+        /// Last edit; the list sorts and groups by it.
+        public var updatedAt: Date
+        public var folder: NoteFolder?
+        public var isPinned: Bool
+        /// Set while the note is in Recently deleted; purged 30 days later.
+        public var deletedAt: Date?
+        /// `NoteKind.rawValue`.
+        public var kindRawValue: String
+        /// Some of the body was dictated (the list's microphone mark).
+        public var hasDictation: Bool
+        /// The meeting or file recording, for `.meeting` and `.file` notes.
+        @Relationship(deleteRule: .cascade, inverse: \NoteRecording.note)
+        public var recording: NoteRecording?
+
+        public init(id: UUID = UUID(), title: String = "", kind: NoteKind = .note,
+                    createdAt: Date = .now, folder: NoteFolder? = nil) {
+            self.id = id
+            self.title = title
+            self.searchText = title
+            self.createdAt = createdAt
+            self.updatedAt = createdAt
+            self.folder = folder
+            self.isPinned = false
+            self.kindRawValue = kind.rawValue
+            self.hasDictation = false
+        }
+
+        public var kind: NoteKind {
+            get { NoteKind(rawValue: kindRawValue) ?? .note }
+            set { kindRawValue = newValue.rawValue }
+        }
+    }
+
+    /// The audio and transcript behind a meeting or transcribed-file note.
+    /// Audio files live in `Recordings/<note-id>/` (spec 7); this row holds
+    /// their names, never the audio.
+    @Model
+    public final class NoteRecording {
+        @Attribute(.unique) public var id: UUID
+        public var note: Note?
+        public var startedAt: Date
+        /// Set when capture ended (stopped, or closed after a crash). Nil
+        /// means a meeting is still recording, or the app quit mid-meeting
+        /// and the next launch must close it (spec 6.3).
+        public var endedAt: Date?
+        /// Recorded length in seconds, pauses excluded.
+        public var duration: TimeInterval
+        /// The language detected (or pinned), BCP 47 ("en", "de").
+        public var languageCode: String?
+        /// JSON `[RecordedTrack]`: file name, track kind, start offset (Speech, N2).
+        public var tracksJSON: Data?
+        /// JSON `[TranscriptSegment]` (Speech contract; Meetings, N4).
+        public var transcriptJSON: Data?
+        /// JSON `[SpeakerInfo]`: id, name, colour index.
+        public var speakersJSON: Data?
+        /// `RecordingSummaryState.rawValue`.
+        public var summaryStateRawValue: String
+        /// The audio files are kept (Settings › Speech › Keep audio, D4).
+        public var audioKept: Bool
+        /// The imported file's original name (file transcripts only).
+        public var sourceFileName: String?
+        /// When the action items went to To-dos; nil until then.
+        public var todosAddedAt: Date?
+
+        public init(id: UUID = UUID(), startedAt: Date = .now, audioKept: Bool = true,
+                    sourceFileName: String? = nil) {
+            self.id = id
+            self.startedAt = startedAt
+            self.duration = 0
+            self.summaryStateRawValue = RecordingSummaryState.none.rawValue
+            self.audioKept = audioKept
+            self.sourceFileName = sourceFileName
+        }
+
+        public var summaryState: RecordingSummaryState {
+            get { RecordingSummaryState(rawValue: summaryStateRawValue) ?? .none }
+            set { summaryStateRawValue = newValue.rawValue }
+        }
+    }
+}
+
+/// What a note is, for the sidebar's Library rows and the list's kind marks.
+public enum NoteKind: String, Sendable, Hashable, Codable, CaseIterable {
+    /// Typed (and maybe dictated).
+    case note
+    /// Recorded with Record meeting.
+    case meeting
+    /// Made from an audio or video file.
+    case file
+}
+
+/// Where a recording's summary stands (spec 4.5, 6.5).
+public enum RecordingSummaryState: String, Sendable, Hashable, Codable, CaseIterable {
+    case none, pending, written, failed
+}
+
 public typealias Conversation = MferenceSchemaV1.Conversation
 public typealias StoredMessage = MferenceSchemaV1.StoredMessage
 public typealias MemoryItem = MferenceSchemaV1.MemoryItem
 public typealias ScanRecord = MferenceSchemaV1.ScanRecord
 public typealias MailBucket = MferenceSchemaV1.MailBucket
 public typealias MailBucketAssignment = MferenceSchemaV1.MailBucketAssignment
+public typealias NoteFolder = MferenceSchemaV2.NoteFolder
+public typealias Note = MferenceSchemaV2.Note
+public typealias NoteRecording = MferenceSchemaV2.NoteRecording
 
 public enum MferenceMigrationPlan: SchemaMigrationPlan {
-    public static var schemas: [any VersionedSchema.Type] { [MferenceSchemaV1.self] }
-    public static var stages: [MigrationStage] { [] }
+    public static var schemas: [any VersionedSchema.Type] { [MferenceSchemaV1.self, MferenceSchemaV2.self] }
+    /// V1 → V2 adds the note models only, so it is lightweight.
+    public static var stages: [MigrationStage] {
+        [.lightweight(fromVersion: MferenceSchemaV1.self, toVersion: MferenceSchemaV2.self)]
+    }
 }
+
+/// The schema the app opens: always the newest version.
+public typealias MferenceCurrentSchema = MferenceSchemaV2
 
 /// Where the app keeps its data (spec 4.4).
 public enum AppStorageLocation {
@@ -208,17 +358,17 @@ public enum AppModelContainer {
     public static func make(at url: URL = AppStorageLocation.storeURL) throws -> ModelContainer {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
-        let configuration = ModelConfiguration(schema: Schema(versionedSchema: MferenceSchemaV1.self), url: url)
-        return try ModelContainer(for: Schema(versionedSchema: MferenceSchemaV1.self),
+        let configuration = ModelConfiguration(schema: Schema(versionedSchema: MferenceCurrentSchema.self), url: url)
+        return try ModelContainer(for: Schema(versionedSchema: MferenceCurrentSchema.self),
                                   migrationPlan: MferenceMigrationPlan.self,
                                   configurations: configuration)
     }
 
     /// An in-memory container for tests and previews.
     public static func inMemory() throws -> ModelContainer {
-        let configuration = ModelConfiguration(schema: Schema(versionedSchema: MferenceSchemaV1.self),
+        let configuration = ModelConfiguration(schema: Schema(versionedSchema: MferenceCurrentSchema.self),
                                                isStoredInMemoryOnly: true)
-        return try ModelContainer(for: Schema(versionedSchema: MferenceSchemaV1.self),
+        return try ModelContainer(for: Schema(versionedSchema: MferenceCurrentSchema.self),
                                   migrationPlan: MferenceMigrationPlan.self,
                                   configurations: configuration)
     }
