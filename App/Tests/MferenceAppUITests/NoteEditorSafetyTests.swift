@@ -40,6 +40,14 @@ import Testing
         #expect(h.view.document == doc(.marker(time: 5), .paragraph(runs: [TextRun("after")])))
     }
 
+    @Test func aChecklistItemJoinedOntoAnImageLineStaysAnItem() {
+        let h = Harness()
+        h.view.load(doc(.image(attachmentID: "A.png"), .check(runs: [TextRun("Hotel")], done: true, indent: 1)))
+        h.view.setSelectedRange(NSRange(location: 1, length: 1))      // the line break
+        h.view.deleteBackward(nil)
+        #expect(h.view.document == doc(.image(attachmentID: "A.png"), .check(runs: [TextRun("Hotel")], done: true, indent: 1)))
+    }
+
     @Test func aBlockFromANewerBuildRoundTripsThroughTheEditor() throws {
         let data = Data(#"{"v":1,"blocks":[{"type":"video","attachment":"clip.mov"},{"type":"paragraph","runs":[{"t":"End"}]}]}"#.utf8)
         let document = NoteDocument.decode(data)

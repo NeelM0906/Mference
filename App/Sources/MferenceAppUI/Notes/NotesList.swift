@@ -6,6 +6,8 @@ import SwiftUI
 /// Previous 7 days, Previous 30 days, months), with the empty states.
 struct NotesList: View {
     @Bindable var model: NotesModel
+    /// A row click focuses the list, so ↑/↓/⌫ act on it, not on the editor.
+    @FocusState private var listFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,7 +22,9 @@ struct NotesList: View {
                         ForEach(sections) { section in
                             if !section.title.isEmpty { header(section.title) }
                             ForEach(section.items) { note in
-                                NoteRow(model: model, note: note, isLast: note.id == sections.last?.items.last?.id)
+                                NoteRow(model: model, note: note, isLast: note.id == sections.last?.items.last?.id) {
+                                    listFocused = true
+                                }
                             }
                         }
                     }
@@ -29,6 +33,7 @@ struct NotesList: View {
                 .scrollIndicators(.automatic)
                 // Keyboard: ↑ / ↓ move the selection, ⌫ deletes (G-A7).
                 .focusable()
+                .focused($listFocused)
                 .focusEffectDisabled()
                 .onMoveCommand { direction in
                     switch direction {
@@ -42,6 +47,10 @@ struct NotesList: View {
             }
         }
         .background(MFColor.surface)
+        // Audio or video dropped on the list: transcribed into new notes.
+        .dropDestination(for: URL.self) { (urls: [URL], _: CGPoint) -> Bool in
+            model.voice.transcribe?(urls) ?? false
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Notes")
     }
@@ -171,12 +180,17 @@ struct NoteRow: View {
     let model: NotesModel
     let note: Note
     let isLast: Bool
+    /// Run after a click selects the row (the list takes keyboard focus).
+    var onClick: () -> Void = {}
     @State private var isHovered = false
 
     private var isSelected: Bool { model.selectedNoteID == note.id }
 
     var body: some View {
-        Button { model.select(note) } label: {
+        Button {
+            model.select(note)
+            onClick()
+        } label: {
             VStack(alignment: .leading, spacing: NotesMetrics.rowLineGap) {
                 HStack(spacing: MFSpacing.s - MFSpacing.xxs) {
                     if let mark = kindMark {
@@ -264,6 +278,11 @@ struct NoteRow: View {
                 }
             }
             Button("Duplicate") { model.duplicate(note) }
+            Menu("Export") {
+                ForEach(NoteExportFormat.allCases, id: \.self) { format in
+                    Button(format.label) { model.export(note, as: format) }
+                }
+            }
             Divider()
             Button("Delete", role: .destructive) { model.delete(note) }
         }

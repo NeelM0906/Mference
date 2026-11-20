@@ -190,6 +190,20 @@ import Testing
         #expect(join("   ", "Hello") == "")
     }
 
+    @Test func aSentenceOpenerContinuingASentenceGoesLowercase() {
+        #expect(join("And whether the appointment moved", "Pain in the lower right") == " and whether the appointment moved")
+        #expect(join("The second one.", "Ask about") == " the second one.")
+        // Names, "I" and sentence starts keep their capitals.
+        #expect(join("Marta said so", "Ask whether") == " Marta said so")
+        #expect(join("I think so", "and") == " I think so")
+        #expect(join("And then", "Done.") == " And then")
+        #expect(join("And then", "") == "And then")
+        // Not after an opening quote, not a lone word, and a chip starts a line.
+        #expect(join("What time is it", #"She said ""#) == #"What time is it"#)
+        #expect(join("A", "Vitamin") == " A")
+        #expect(join("and the rest", "\u{FFFC}") == "And the rest")
+    }
+
     @Test func capitalsOnlyForAPlainLowercaseFirstWord() {
         #expect(join("3 apples", "") == "3 apples")
         #expect(join("iPhone case", "") == "iPhone case")

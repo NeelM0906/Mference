@@ -18,6 +18,22 @@ public final class NoteEditorController {
     @ObservationIgnored private var autosave: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var segmentTimes: [UUID: TimeInterval] = [:]
+    /// The stored body the editor shows (as loaded or last saved). When the
+    /// store's copy differs, something else wrote the note (a meeting
+    /// summary, a marker, a title): the editor takes that in instead of
+    /// saving over it.
+    @ObservationIgnored private var loadedBody: Data?
+    /// An outside write arrived while an input method was composing.
+    @ObservationIgnored private var absorbWhenComposed = false
+    /// The note the running dictation writes into: the note shown when its
+    /// first phrase began. Every later phrase goes there too, shown or not,
+    /// until the dictation ends (`dropAllPhrases`).
+    @ObservationIgnored private var dictationNote: Note?
+    /// Where the caret was in each note when it was left (a phrase for a
+    /// note not shown starts there).
+    @ObservationIgnored private var lastCaret: [UUID: Int] = [:]
+    /// A ⌘K transcript hit waiting for the editor to show its note.
+    @ObservationIgnored private var pendingReveal: UUID?
     /// Phrases still being transcribed when their note left the editor
     /// (another note opened, the view went away or was replaced). They are
     /// handed back when the note is shown again; one that finishes before
@@ -57,6 +73,58 @@ public final class NoteEditorController {
                 MainActor.assumeIsolated { self?.saveNow(force: true) }
             })
         }
+        watchStore()
+    }
+
+    /// Follows the store's revision: a write to the open note from
+    /// elsewhere is taken in at once.
+    private func watchStore() {
+        withObservationTracking {
+            _ = store.revision
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.absorbExternalChanges()
+                self?.watchStore()
+            }
+        }
+    }
+
+    /// When the open note's stored body changed underneath the editor:
+    /// with nothing unsaved, show the stored body; with unsaved edits, merge
+    /// them into it block by block and save the result. Caret, selection and
+    /// pending phrases keep their places. Returns whether anything changed.
+    @discardableResult
+    func absorbExternalChanges() -> Bool {
+        guard let note, let textView, note.modelContext != nil, !note.isDeleted,
+              note.bodyJSON != loadedBody else { return false }
+        // Never in the middle of an input method's composition: taken in
+        // as soon as the composed text is committed.
+        if textView.hasMarkedText() {
+            absorbWhenComposed = true
+            return false
+        }
+        absorbWhenComposed = false
+        let theirs = store.document(of: note)
+        guard theirs.readOnlyReason == nil else { return false }
+        if saveState == .saved {
+            textView.reload(theirs)
+            loadedBody = note.bodyJSON
+        } else {
+            let base = NoteDocument.decode(loadedBody)
+            let merged = NoteDocument(blocks: NoteDocumentMerge.merge(base: base.blocks, ours: textView.document.blocks,
+                                                                      theirs: theirs.blocks))
+            textView.reload(merged)
+            do {
+                try store.save(merged, to: note)
+                loadedBody = note.bodyJSON
+                saveState = .saved
+                autosave?.cancel()
+            } catch {
+                saveState = .failed(String(describing: error))
+            }
+        }
+        wordCount = textView.document.wordCount
+        return true
     }
 
     isolated deinit {
@@ -69,6 +137,8 @@ public final class NoteEditorController {
     /// Saves the open note, then shows `note` (nil shows nothing).
     public func open(_ note: Note?) {
         guard note?.id != self.note?.id || note == nil else { return }
+        pendingReveal = nil
+        if let current = self.note, let textView { lastCaret[current.id] = textView.selectedRange().location }
         saveNow(force: true)
         detachPendingPhrases(from: textView)
         self.note = note
@@ -89,6 +159,9 @@ public final class NoteEditorController {
         }
         self.textView = textView
         textView.onTextChange = { [weak self] in self?.textDidChange() }
+        textView.onFocusChange = { [weak self] focused in self?.onFocusChange?(focused) }
+        textView.onCancel = { [weak self] in self?.onCancel?() ?? false }
+        textView.onTimeChipClick = onTimeChipClick
         textView.importImage = { [weak self] data, ext in
             guard let self, let id = note?.id else { return nil }
             return try? store.attachments.write(data, fileExtension: ext, into: id)
@@ -110,8 +183,11 @@ public final class NoteEditorController {
     func detach(_ textView: NoteTextView) {
         guard self.textView === textView else { return }
         saveNow(force: true)
+        if let note { lastCaret[note.id] = textView.selectedRange().location }
         detachPendingPhrases(from: textView)
         self.textView = nil
+        // No editor shows any more: it is no longer a place to dictate into.
+        onFocusChange?(false)
     }
 
     /// Moves the phrases waiting in `view` (the open note, just saved) to an
@@ -186,7 +262,12 @@ public final class NoteEditorController {
         textView.isEditable = note != nil && note?.deletedAt == nil && document.readOnlyReason == nil
         textView.noteID = note?.id
         textView.load(document)
+        loadedBody = note?.bodyJSON
         textView.notice = Self.notice(for: document.readOnlyReason)
+        if let pendingReveal, note != nil {
+            textView.reveal(segmentID: pendingReveal)
+            self.pendingReveal = nil
+        }
         reattachPendingPhrases(stored: document)
         readOnlyReason = document.readOnlyReason
         wordCount = textView.document.wordCount
@@ -197,6 +278,7 @@ public final class NoteEditorController {
 
     private func textDidChange() {
         guard note != nil else { return }
+        if absorbWhenComposed, let textView, !textView.hasMarkedText() { absorbExternalChanges() }
         saveState = .editing
         autosave?.cancel()
         let delay = autosaveDelay
@@ -222,10 +304,15 @@ public final class NoteEditorController {
         }
         autosave?.cancel()
         autosave = nil
+        // A write from elsewhere not yet taken in is merged first (a forced
+        // save commits an unfinished composition first).
+        if force, textView.hasMarkedText(), note.bodyJSON != loadedBody { textView.unmarkText() }
+        if absorbExternalChanges(), saveState == .saved { return }
         let document = textView.document
         wordCount = document.wordCount
         do {
             try store.save(document, to: note)
+            loadedBody = note.bodyJSON
             saveState = .saved
         } catch {
             saveState = .failed(String(describing: error))
@@ -260,11 +347,28 @@ public final class NoteEditorController {
         textView.insertAttachment(block)
     }
 
-    /// The note as plain text, for the share sheet.
+    /// The editor gained or lost keyboard focus (⇧⌘D dictates into the
+    /// focused editor).
+    @ObservationIgnored public var onFocusChange: ((Bool) -> Void)?
+    /// Esc in the editor; returns true when handled (dictation stopped).
+    @ObservationIgnored public var onCancel: (() -> Bool)?
+
+    /// The note as Markdown, for the share sheet (spec 4.1).
     public var shareText: String {
         _ = selectionRevision
         _ = wordCount
-        return textView?.document.plainText ?? note.map { store.document(of: $0).plainText } ?? ""
+        guard let document = textView?.document ?? note.map({ store.document(of: $0) }) else { return "" }
+        return NoteExport.markdown(document, segmentTimes: segmentTimes)
+    }
+
+    /// Scrolls to a transcript segment's time chip, if the note has one.
+    /// When the editor is not showing yet (⌘K opened Notes from another
+    /// section), it happens as soon as the note loads.
+    public func reveal(segmentID: UUID) {
+        pendingReveal = segmentID
+        guard let textView, note != nil else { return }
+        textView.reveal(segmentID: segmentID)
+        pendingReveal = nil
     }
 
     public func focus() {
@@ -275,7 +379,33 @@ public final class NoteEditorController {
     // MARK: Dictation and meetings
 
     /// Holds the caret's place for a dictated phrase.
-    public func beginPhrase(_ id: UUID) { textView?.beginPhrase(id) }
+    public func beginPhrase(_ id: UUID) {
+        if dictationNote == nil { dictationNote = note }
+        guard let target = dictationNote else { return }
+        if target.id == note?.id, let textView {
+            textView.beginPhrase(id)
+        } else {
+            // The person moved to another note: the phrase still belongs to
+            // the note the dictation began in.
+            let holder = holder(for: target)
+            holder.view.beginPhrase(id)
+            detached[id] = holder
+        }
+    }
+
+    /// The off-screen copy of `note` that phrases for it wait in: the one
+    /// already holding its phrases, else a new one at its last caret.
+    private func holder(for note: Note) -> DetachedNote {
+        if let existing = detached.values.first(where: { $0.note.id == note.id }) { return existing }
+        let stored = store.document(of: note)
+        let view = NoteTextView(usingTextLayoutManager: true)
+        view.configure()
+        view.mappingContext = textView?.mappingContext ?? NoteTextMapping.Context()
+        view.load(stored)
+        let length = (view.string as NSString).length
+        view.setSelectedRange(NSRange(location: min(lastCaret[note.id] ?? length, length), length: 0))
+        return DetachedNote(note: note, view: view, snapshot: stored)
+    }
 
     /// Inserts a phrase where it began, in the note it began in; marks that
     /// note as dictated.
@@ -296,10 +426,22 @@ public final class NoteEditorController {
             do {
                 try store.save(holder.view.document, to: holder.note)
                 holder.snapshot = store.document(of: holder.note)
+                // The next phrase for this note follows this one.
+                lastCaret[holder.note.id] = holder.view.selectedRange().location
                 try store.markDictated(holder.note)
             } catch {
                 saveState = .failed(String(describing: error))
             }
+            return
+        }
+        // A phrase never begun (its start was missed) still goes to the
+        // dictation's note, not to whichever note shows.
+        if let target = dictationNote, target.id != note?.id || textView == nil,
+           textView?.pendingPhraseIDs.contains(id) != true {
+            let holder = holder(for: target)
+            holder.view.beginPhrase(id)
+            detached[id] = holder
+            finishPhrase(id, text: text)
             return
         }
         guard let textView, let note else { return }
@@ -313,13 +455,59 @@ public final class NoteEditorController {
         textView?.dropPhrase(id)
     }
 
+    /// The dictation ended or failed: its waiting phrases are forgotten and
+    /// the next dictation binds to the note shown then.
     public func dropAllPhrases() {
         detached.removeAll()
         textView?.dropAllPhrases()
+        dictationNote = nil
+    }
+
+    /// Gives up keyboard focus (the setup card covers the editor).
+    public func resignFocus() {
+        guard let textView, textView.window?.firstResponder === textView else { return }
+        textView.window?.makeFirstResponder(nil)
     }
 
     /// "Mark moment" in a meeting note.
-    public func insertMarker(time: TimeInterval) { textView?.insertMarker(time: time) }
+    /// Adds the marker when `noteID` is the open note; returns false
+    /// otherwise (the caller writes to that note through the store).
+    @discardableResult
+    public func insertMarker(time: TimeInterval, in noteID: UUID) -> Bool {
+        guard let textView, note?.id == noteID, textView.isEditable else { return false }
+        textView.insertMarker(time: time)
+        return true
+    }
+
+    /// A time chip for a transcript segment, after the caret's line.
+    @discardableResult
+    public func insertTranscriptAnchor(segmentID: UUID, in noteID: UUID) -> Bool {
+        guard let textView, note?.id == noteID, textView.isEditable else { return false }
+        if let note, segmentTimes[segmentID] == nil,
+           let segment = NoteSearch.transcript(note.recording?.transcriptJSON).first(where: { $0.id == segmentID }) {
+            segmentTimes[segmentID] = segment.start
+            let times = segmentTimes
+            textView.mappingContext.segmentTime = { times[$0] }
+        }
+        textView.insertAttachment(.transcriptAnchor(segmentID: segmentID))
+        return true
+    }
+
+    /// Called with the recording time of a clicked time chip or marker
+    /// (the meeting player seeks there).
+    public var onTimeChipClick: ((TimeInterval) -> Void)? {
+        didSet { textView?.onTimeChipClick = onTimeChipClick }
+    }
+}
+
+extension NoteEditorController: DictationInsertionTarget, MeetingNoteTarget {
+    /// The open note; a fixed nil UUID while none is open (dictation is only
+    /// offered with a note open).
+    /// While dictating: the note the dictation writes into (it may no
+    /// longer be the one shown). Otherwise the open note.
+    public var noteID: UUID {
+        dictationNote?.id ?? note?.id ?? UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    }
 }
 
 /// The text style menu's choices.

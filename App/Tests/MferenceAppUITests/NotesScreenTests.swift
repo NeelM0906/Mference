@@ -239,6 +239,18 @@ enum NotesFixtures {
         #expect(speech.calls.contains(.deleteRecordings(first.id)))
     }
 
+    @Test func emptyDeletesOnlyTheNotesItAskedAbout() async throws {
+        let model = try NotesFixtures.model()
+        model.requestEmptyTrash()
+        #expect(model.pendingDeletion == .trash(count: 2))
+        // Another note is deleted while the question is open.
+        let lisbon = try #require(model.selectedNote)
+        model.delete(lisbon)
+        await model.confirmDeletion()
+        #expect(model.counts.recentlyDeleted == 1)
+        #expect(try model.store.note(id: lisbon.id)?.deletedAt != nil)
+    }
+
     @Test func deletingTheSelectedNoteForeverSelectsAnother() async throws {
         let model = try NotesFixtures.model()
         model.scope = .recentlyDeleted
@@ -332,7 +344,7 @@ enum NotesFixtures {
     }
 
     @Test func everySymbolTheScreenNamesExists() {
-        for name in ["checklist", "checkmark", "doc", "folder", "magnifyingglass", "mic", "note.text", "paperclip", "pin", "pin.fill", "plus", "square.and.arrow.up", "square.and.pencil", "text.document", "trash", "waveform", "xmark.circle.fill"] {
+        for name in ["checklist", "checkmark", "doc", "folder", "magnifyingglass", "mic", "mic.fill", "note.text", "paperclip", "pin", "pin.fill", "plus", "square.and.arrow.up", "square.and.pencil", "text.document", "trash", "waveform", "xmark.circle.fill"] {
             #expect(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil, "\(name)")
         }
     }

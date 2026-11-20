@@ -18,6 +18,29 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     /// Called after every change to the text (typing, styles, ticks).
     var onTextChange: (() -> Void)?
+    /// Called when the view gains or loses keyboard focus.
+    var onFocusChange: ((Bool) -> Void)?
+    /// Esc: returns true when it was handled (dictation stopped).
+    var onCancel: (() -> Bool)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocusChange?(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocusChange?(false) }
+        return resigned
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if onCancel?() == true { return }
+        super.cancelOperation(sender)
+    }
+    /// Called with the time of a clicked transcript chip or marker.
+    var onTimeChipClick: ((TimeInterval) -> Void)?
     /// Stores pasted or dropped image data as an attachment; returns its id.
     var importImage: ((Data, String) -> String?)?
     /// Copies a dropped or pasted image or audio file into the note; returns
@@ -133,6 +156,103 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         let end = (string as NSString).length
         setSelectedRange(NSRange(location: end, length: 0))
         typingAttributes = typingAttributesForCaret()
+    }
+
+    /// Shows a newer version of the same note (written elsewhere), keeping
+    /// the caret, the selection and pending phrases where they were relative
+    /// to the text around them.
+    func reload(_ document: NoteDocument) {
+        // A copy: `string` is the live storage and changes with the load.
+        let old = NSString(string: string)
+        let oldBlocks = self.document.blocks
+        let selections = selectedRanges.map(\.rangeValue)
+        let phrases = pendingPhrases
+        let lastStyle = emptyLastLineStyle
+        load(document)
+        if (string as NSString).length == 0 { emptyLastLineStyle = lastStyle }
+        let new = NSString(string: string)
+        // Block by block: writes in several places (a title and a marker, a
+        // summary and a marker) leave every unchanged block's positions with
+        // it. The text-level map is the fallback when lines and blocks differ.
+        let move = Self.blockPositionMap(old: old, oldBlocks: oldBlocks, new: new, newBlocks: self.document.blocks)
+            ?? Self.positionMap(from: old, to: new)
+        pendingPhrases = phrases.map { ($0.id, move($0.location)) }
+        let mapped = selections.map { range -> NSValue in
+            let start = move(range.location)
+            let end = move(NSMaxRange(range))
+            return NSValue(range: NSRange(location: start, length: max(0, end - start)))
+        }
+        setSelectedRanges(mapped, affinity: .downstream, stillSelecting: false)
+        needsDisplay = true
+    }
+
+    /// Start and length (without the line break) of each line.
+    static func lines(_ text: NSString) -> [(start: Int, length: Int)] {
+        var result: [(Int, Int)] = []
+        var location = 0
+        repeat {
+            let line = text.lineRange(for: NSRange(location: location, length: 0))
+            var length = line.length
+            while length > 0, NoteTextMapping.isLineTerminator(text.character(at: line.location + length - 1)) { length -= 1 }
+            result.append((line.location, length))
+            location = NSMaxRange(line)
+        } while location < text.length
+        if text.length > 0, NoteTextMapping.isLineTerminator(text.character(at: text.length - 1)) {
+            result.append((text.length, 0))
+        }
+        return result
+    }
+
+    /// Maps positions through the block alignment of two versions of a
+    /// note: a position in a block both have keeps its offset in it; one in
+    /// a block replaced in place keeps its offset in the replacement; one in
+    /// a removed block goes to the start of the next block both have. Nil
+    /// when a version's lines and blocks don't line up one to one.
+    static func blockPositionMap(old: NSString, oldBlocks: [NoteDocument.Block],
+                                 new: NSString, newBlocks: [NoteDocument.Block]) -> ((Int) -> Int)? {
+        let oldLines = lines(old), newLines = lines(new)
+        guard oldLines.count == oldBlocks.count, newLines.count == newBlocks.count else { return nil }
+        let kept = NoteDocumentMerge.matches(oldBlocks, newBlocks)
+        let keptOld = kept.keys.sorted()
+        return { position in
+            guard let index = oldLines.lastIndex(where: { $0.start <= position }) else { return 0 }
+            let offset = position - oldLines[index].start
+            func at(_ newIndex: Int, offset: Int) -> Int {
+                guard newIndex < newLines.count else { return new.length }
+                return newLines[newIndex].start + min(offset, newLines[newIndex].length)
+            }
+            if let newIndex = kept[index] { return at(newIndex, offset: offset) }
+            let previousOld = keptOld.last { $0 < index }
+            let nextOld = keptOld.first { $0 > index }
+            let previousNew = previousOld.flatMap { kept[$0] } ?? -1
+            let nextNew = nextOld.flatMap { kept[$0] } ?? newLines.count
+            let span = (previousOld ?? -1, nextOld ?? oldLines.count)
+            if span.1 - span.0 == nextNew - previousNew {
+                // Replaced in place, one for one.
+                return at(previousNew + (index - span.0), offset: offset)
+            }
+            return at(nextNew, offset: 0)
+        }
+    }
+
+    /// Maps positions in `old` to `new` around the one changed stretch
+    /// between their common start and common end.
+    static func positionMap(from old: NSString, to new: NSString) -> (Int) -> Int {
+        let oldLength = old.length, newLength = new.length
+        var prefix = 0
+        while prefix < oldLength, prefix < newLength, old.character(at: prefix) == new.character(at: prefix) { prefix += 1 }
+        var suffix = 0
+        while suffix < oldLength - prefix, suffix < newLength - prefix,
+              old.character(at: oldLength - 1 - suffix) == new.character(at: newLength - 1 - suffix) { suffix += 1 }
+        return { position in
+            // After the changed stretch (or at a pure insertion point): moves
+            // with the text after it.
+            if position >= oldLength - suffix, position >= prefix {
+                return min(newLength, max(0, position + newLength - oldLength))
+            }
+            // Before it: stays. Inside it: the start of what replaced it.
+            return min(position, prefix, newLength)
+        }
     }
 
     /// The document as it is now (pending dictation markers left out).
@@ -502,7 +622,29 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
             toggleDone(lineAt: location)
             return
         }
+        if let time = chipTime(at: point) {
+            onTimeChipClick?(time)
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    /// The time of a transcript chip or marker under `point`, if any.
+    func chipTime(at point: CGPoint) -> TimeInterval? {
+        guard onTimeChipClick != nil, let storage = textStorage, storage.length > 0 else { return nil }
+        let index = characterIndexForInsertion(at: point)
+        for candidate in [index, index - 1] where candidate >= 0 && candidate < storage.length {
+            guard let attachment = storage.attribute(.attachment, at: candidate, effectiveRange: nil) as? NoteBlockAttachment,
+                  let rect = firstRect(forCharacterRange: NSRange(location: candidate, length: 1), actualRange: nil) as CGRect?,
+                  let window, convert(window.convertFromScreen(rect), from: nil).insetBy(dx: -NoteEditorMetrics.checkHitSlop, dy: -NoteEditorMetrics.checkHitSlop).contains(point)
+            else { continue }
+            switch attachment.block {
+            case .transcriptAnchor: return attachment.time
+            case .marker(let time): return time
+            default: continue
+            }
+        }
+        return nil
     }
 
     // MARK: Paste and copy
@@ -729,6 +871,21 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
                 return false
             }
         }
+    }
+
+    /// Selects and scrolls to the time chip of `segmentID` (a ⌘K transcript hit).
+    func reveal(segmentID: UUID) {
+        guard let storage = textStorage else { return }
+        var found: NSRange?
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if let attachment = value as? NoteBlockAttachment, attachment.block == .transcriptAnchor(segmentID: segmentID) {
+                found = range
+                stop.pointee = true
+            }
+        }
+        guard let found else { return }
+        setSelectedRange(NSRange(location: found.location, length: 0))
+        scrollRangeToVisible(found)
     }
 
     // MARK: Meeting markers

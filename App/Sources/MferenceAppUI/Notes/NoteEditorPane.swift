@@ -8,9 +8,26 @@ import UniformTypeIdentifiers
 /// ("Saved · Personal · 86 words").
 struct NoteEditorPane: View {
     @Bindable var model: NotesModel
+    @Environment(VoiceModels.self) private var voice: VoiceModels?
     @State private var importingAttachment = false
 
     var body: some View {
+        content
+            // First use of a voice feature: the setup card takes the editor
+            // area until the model is ready or the person goes back (board 7).
+            .overlay {
+                if let voice, voice.setup.pendingAction != nil {
+                    SpeechSetupCard(model: voice.setup)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(MFColor.surface)
+                        // The hidden note must not take typing or Esc.
+                        .onAppear { model.editor.resignFocus() }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if let note = model.selectedNote {
             VStack(spacing: 0) {
                 toolbar(note)
@@ -20,6 +37,14 @@ struct NoteEditorPane: View {
                 NoteEditorView(controller: model.editor,
                                dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar))
                     .accessibilityLabel("Note text")
+                    // Dictation's bar sits over the bottom of the note (board 2).
+                    .overlay(alignment: .bottom) {
+                        if let voice, voice.dictation.isActive || voice.dictation.error != nil {
+                            DictationBar(controller: voice.dictation)
+                                .padding(.horizontal, MFSpacing.l)
+                                .padding(.bottom, MFSpacing.m)
+                        }
+                    }
                 Divider().overlay(MFColor.chromeDivider)
                 footer(note)
             }
@@ -95,8 +120,9 @@ struct NoteEditorPane: View {
                 model.voice.toggleDictation?(model.editor)
             } label: {
                 HStack(spacing: MFSpacing.s - MFSpacing.xxs) {
-                    Image(systemName: "mic")
-                    Text("Dictate")
+                    let dictating = model.voice.isDictating?(note.id) == true
+                    Image(systemName: dictating ? "mic.fill" : "mic")
+                    Text(dictating ? "Dictating" : "Dictate")
                     MFKeycap("⇧⌘D")
                 }
             }
@@ -110,15 +136,28 @@ struct NoteEditorPane: View {
 
             iconButton(note.isPinned ? "pin.fill" : "pin", label: note.isPinned ? "Unpin" : "Pin",
                        help: note.isPinned ? "Unpin" : "Pin") { model.togglePin(note) }
-            ShareLink(item: NoteShareItem(editor: model.editor), preview: SharePreview(model.title(of: note))) {
+            Menu {
+                // The Markdown is made only when something is shared.
+                ShareLink("Share…", item: NoteShareItem(editor: model.editor),
+                          preview: SharePreview(model.title(of: note)))
+                Divider()
+                Section("Export as") {
+                    ForEach(NoteExportFormat.allCases, id: \.self) { format in
+                        Button(format.label) { model.export(note, as: format) }
+                    }
+                }
+            } label: {
                 Image(systemName: "square.and.arrow.up")
                     .font(.system(size: NotesMetrics.toolbarGlyph))
                     .foregroundStyle(MFColor.secondary)
                     .frame(width: NotesMetrics.iconButton, height: NotesMetrics.iconButton)
             }
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
             .buttonStyle(.plain)
-            .accessibilityLabel("Share")
-            .help("Share")
+            .frame(width: NotesMetrics.iconButton, height: NotesMetrics.iconButton)
+            .accessibilityLabel("Share or export")
+            .help("Share or export")
             iconButton("trash", label: "Delete", help: "Delete") { model.delete(note) }
         }
         .disabled(!editable)

@@ -18,13 +18,36 @@ public struct NotesVoiceActions {
     /// N3's voice toolbar (Transcribe file, Record meeting with its popover),
     /// shown in the shell bar in place of Notes' own two buttons.
     public var toolbar: (() -> AnyView)?
+    /// Whether dictation is going into the note (the Dictate button shows
+    /// "Dictating").
+    public var isDictating: ((UUID) -> Bool)?
+    /// Stops dictation and returns once its last phrase is in (switching
+    /// notes; the editor keeps that phrase with the note it began in).
+    public var stopDictation: (() async -> Void)?
+    /// The note editor gained (the controller) or lost (nil) keyboard focus:
+    /// ⇧⌘D dictates into the focused one.
+    public var editorFocusChanged: ((NoteEditorController?) -> Void)?
+    /// Esc in the editor; returns true when it handled it (a dictation
+    /// stopped). Otherwise Esc is the text view's own.
+    public var escape: (() -> Bool)?
+    /// Audio or video files dropped on Notes: queued for transcription.
+    public var transcribe: (([URL]) -> Bool)?
 
+    // N1 defines and calls these; N3 sets them (`VoiceModels.connect(notes:)`).
     public init(transcribeFile: (() -> Void)? = nil, recordMeeting: (() -> Void)? = nil,
-                toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil) {
+                toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil,
+                isDictating: ((UUID) -> Bool)? = nil, stopDictation: (() async -> Void)? = nil,
+                editorFocusChanged: ((NoteEditorController?) -> Void)? = nil, escape: (() -> Bool)? = nil,
+                transcribe: (([URL]) -> Bool)? = nil) {
         self.transcribeFile = transcribeFile
         self.recordMeeting = recordMeeting
         self.toggleDictation = toggleDictation
         self.toolbar = toolbar
+        self.isDictating = isDictating
+        self.stopDictation = stopDictation
+        self.editorFocusChanged = editorFocusChanged
+        self.escape = escape
+        self.transcribe = transcribe
     }
 }
 
@@ -103,7 +126,10 @@ public final class NotesModel {
         var deletedAt: Date?
     }
 
-    public init(store: NoteStore, speech: any SpeechServicing, searchDelay: Duration = .milliseconds(150),
+    /// The pause in typing before a search runs.
+    public static let searchPause: Duration = .milliseconds(150)
+
+    public init(store: NoteStore, speech: any SpeechServicing, searchDelay: Duration = NotesModel.searchPause,
                 now: @escaping () -> Date = Date.init) {
         self.store = store
         self.editor = NoteEditorController(store: store)
@@ -115,6 +141,13 @@ public final class NotesModel {
                 self?.speechStatus = status
             }
         }
+        // The editor publishes itself to the voice side when it gains or
+        // loses focus, and offers Esc to it first.
+        let editor = self.editor
+        editor.onFocusChange = { [weak self, weak editor] focused in
+            self?.voice.editorFocusChanged?(focused ? editor : nil)
+        }
+        editor.onCancel = { [weak self] in self?.voice.escape?() ?? false }
     }
 
     public convenience init(services: AppServices) {
@@ -155,6 +188,11 @@ public final class NotesModel {
                 .map { ListSection(id: "\($0.group)", title: $0.title, items: $0.items) }
         }
         cachedList = (key, notes, sections)
+        // Forget rows of notes no longer shown or gone.
+        if rowCache.count > notes.count * 2 + 64 {
+            let shown = Set(notes.map(\.id))
+            rowCache = rowCache.filter { shown.contains($0.key) }
+        }
         return (notes, sections)
     }
 
@@ -264,6 +302,14 @@ public final class NotesModel {
     // MARK: Selection
 
     public func select(_ note: Note?) {
+        if note?.id != selectedNoteID {
+            revealedSegmentID = nil
+            // Dictating into the note being left: stop; its last phrase still
+            // lands there (the editor keeps it with its note).
+            if let current = selectedNoteID, voice.isDictating?(current) == true, let stop = voice.stopDictation {
+                Task { await stop() }
+            }
+        }
         selectedNoteID = note?.id
         editor.open(note)
     }
@@ -274,6 +320,17 @@ public final class NotesModel {
         let rows = sections.flatMap(\.items)
         if let selectedNoteID, rows.contains(where: { $0.id == selectedNoteID }) { return }
         select(rows.first)
+    }
+
+    /// Shows a note by id (the recording timer chip, Open note in the file
+    /// queue, a started meeting): All notes, search cleared, that note.
+    public func open(noteID: UUID) {
+        guard let note = try? store.note(id: noteID) else { return }
+        query = ""
+        commitQuery()
+        let target: NoteScope = note.deletedAt != nil ? .recentlyDeleted : .all
+        if scope != target, !notes.contains(where: { $0.id == noteID }) { scope = target }
+        select(note)
     }
 
     /// ↑ / ↓ in the list.
@@ -353,10 +410,15 @@ public final class NotesModel {
 
     /// Asks before emptying Recently deleted.
     public func requestEmptyTrash() {
-        let count = counts.recentlyDeleted
-        guard count > 0 else { return }
-        pendingDeletion = .trash(count: count)
+        let ids = ((try? store.notes(in: .recentlyDeleted)) ?? []).map(\.id)
+        guard !ids.isEmpty else { return }
+        pendingTrashIDs = ids
+        pendingDeletion = .trash(count: ids.count)
     }
+
+    /// The notes Empty asked about: only those are deleted, even if more
+    /// arrive in Recently deleted while the question is open.
+    @ObservationIgnored private var pendingTrashIDs: [UUID] = []
 
     public func cancelDeletion() { pendingDeletion = nil }
 
@@ -368,7 +430,14 @@ public final class NotesModel {
         case .note(let id, _):
             if let note = try? store.note(id: id) { await deletePermanently(note) }
         case .trash:
-            await emptyTrash()
+            var failed = 0
+            for id in pendingTrashIDs {
+                guard let note = try? store.note(id: id), note.deletedAt != nil else { continue }
+                do { try await store.deletePermanently(note) } catch { failed += 1 }
+            }
+            pendingTrashIDs = []
+            if failed > 0 { errorMessage = Self.message(for: NoteStoreError.someNotDeleted(failed)) }
+            selectFirstIfNeeded()
         }
     }
 
@@ -447,6 +516,39 @@ public final class NotesModel {
             }
         }
         return moved
+    }
+
+    // MARK: Search (⌘K) and export
+
+    /// The transcript line a ⌘K hit asked to show; the meeting layout (N3)
+    /// scrolls to it, and the editor scrolls to its time chip.
+    public private(set) var revealedSegmentID: UUID?
+
+    /// ⌘K's Notes results for `query` (title, then body, then transcript lines).
+    public func searchHits(_ query: String, limit: Int = 8) -> [NoteSearchHit] {
+        (try? store.searchHits(query, limit: limit)) ?? []
+    }
+
+    /// Opens a ⌘K hit: All notes, that note, and its transcript line.
+    public func open(_ hit: NoteSearchHit) {
+        query = ""
+        commitQuery()
+        scope = .all
+        guard let note = try? store.note(id: hit.noteID) else { return }
+        select(note)
+        if case .transcript(let segment, _) = hit.match {
+            revealedSegmentID = segment
+            editor.reveal(segmentID: segment)
+        } else {
+            revealedSegmentID = nil
+        }
+    }
+
+    /// Asks where, then exports `note` (Markdown with an attachments folder,
+    /// plain text, or PDF).
+    public func export(_ note: Note, as format: NoteExportFormat) {
+        if note.id == selectedNoteID { editor.saveNow(force: true) }
+        if let message = NoteExporter.export(note, store: store, format: format) { errorMessage = message }
     }
 
     // MARK: Errors
