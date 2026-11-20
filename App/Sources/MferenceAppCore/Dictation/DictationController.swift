@@ -217,12 +217,14 @@ public final class DictationController {
     }
 
     private func sessionEnded() {
-        // A phrase that never finished (the stream ended early) loses its marker.
-        target?.dropAllPhrases()
         finish(with: error)
     }
 
     private func finish(with failure: SpeechError?) {
+        // A phrase that never finished loses its marker, and the editor's
+        // binding to its note ends, on every way out (a start that failed or
+        // was stopped too).
+        target?.dropAllPhrases()
         error = failure
         phase = .idle
         level = 0

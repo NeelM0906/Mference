@@ -128,6 +128,18 @@ final class InboxTarget: DictationInsertionTarget {
         #expect(dictation.pendingPhrases.isEmpty)
     }
 
+    @Test func aStartThatFailsReleasesTheEditor() async {
+        // Codex review on #251: the editor was bound at the start; a refused
+        // microphone must unbind it, or the next dictation in another note stops.
+        let inbox = Inbox()
+        let dictation = DictationController(speech: FakeSpeechService(),
+                                            permissions: FakePermissionBroker(answers: [.microphone: .denied]),
+                                            preferences: preferences())
+        await dictation.start(in: InboxTarget(inbox))
+        #expect(dictation.error == .permissionDenied(.microphone))
+        #expect(inbox.dropAllCount == 1, "the editor's binding ends")
+    }
+
     @Test func aFailureKeepsTheOtherPhrasesMarkers() async throws {
         // Codex review on #251: one phrase failing must not send the others
         // to the caret.
