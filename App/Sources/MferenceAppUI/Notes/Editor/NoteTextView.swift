@@ -18,6 +18,8 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     /// Called after every change to the text (typing, styles, ticks).
     var onTextChange: (() -> Void)?
+    /// Called with the time of a clicked transcript chip or marker.
+    var onTimeChipClick: ((TimeInterval) -> Void)?
     /// Stores pasted or dropped image data as an attachment; returns its id.
     var importImage: ((Data, String) -> String?)?
     /// Copies a dropped or pasted image or audio file into the note; returns
@@ -476,7 +478,29 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
             toggleDone(lineAt: location)
             return
         }
+        if let time = chipTime(at: point) {
+            onTimeChipClick?(time)
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    /// The time of a transcript chip or marker under `point`, if any.
+    func chipTime(at point: CGPoint) -> TimeInterval? {
+        guard onTimeChipClick != nil, let storage = textStorage, storage.length > 0 else { return nil }
+        let index = characterIndexForInsertion(at: point)
+        for candidate in [index, index - 1] where candidate >= 0 && candidate < storage.length {
+            guard let attachment = storage.attribute(.attachment, at: candidate, effectiveRange: nil) as? NoteBlockAttachment,
+                  let rect = firstRect(forCharacterRange: NSRange(location: candidate, length: 1), actualRange: nil) as CGRect?,
+                  let window, convert(window.convertFromScreen(rect), from: nil).insetBy(dx: -NoteEditorMetrics.checkHitSlop, dy: -NoteEditorMetrics.checkHitSlop).contains(point)
+            else { continue }
+            switch attachment.block {
+            case .transcriptAnchor: return attachment.time
+            case .marker(let time): return time
+            default: continue
+            }
+        }
+        return nil
     }
 
     // MARK: Paste and copy

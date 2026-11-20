@@ -80,6 +80,7 @@ public final class NoteEditorController {
         if let old = self.textView, old !== textView { saveNow(force: true) }
         self.textView = textView
         textView.onTextChange = { [weak self] in self?.textDidChange() }
+        textView.onTimeChipClick = onTimeChipClick
         textView.importImage = { [weak self] data, ext in
             guard let self, let id = note?.id else { return nil }
             return try? store.attachments.write(data, fileExtension: ext, into: id)
@@ -268,6 +269,29 @@ public final class NoteEditorController {
 
     /// "Mark moment" in a meeting note.
     public func insertMarker(time: TimeInterval) { textView?.insertMarker(time: time) }
+
+    /// A time chip for a transcript segment, after the caret's line.
+    public func insertTranscriptAnchor(segmentID: UUID) {
+        if let note, segmentTimes[segmentID] == nil,
+           let segment = NoteSearch.transcript(note.recording?.transcriptJSON).first(where: { $0.id == segmentID }) {
+            segmentTimes[segmentID] = segment.start
+            let times = segmentTimes
+            textView?.mappingContext.segmentTime = { times[$0] }
+        }
+        textView?.insertAttachment(.transcriptAnchor(segmentID: segmentID))
+    }
+
+    /// Called with the recording time of a clicked time chip or marker
+    /// (the meeting player seeks there).
+    public var onTimeChipClick: ((TimeInterval) -> Void)? {
+        didSet { textView?.onTimeChipClick = onTimeChipClick }
+    }
+}
+
+extension NoteEditorController: DictationInsertionTarget, MeetingNoteTarget {
+    /// The open note; a fixed nil UUID while none is open (dictation is only
+    /// offered with a note open).
+    public var noteID: UUID { note?.id ?? UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) }
 }
 
 /// The text style menu's choices.
