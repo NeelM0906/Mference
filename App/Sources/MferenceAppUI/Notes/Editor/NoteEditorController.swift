@@ -18,16 +18,22 @@ public final class NoteEditorController {
     @ObservationIgnored private var autosave: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var segmentTimes: [UUID: TimeInterval] = [:]
-    /// Phrases still being transcribed when their note was switched away
-    /// from: each finishes into an off-screen copy of that note (spec 4.2).
+    /// Phrases still being transcribed when their note left the editor
+    /// (another note opened, the view went away or was replaced). They are
+    /// handed back when the note is shown again; one that finishes before
+    /// that lands in the note's stored body, never in a stale copy (spec 4.2).
     @ObservationIgnored private var detached: [UUID: DetachedNote] = [:]
 
     private final class DetachedNote {
         let note: Note
+        /// Off-screen editor holding the phrases' places in `snapshot`.
         let view: NoteTextView
-        init(note: Note, view: NoteTextView) {
+        /// The stored body the places refer to.
+        var snapshot: NoteDocument
+        init(note: Note, view: NoteTextView, snapshot: NoteDocument) {
             self.note = note
             self.view = view
+            self.snapshot = snapshot
         }
     }
 
@@ -64,7 +70,7 @@ public final class NoteEditorController {
     public func open(_ note: Note?) {
         guard note?.id != self.note?.id || note == nil else { return }
         saveNow(force: true)
-        detachPendingPhrases()
+        detachPendingPhrases(from: textView)
         self.note = note
         loadIntoView()
     }
@@ -77,7 +83,10 @@ public final class NoteEditorController {
     }
 
     func attach(_ textView: NoteTextView) {
-        if let old = self.textView, old !== textView { saveNow(force: true) }
+        if let old = self.textView, old !== textView {
+            saveNow(force: true)
+            detachPendingPhrases(from: old)
+        }
         self.textView = textView
         textView.onTextChange = { [weak self] in self?.textDidChange() }
         textView.importImage = { [weak self] data, ext in
@@ -96,24 +105,55 @@ public final class NoteEditorController {
         loadIntoView()
     }
 
-    /// The view is going away (leaving Notes): save what it holds now.
+    /// The view is going away (leaving Notes): save what it holds now and
+    /// keep its waiting phrases for their note.
     func detach(_ textView: NoteTextView) {
         guard self.textView === textView else { return }
         saveNow(force: true)
+        detachPendingPhrases(from: textView)
+        self.textView = nil
     }
 
-    /// Moves phrases still waiting in the open note to an off-screen copy
-    /// of it, so they land in the note they began in.
-    private func detachPendingPhrases() {
-        guard let textView, let note, !textView.pendingPhrases.isEmpty else { return }
+    /// Moves the phrases waiting in `view` (the open note, just saved) to an
+    /// off-screen copy of that note's stored body.
+    private func detachPendingPhrases(from view: NoteTextView?) {
+        guard let view, let note, !view.pendingPhrases.isEmpty else { return }
+        let stored = store.document(of: note)
         let holder = NoteTextView(usingTextLayoutManager: true)
         holder.configure()
-        holder.mappingContext = textView.mappingContext
-        holder.load(store.document(of: note))
-        holder.adoptPendingPhrases(textView.pendingPhrases)
-        let detachedNote = DetachedNote(note: note, view: holder)
-        for phrase in textView.pendingPhrases { detached[phrase.id] = detachedNote }
-        textView.dropAllPhrases()
+        holder.mappingContext = view.mappingContext
+        holder.load(stored)
+        holder.adoptPendingPhrases(view.pendingPhrases)
+        let detachedNote = DetachedNote(note: note, view: holder, snapshot: stored)
+        for phrase in view.pendingPhrases { detached[phrase.id] = detachedNote }
+        view.dropAllPhrases()
+    }
+
+    /// The open note's phrases that were waiting off screen come back to the
+    /// live editor, at their places if the body is unchanged, else at the end.
+    private func reattachPendingPhrases(stored: NoteDocument) {
+        guard let textView, let note else { return }
+        let mine = detached.filter { $0.value.note.id == note.id }
+        guard !mine.isEmpty else { return }
+        var phrases = textView.pendingPhrases
+        var seen = Set<ObjectIdentifier>()
+        for holder in mine.values where seen.insert(ObjectIdentifier(holder)).inserted {
+            let end = (textView.string as NSString).length
+            for phrase in holder.view.pendingPhrases where mine[phrase.id] != nil && !phrases.contains(where: { $0.id == phrase.id }) {
+                phrases.append((phrase.id, holder.snapshot == stored ? phrase.location : end))
+            }
+        }
+        for id in mine.keys { detached.removeValue(forKey: id) }
+        textView.adoptPendingPhrases(phrases)
+    }
+
+    /// The editor's one-line explanation for a note it opens read-only.
+    static func notice(for reason: NoteDocument.ReadOnlyReason?) -> String {
+        switch reason {
+        case .newerVersion: "This note was made by a newer version of Mference and opens read-only."
+        case .damaged: "Part of this note couldn't be read, so it opens read-only. Nothing in it was deleted."
+        case nil: ""
+        }
     }
 
     static func importBlock(_ url: URL, into noteID: UUID, attachments: NoteAttachments) -> NoteDocument.Block? {
@@ -146,6 +186,8 @@ public final class NoteEditorController {
         textView.isEditable = note != nil && note?.deletedAt == nil && document.readOnlyReason == nil
         textView.noteID = note?.id
         textView.load(document)
+        textView.notice = Self.notice(for: document.readOnlyReason)
+        reattachPendingPhrases(stored: document)
         readOnlyReason = document.readOnlyReason
         wordCount = textView.document.wordCount
         saveState = .saved
@@ -232,9 +274,25 @@ public final class NoteEditorController {
     /// note as dictated.
     public func finishPhrase(_ id: UUID, text: String) {
         if let holder = detached.removeValue(forKey: id) {
+            // Insert into what is stored now, never into a stale copy: if the
+            // note changed since (a summary, another window), the phrase goes
+            // at the end of its text.
+            let stored = store.document(of: holder.note)
+            if stored != holder.snapshot {
+                let waiting = holder.view.pendingPhrases
+                holder.view.load(stored)
+                let end = (holder.view.string as NSString).length
+                holder.view.adoptPendingPhrases(waiting.map { ($0.id, end) })
+                holder.snapshot = stored
+            }
             guard holder.view.finishPhrase(id, text: text) else { return }
-            try? store.save(holder.view.document, to: holder.note)
-            try? store.markDictated(holder.note)
+            do {
+                try store.save(holder.view.document, to: holder.note)
+                holder.snapshot = store.document(of: holder.note)
+                try store.markDictated(holder.note)
+            } catch {
+                saveState = .failed(String(describing: error))
+            }
             return
         }
         guard let textView, let note else { return }

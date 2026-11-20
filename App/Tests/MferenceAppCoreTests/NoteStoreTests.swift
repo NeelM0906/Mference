@@ -34,6 +34,13 @@ import Testing
         #expect(note.kind == .note)
     }
 
+    @Test func aNoteCanBeCreatedWithTheIDItsRecordingsUse() throws {
+        let id = UUID()
+        let note = try store.createNote(id: id, kind: .meeting, title: "Meeting 19 Nov at 10:02", now: t0)
+        #expect(note.id == id)
+        #expect(try store.note(id: id)?.title == "Meeting 19 Nov at 10:02")
+    }
+
     @Test func savingABodyMovesTheTitleSearchTextAndEditTime() throws {
         let note = try store.createNote(now: t0)
         let body = NoteDocument(blocks: [
