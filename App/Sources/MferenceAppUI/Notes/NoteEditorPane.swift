@@ -15,11 +15,8 @@ struct NoteEditorPane: View {
             VStack(spacing: 0) {
                 toolbar(note)
                 Divider().overlay(MFColor.chromeDivider)
-                if note.deletedAt != nil {
-                    deletedBanner(note)
-                } else if let reason = model.editor.readOnlyReason {
-                    readOnlyBanner(reason)
-                }
+                // A newer or damaged body explains itself in the editor.
+                if note.deletedAt != nil { deletedBanner(note) }
                 NoteEditorView(controller: model.editor,
                                dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar))
                     .accessibilityLabel("Note text")
@@ -154,19 +151,6 @@ struct NoteEditorPane: View {
         .padding(.horizontal, MFSpacing.l)
         .padding(.vertical, MFSpacing.s)
         .background(MFColor.fillSubtle)
-    }
-
-    private func readOnlyBanner(_ reason: NoteDocument.ReadOnlyReason) -> some View {
-        Text(reason == .newerVersion
-             ? "This note was saved by a newer version of Mference. You can read it here; update Mference to edit it."
-             : "Part of this note couldn't be read, so it can't be changed here. Nothing in it has been deleted.")
-            .font(MFFont.callout)
-            .foregroundStyle(MFColor.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, MFSpacing.l)
-            .padding(.vertical, MFSpacing.s)
-            .background(MFColor.previewFill)
-            .accessibilityAddTraits(.isStaticText)
     }
 
     // MARK: Footer
