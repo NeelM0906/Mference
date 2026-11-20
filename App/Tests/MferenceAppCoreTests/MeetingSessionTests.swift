@@ -391,6 +391,102 @@ import Testing
         #expect(speech.calls.contains(.pause) && speech.calls.contains(.resume))
     }
 
+    @Test func markMomentGoesToTheOpenEditorElseTheStore() async throws {
+        final class Target: MeetingNoteTarget {
+            var noteID: UUID
+            var shows: Bool
+            var inserted: [TimeInterval] = []
+            var onTimeChipClick: ((TimeInterval) -> Void)?
+            init(noteID: UUID, shows: Bool) { self.noteID = noteID; self.shows = shows }
+            func insertMarker(time: TimeInterval, in noteID: UUID) -> Bool {
+                guard shows, noteID == self.noteID else { return false }
+                inserted.append(time)
+                return true
+            }
+            func insertTranscriptAnchor(segmentID: UUID, in noteID: UUID) -> Bool { false }
+            func reveal(segmentID: UUID) {}
+        }
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions())
+        let target = Target(noteID: noteID, shows: true)
+        h.session.noteTarget = target
+        speech.setMeetingTime(30)
+        await h.session.markMoment()
+        #expect(target.inserted == [30])
+        #expect(h.writer.body(of: noteID).markers.isEmpty)
+        // Another note is shown: the marker goes to the meeting's note through the store.
+        target.shows = false
+        speech.setMeetingTime(45)
+        await h.session.markMoment()
+        #expect(target.inserted == [30])
+        #expect(h.writer.body(of: noteID).markers == [45])
+    }
+
+    @Test func aSummaryAskedForWhileRecordingRunsWhenTheMeetingEnds() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let h = try harness(speech)
+        var summarize: Bool?
+        h.session.afterMeeting = { summarize = $1 }
+        let noteID = try await h.session.start(MeetingStartOptions(summaryWhenStopped: false))
+        // Asking during the meeting leaves it pending until the transcript is in.
+        h.recording(noteID)?.summaryState = .pending
+        await h.session.stop()
+        await h.session.waitUntilFinished()
+        #expect(summarize == true)
+    }
+
+    @Test func theTranscriptCacheIsBounded() async throws {
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        for _ in 0..<(MeetingSession.transcriptCacheLimit + 10) {
+            let id = UUID()
+            try h.writer.createNote(id: id, kind: .file, title: "f", createdAt: .now)
+            let record = NoteRecording()
+            h.context.insert(record)
+            h.note(id)?.recording = record
+            #expect(h.session.transcript(for: id) != nil)
+        }
+        #expect(h.session.cachedTranscriptCount == MeetingSession.transcriptCacheLimit)
+    }
+
+    // MARK: Quit
+
+    @Test func quitEndsTheMeetingFastAndLeavesItsSummaryForNextLaunch() async throws {
+        let segment = Self.segment("Before quitting.", 0, 2)
+        let speech = FakeSpeechService(meeting: FakeSpeechService.MeetingScript(
+            live: [.segment(segment)], result: TranscriptResult(segments: [segment], speakers: [.you], duration: 2)))
+        let h = try harness(speech)
+        var after = 0
+        h.session.afterMeeting = { _, _ in after += 1 }
+        let noteID = try await h.session.start(MeetingStartOptions(summaryWhenStopped: true))
+        await h.session.stopForQuit()
+        #expect(!h.session.isActive)
+        // The speech service's quit path, never the normal stop.
+        #expect(speech.calls.contains(.shutdown))
+        #expect(!speech.calls.contains(.stopMeeting))
+        let record = try #require(h.recording(noteID))
+        #expect(record.endedAt != nil && record.transcriptionState == .done)
+        #expect(record.segments.map(\.text) == ["Before quitting."])
+        // Nothing loads a model at quit: the summary waits for the next launch.
+        #expect(record.summaryState == .pending)
+        #expect(after == 0)
+    }
+
+    @Test func quitWhileFinishingDoesNotWaitForTheSpeakerPass() async throws {
+        let speech = ManualMeetingSpeech()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions())
+        speech.send(.segment(Self.segment("Said.", 0, 1)))
+        speech.send(.finishing(.labellingSpeakers(progress: 0.2)))
+        await settle { if case .finishing = h.session.phase { true } else { false } }
+        await h.session.stopForQuit()
+        #expect(speech.shutdownCount == 1)
+        #expect(h.session.phase == .idle)
+        #expect(h.recording(noteID)?.endedAt != nil)
+        #expect(h.recording(noteID)?.segments.map(\.text) == ["Said."])
+    }
+
     @Test func gapsAreSaved() async throws {
         let gap = RecordingGap(start: Self.start.addingTimeInterval(60), end: Self.start.addingTimeInterval(400),
                                at: 60, reason: .sleep)
@@ -575,5 +671,14 @@ final class ManualMeetingSpeech: SpeechServicing, @unchecked Sendable {
         URL(filePath: "/tmp/manual-recordings").appending(path: noteID.uuidString)
     }
     func recoverInterruptedRecordings() async -> [InterruptedRecording] { interrupted }
-    func shutdown() async {}
+    private var shutdowns = 0
+    var shutdownCount: Int { lock.withLock { shutdowns } }
+
+    /// Like the speech service's quit path: capture stops and the meeting
+    /// ends at once with what it has, no speaker pass.
+    func shutdown() async {
+        lock.withLock { shutdowns += 1 }
+        continuation?.yield(.ended(TranscriptResult(segments: [], speakers: [.you], duration: 0)))
+        continuation?.finish()
+    }
 }

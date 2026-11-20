@@ -137,6 +137,24 @@ import Testing
         #expect(await queue.recoverInterruptedJobs().isEmpty)
     }
 
+    @Test func cancellingWhileTheJobIsBeingCreatedCancelsIt() async throws {
+        let fake = FakeSpeechService(stepped: true)
+        let speech = GatedFileSpeech(fake)
+        let container = try AppModelContainer.inMemory()
+        let notes = NoteStore(container: container, attachments: .temporary(), speech: speech)
+        let queue = FileTranscriptionQueue(speech: speech, writer: notes)
+        let adding = Task { await queue.add([URL(filePath: "/tmp/slow.m4a")], options: FileImportOptions()) }
+        for _ in 0..<500 where queue.rows.isEmpty || !speech.isWaiting { await Task.yield() }
+        let id = try #require(queue.rows.first?.noteID)
+        await queue.cancel(id)
+        speech.open()
+        _ = await adding.value
+        for _ in 0..<500 where (try? notes.note(id: id)) != nil { await Task.yield() }
+        #expect(fake.calls.contains { if case .cancel = $0 { true } else { false } })
+        #expect(try notes.note(id: id) == nil)
+        #expect(queue.rows.isEmpty)
+    }
+
     @Test func filesWaitWhileAMeetingRecords() async throws {
         let speech = FakeSpeechService(stepped: true)
         let h = try harness(speech)
@@ -192,4 +210,60 @@ import Testing
         #expect(h.note(done)?.recording?.transcriptionState == .done)
         #expect(await h.queue.recoverInterruptedJobs().isEmpty)
     }
+}
+
+/// `FakeSpeechService`, except that `transcribeFile` waits until the test
+/// opens the gate: a job that is still being created.
+final class GatedFileSpeech: SpeechServicing, @unchecked Sendable {
+    private let base: FakeSpeechService
+    private let lock = NSLock()
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var opened = false
+
+    init(_ base: FakeSpeechService) { self.base = base }
+
+    var isWaiting: Bool { lock.withLock { waiter != nil } }
+
+    func open() {
+        let waiting = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            opened = true
+            defer { waiter = nil }
+            return waiter
+        }
+        waiting?.resume()
+    }
+
+    func transcribeFile(_ url: URL, options: FileTranscriptionOptions) async throws -> FileJob {
+        await withCheckedContinuation { continuation in
+            let ready = lock.withLock { () -> Bool in
+                if opened { return true }
+                waiter = continuation
+                return false
+            }
+            if ready { continuation.resume() }
+        }
+        return try await base.transcribeFile(url, options: options)
+    }
+
+    var status: SpeechStatus { base.status }
+    func statusUpdates() -> AsyncStream<SpeechStatus> { base.statusUpdates() }
+    func downloadSize(of package: SpeechPackageID) -> Int64 { base.downloadSize(of: package) }
+    func install(_ package: SpeechPackageID) async throws { try await base.install(package) }
+    func pauseInstall(_ package: SpeechPackageID) async { await base.pauseInstall(package) }
+    func cancelInstall(_ package: SpeechPackageID) async { await base.cancelInstall(package) }
+    func remove(_ package: SpeechPackageID) async throws { try await base.remove(package) }
+    func startDictation(_ options: DictationOptions) async throws -> DictationSession {
+        try await base.startDictation(options)
+    }
+    func startMeeting(_ options: MeetingOptions) async throws -> MeetingRecording {
+        try await base.startMeeting(options)
+    }
+    func cancel(_ job: FileJob.ID) async { await base.cancel(job) }
+    func inputDevices() async -> [AudioInputDevice] { await base.inputDevices() }
+    func runningAudioApps() async -> [RunningAudioApp] { await base.runningAudioApps() }
+    func recordingsSize() async -> Int64 { await base.recordingsSize() }
+    func deleteRecordings(for noteID: UUID) async throws { try await base.deleteRecordings(for: noteID) }
+    func recordingsDirectory(for noteID: UUID) -> URL { base.recordingsDirectory(for: noteID) }
+    func recoverInterruptedRecordings() async -> [InterruptedRecording] { await base.recoverInterruptedRecordings() }
+    func shutdown() async { await base.shutdown() }
 }

@@ -65,6 +65,10 @@ public final class MeetingSession {
     /// Runs after a meeting's transcript is saved: `summarize` is the
     /// meeting's "Summary when you stop". The summary layer sets it.
     @ObservationIgnored public var afterMeeting: (@MainActor (_ noteID: UUID, _ summarize: Bool) -> Void)?
+    /// The editor showing a note, if any (N1's `MeetingNoteTarget`): Mark
+    /// moment goes in at its caret when it shows the meeting's note, else at
+    /// the end of the note through the store.
+    @ObservationIgnored public weak var noteTarget: (any MeetingNoteTarget)?
 
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let context: ModelContext
@@ -76,10 +80,13 @@ public final class MeetingSession {
     @ObservationIgnored private var consumer: Task<Void, Never>?
     @ObservationIgnored private var options = MeetingStartOptions()
     @ObservationIgnored private var didRecover = false
+    /// Quitting: the meeting's end is saved but its summary waits for the next launch.
+    @ObservationIgnored private var quitting = false
     /// The mic-only line was written for the current meeting.
     @ObservationIgnored private var wroteCallAudioLine = false
     /// Finished notes' transcripts, so a rename shows everywhere at once.
     @ObservationIgnored private var transcripts: [UUID: TranscriptModel] = [:]
+    @ObservationIgnored private var transcriptOrder: [UUID] = []
 
     /// Recordings are read and saved on `writer.context`, the Notes store's
     /// own, so note bodies and recordings never live on separate contexts.
@@ -92,14 +99,6 @@ public final class MeetingSession {
         self.now = now
         self.locale = locale
         self.timeZone = timeZone
-    }
-
-    /// For callers that pass the context too; it must be the writer's.
-    public convenience init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
-                            now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
-                            timeZone: TimeZone = .current) {
-        precondition(context === writer.context, "MeetingSession must use its writer's context")
-        self.init(speech: speech, writer: writer, now: now, locale: locale, timeZone: timeZone)
     }
 
     // MARK: Recording
@@ -181,7 +180,9 @@ public final class MeetingSession {
         guard phase == .recording || phase == .paused, let recording, let noteID else { return nil }
         let time = await recording.markMoment()
         marks.append(time)
-        do { try writer.appendMarker(at: time, to: noteID) } catch { lastError = "Couldn't add the mark." }
+        if noteTarget?.insertMarker(time: time, in: noteID) != true {
+            do { try writer.appendMarker(at: time, to: noteID) } catch { lastError = "Couldn't add the mark." }
+        }
         return time
     }
 
@@ -191,11 +192,17 @@ public final class MeetingSession {
         await recording.stop()
     }
 
-    /// Quit (spec 6.1): stops a meeting being recorded and waits until its
-    /// last phrases and transcript are saved. Does nothing when idle.
+    /// Quit (spec 6.1): ends a meeting that is recording, paused or already
+    /// finishing within the quit deadline. It never does the normal stop
+    /// (last phrases, speaker pass, conversion, which can take minutes):
+    /// `speech.shutdown()` stops capture and closes the files, the meeting's
+    /// quick `.ended` is saved, and conversion runs at the next launch. The
+    /// summary is not started now; `MeetingSummaries.resumePending()` runs it
+    /// at the next launch. Does nothing when idle.
     public func stopForQuit() async {
         guard isActive else { return }
-        await stop()
+        quitting = true
+        await speech.shutdown()
         await waitUntilFinished()
     }
 
@@ -210,18 +217,37 @@ public final class MeetingSession {
     /// records, else loaded from the store (one model per note, so a rename
     /// shows everywhere). Nil when the note has no recording.
     public func transcript(for noteID: UUID) -> TranscriptModel? {
-        if let model = transcripts[noteID] { return model }
+        if let model = transcripts[noteID] {
+            touch(noteID)
+            return model
+        }
         guard let record = fetchNote(noteID)?.recording else { return nil }
         let model = TranscriptModel(recording: record)
         model.onChange = { [weak self] model in self?.saveSpeakers(model, noteID: noteID) }
         transcripts[noteID] = model
+        touch(noteID)
         return model
+    }
+
+    /// Finished notes' transcripts kept at once; the least recently used go first.
+    static let transcriptCacheLimit = 24
+    var cachedTranscriptCount: Int { transcripts.count }
+
+    private func touch(_ noteID: UUID) {
+        transcriptOrder.removeAll { $0 == noteID }
+        transcriptOrder.append(noteID)
+        while transcripts.count > Self.transcriptCacheLimit,
+              let oldest = transcriptOrder.first(where: { $0 != self.noteID }) {
+            transcriptOrder.removeAll { $0 == oldest }
+            transcripts[oldest] = nil
+        }
     }
 
     /// Forgets a cached transcript (the note was purged or re-transcribed).
     public func forgetTranscript(for noteID: UUID) {
         guard noteID != self.noteID else { return }
         transcripts[noteID] = nil
+        transcriptOrder.removeAll { $0 == noteID }
     }
 
     /// A note's kept audio for the player: its track files, where they are,
@@ -358,8 +384,12 @@ public final class MeetingSession {
             try? context.save()
         }
         writer.transcriptDidChange(in: noteID)
-        let summarize = options.summaryWhenStopped
+        // A summary asked for while recording (with "Summary when you stop"
+        // off) waited for the transcript: it runs now.
+        let summarize = options.summaryWhenStopped || fetchNote(noteID)?.recording?.summaryState == .pending
         reset(endedNoteID: noteID)
+        // At quit nothing may load a model: the summary stays pending.
+        guard !quitting else { return }
         afterMeeting?(noteID, summarize)
     }
 

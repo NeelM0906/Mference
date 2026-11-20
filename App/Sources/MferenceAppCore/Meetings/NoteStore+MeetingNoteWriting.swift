@@ -18,6 +18,11 @@ extension NoteStore: MeetingNoteWriting {
         try edit(noteID) { $0 = MeetingBlocks.replacingSections(in: $0, with: sections) }
     }
 
+    public func canWrite(_ noteID: UUID) -> Bool {
+        guard let note = try? self.note(id: noteID) else { return false }
+        return document(of: note).readOnlyReason == nil
+    }
+
     public func actionItems(in noteID: UUID) -> [MeetingActionItemRow] {
         guard let note = try? self.note(id: noteID) else { return [] }
         return MeetingBlocks.actionItems(in: document(of: note).blocks)
