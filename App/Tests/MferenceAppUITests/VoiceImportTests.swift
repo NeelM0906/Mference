@@ -79,8 +79,23 @@ final class FakeFileQueue: FileQueueModel {
         #expect(added.urls.map(\.lastPathComponent) == ["lecture.mp3", "talk.mov"])
         #expect(added.language == .fixed("es") && added.speakerLabels && !added.summary)
         #expect(models.showsImportSheet, "the sheet shows the queue")
-        models.transcribe([])
+        #expect(!models.transcribe([]))
         #expect(queue.added.count == 1, "nothing dropped, nothing queued")
+    }
+
+    @Test func onlyAudioAndVideoFilesAreTaken() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "mference-drop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let urls = [URL(fileURLWithPath: "/tmp/talk.m4a"), URL(fileURLWithPath: "/tmp/slides.pdf"), folder,
+                    try #require(URL(string: "https://example.com/podcast.mp3")), URL(fileURLWithPath: "/tmp/demo.mov")]
+        #expect(TranscribeFilesSheet.acceptedFiles(urls).map(\.lastPathComponent) == ["talk.m4a", "demo.mov"])
+        let models = voice(FakeSpeechService())
+        #expect(!models.transcribe(urls), "no queue wired: the drop is refused")
+        let queue = FakeFileQueue()
+        models.fileQueue = queue
+        #expect(!models.transcribe([URL(fileURLWithPath: "/tmp/slides.pdf")]), "a PDF alone is refused")
+        #expect(models.transcribe(urls))
     }
 
     @Test func acceptedTypesCoverAudioAndVideo() {

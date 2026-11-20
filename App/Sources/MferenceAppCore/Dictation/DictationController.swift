@@ -29,13 +29,25 @@ public final class DictationController {
     public private(set) var error: SpeechError?
     /// Phrases started and not finished yet.
     public private(set) var pendingPhrases: Set<UUID> = []
+    /// Clean up fillers as this dictation started; the chip can change the
+    /// default meanwhile, which applies from the next dictation.
+    public private(set) var sessionCleansUpFillers = true
+
+    /// The fillers chip was changed during this dictation: it applies next time.
+    public var cleanUpChangesNextTime: Bool {
+        isActive && preferences.cleanUpFillers != sessionCleansUpFillers
+    }
 
     public var isActive: Bool { phase != .idle }
 
     public let preferences: SpeechPreferences
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let permissions: any PermissionBroker
-    @ObservationIgnored private weak var target: (any DictationInsertionTarget)?
+    /// Held strongly until `stop()` returns, so the last phrase lands even
+    /// when the editor's view has gone (N1's controller routes each phrase
+    /// to the note it began in). The shell stops dictation before Notes goes
+    /// away (`ShellModel.finishBeforeLeaving`).
+    @ObservationIgnored private var target: (any DictationInsertionTarget)?
     @ObservationIgnored private var session: DictationSession?
     @ObservationIgnored private var consumer: Task<Void, Never>?
     /// Bumped by each start and by a stop during a start, so a start that
@@ -65,6 +77,7 @@ public final class DictationController {
     /// model is installed (the setup card). Asks for the microphone the
     /// first time (reason, then the system prompt).
     public func start(in target: any DictationInsertionTarget) async {
+        let stoppedPrevious = isActive
         if isActive { await stop() }
         generation &+= 1
         let attempt = generation
@@ -78,9 +91,10 @@ public final class DictationController {
         }
         // Stopped (or started elsewhere) while the permission was asked.
         guard attempt == generation, phase == .starting else { return }
+        let options = preferences.dictationOptions
         let session: DictationSession
         do {
-            session = try await speech.startDictation(preferences.dictationOptions)
+            session = try await Self.startSession(speech, options, retryIfBusy: stoppedPrevious)
         } catch {
             if attempt == generation {
                 finish(with: (error as? SpeechError) ?? .failed(String(describing: error)))
@@ -94,6 +108,7 @@ public final class DictationController {
             return
         }
         self.session = session
+        sessionCleansUpFillers = options.cleanUpFillers
         phase = .listening
         consumer = Task { [weak self] in
             for await event in session.events {
@@ -121,14 +136,28 @@ public final class DictationController {
         }
     }
 
-    /// The language chip: pin one of the 25, or Automatic. Remembered as the default.
+    /// Starts a session; right after stopping one (Dictate, Esc, Dictate)
+    /// the service may still hold the microphone for a moment, so a
+    /// dictation-busy start is tried once more.
+    private static func startSession(_ speech: any SpeechServicing, _ options: DictationOptions,
+                                     retryIfBusy: Bool) async throws -> DictationSession {
+        do {
+            return try await speech.startDictation(options)
+        } catch SpeechError.busy(.dictation) where retryIfBusy {
+            try? await Task.sleep(for: .milliseconds(250))
+            return try await speech.startDictation(options)
+        }
+    }
+
+    /// Sets the language the dictation is labelled with. Fluid Speech Pro
+    /// detects the language itself; a pinned language only labels (spike S1).
     public func setLanguage(_ language: SpeechLanguage) async {
         preferences.language = language
         await session?.setLanguage(language)
     }
 
     /// The Clean up fillers chip mirrors the Settings switch; it applies
-    /// from the next dictation.
+    /// from the next dictation (`cleanUpChangesNextTime` says so meanwhile).
     public func setCleanUpFillers(_ on: Bool) {
         preferences.cleanUpFillers = on
     }

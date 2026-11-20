@@ -14,10 +14,13 @@ final class FakePlayback: AudioPlayback {
     var playing = false
     var rate: Float = 1
     var currentTime: TimeInterval = 0
+    var noAudio = false
     var onTick: (@MainActor () -> Void)?
+    var onEnded: (@MainActor () -> Void)?
 
     func load(tracks: [RecordedTrack], directory: URL) async throws -> TimeInterval {
         if failLoad { throw CocoaError(.fileReadCorruptFile) }
+        if noAudio { throw PlaybackError.noAudio }
         loaded = tracks
         return length
     }
@@ -73,6 +76,9 @@ final class FakePlayback: AudioPlayback {
         player.play(from: 725)
         #expect(player.isPlaying && playback.playing && playback.currentTime == 725)
         #expect(player.playingSegment(in: transcript.segments) == transcript.segments[1].id)
+        playback.advance(to: 726) // a fresh tick near the seek counts at once
+        #expect(player.currentTime == 726)
+        try? await Task.sleep(for: .milliseconds(350))
         playback.advance(to: 740)
         #expect(player.playingSegment(in: transcript.segments) == transcript.segments[2].id)
         player.togglePlay()
@@ -109,6 +115,45 @@ final class FakePlayback: AudioPlayback {
                                           playback: broken)
         await failed.load()
         #expect(failed.hasAudio == false && failed.loadError == "The recording could not be opened.")
+    }
+
+    @Test func theEndReadsPlayAgainWhenTheNoteOutlastsItsAudio() async {
+        let playback = FakePlayback()
+        playback.length = 1800 // the audio is shorter than the note's 2530 s
+        let player = RecordingPlayerModel(tracks: Self.tracks, directory: URL(fileURLWithPath: "/tmp/x"),
+                                          duration: 2530, playback: playback)
+        await player.load()
+        #expect(player.duration == 1800, "the audio's own length")
+        player.play(from: 1790)
+        playback.onEnded?() // AVPlayerItemDidPlayToEndTime
+        #expect(!player.isPlaying && player.currentTime == 1800)
+        player.togglePlay()
+        #expect(player.isPlaying && playback.currentTime == 0, "Play starts over")
+    }
+
+    @Test func keyboardSkipAndPauseOnLeaving() async {
+        let playback = FakePlayback()
+        let player = RecordingPlayerModel(tracks: Self.tracks, directory: URL(fileURLWithPath: "/tmp/x"),
+                                          duration: 2530, playback: playback)
+        await player.load()
+        player.play(from: 100)
+        player.skip(5)
+        #expect(playback.currentTime == 105)
+        player.skip(-200)
+        #expect(playback.currentTime == 0, "clamped at the start")
+        playback.advance(to: 900) // a stale tick right after the seek is ignored
+        #expect(player.currentTime == 0)
+        player.pause()
+        #expect(!player.isPlaying && !playback.playing)
+    }
+
+    @Test func noFilesLeftReadsAsDeletedNotBroken() async {
+        let playback = FakePlayback()
+        playback.noAudio = true
+        let player = RecordingPlayerModel(tracks: Self.tracks, directory: URL(fileURLWithPath: "/tmp/x"),
+                                          duration: 60, playback: playback)
+        await player.load()
+        #expect(player.hasAudio == false && player.loadError == nil)
     }
 
     @Test func scrubberBandsAndChips() {
