@@ -34,6 +34,11 @@ nonisolated final class NoteBlockAttachment: NSTextAttachment {
         case .marker(let time):
             image = Self.chipImage(text: Self.clock(time), symbol: "bookmark.fill", accent: true)
             bounds = CGRect(origin: CGPoint(x: 0, y: -NoteEditorMetrics.chipBaselineDrop), size: image?.size ?? .zero)
+        case .unknown(let json):
+            // Written by a newer version: kept as it is, shown as a chip.
+            let text = json.runText.isEmpty ? "Content from a newer version" : json.runText
+            image = Self.chipImage(text: text, symbol: "questionmark.square.dashed")
+            bounds = CGRect(origin: CGPoint(x: 0, y: -NoteEditorMetrics.chipBaselineDrop), size: image?.size ?? .zero)
         default:
             break
         }
