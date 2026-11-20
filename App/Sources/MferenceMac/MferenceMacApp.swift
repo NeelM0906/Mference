@@ -26,6 +26,7 @@ struct MferenceMacApp: App {
                                      screens: delegate.runtime.screenModels)
                 .environment(delegate.runtime.services)
                 .environment(delegate.runtime.chat)
+                .environment(delegate.runtime.voice)
                 .onAppear {
                     // Calendar's "Open Settings" goes to Settings > Connections.
                     let shell = shell

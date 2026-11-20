@@ -52,6 +52,8 @@ nonisolated enum NoteEditorMetrics {
     /// The date line's text size and the room it takes above the title.
     static let dateSize: CGFloat = 12
     static let dateLineHeight: CGFloat = 16
+    /// The read-only notice under the date (up to two lines).
+    static let noticeHeight: CGFloat = 34
     /// The accent capsule marking where a pending dictated phrase lands.
     static let pendingPhraseMinWidth: CGFloat = 18
     static let pendingPhraseHeight: CGFloat = 6
