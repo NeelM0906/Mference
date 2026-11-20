@@ -99,6 +99,33 @@ import Testing
         #expect(Self.phrases(events).first?.track == .call)
     }
 
+    @Test func pauseFlushWaitsForAFrameStillWithTheDetector() async throws {
+        // Codex review on #251: flush must not overtake a feed waiting on
+        // the detector (actor reentrancy), or a phrase starts after Pause.
+        let detector = GatedVoiceStream()
+        let segmenter = TrackSegmenter(track: .microphone, detector: detector, frameLength: 1_600,
+                                       configuration: .init())
+        let feeding = Task { try await segmenter.feed(FakeAudioSource.tone(seconds: 0.1)) }
+        for _ in 0..<1_000 where !detector.isWaiting { await Task.yield() }
+        #expect(detector.isWaiting)
+        let flushing = Task { await segmenter.flush() }
+        for _ in 0..<50 { await Task.yield() }
+        detector.open()
+        let started = try await feeding.value
+        let ended = await flushing.value
+        guard case .started(let id, _)? = started.first else {
+            Issue.record("the frame before Pause starts a phrase")
+            return
+        }
+        #expect(ended.contains { event in
+            switch event {
+            case .dropped(let dropped): dropped == id
+            case .finished(let phrase): phrase.id == id
+            case .started: false
+            }
+        }, "Pause ends the phrase its audio started")
+    }
+
     @Test func flushingBufferedSilenceKeepsTheClock() async throws {
         // Codex review on #251: pause flushes a partial silent frame; the
         // clock must still count it, as the recording does.
@@ -343,5 +370,36 @@ import Testing
         #expect(PhraseLanguage.code(for: "ok", setting: .automatic) == nil, "too short to guess")
         let guess = PhraseLanguage.guess("Guten Morgen, wir besprechen heute den Entwurf und verteilen die Aufgaben.")
         #expect(guess.map { SpeechLanguage.supportedCodes.contains($0) } ?? true)
+    }
+}
+
+/// A detector whose first frame waits until the test opens it; every frame
+/// reads as speech.
+final class GatedVoiceStream: VoiceActivityStream, @unchecked Sendable {
+    private let lock = NSLock()
+    private var gate: CheckedContinuation<Void, Never>?
+    private var opened = false
+
+    var isWaiting: Bool { lock.withLock { gate != nil } }
+
+    func open() {
+        let gate = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            opened = true
+            defer { self.gate = nil }
+            return self.gate
+        }
+        gate?.resume()
+    }
+
+    func probability(of frame: [Float]) async throws -> Float {
+        await withCheckedContinuation { continuation in
+            let resumeNow = lock.withLock { () -> Bool in
+                if opened { return true }
+                gate = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+        return 1
     }
 }

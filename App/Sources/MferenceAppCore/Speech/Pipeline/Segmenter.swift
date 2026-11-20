@@ -167,6 +167,11 @@ actor TrackSegmenter {
     private let detector: any VoiceActivityStream
     private let frameLength: Int
     private var pending: [Float] = []
+    /// A feed is waiting on the detector: flush and the next feed wait for
+    /// it, so audio is processed in the order it was recorded even though
+    /// the actor is reentrant.
+    private var feeding = false
+    private var feedWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(track: TrackKind, detector: any VoiceActivityStream, frameLength: Int,
          configuration: Segmenter.Configuration, startingAt position: TimeInterval = 0) {
@@ -180,6 +185,9 @@ actor TrackSegmenter {
     var position: TimeInterval { segmenter.position + SpeechAudio.seconds(pending.count) }
 
     func feed(_ samples: [Float]) async throws -> [SegmenterEvent] {
+        await untilFed()
+        feeding = true
+        defer { fed() }
         pending += samples
         var events: [SegmenterEvent] = []
         while pending.count >= frameLength {
@@ -191,8 +199,10 @@ actor TrackSegmenter {
         return events
     }
 
-    /// Ends the open phrase with what is buffered (stop, sleep, end of file).
-    func flush() -> [SegmenterEvent] {
+    /// Ends the open phrase with what is buffered (stop, sleep, end of file),
+    /// after a feed still in progress.
+    func flush() async -> [SegmenterEvent] {
+        await untilFed()
         var events: [SegmenterEvent] = []
         if !pending.isEmpty {
             // A partial frame inside a phrase counts as speech so the last
@@ -207,8 +217,19 @@ actor TrackSegmenter {
     }
 
     /// Starts again at `time` (new files after wake); ends any open phrase.
-    func jump(to time: TimeInterval) -> [SegmenterEvent] {
-        let events = flush()
+    func jump(to time: TimeInterval) async -> [SegmenterEvent] {
+        let events = await flush()
         return events + segmenter.jump(to: time)
+    }
+
+    private func untilFed() async {
+        while feeding { await withCheckedContinuation { feedWaiters.append($0) } }
+    }
+
+    private func fed() {
+        feeding = false
+        let waiters = feedWaiters
+        feedWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 }

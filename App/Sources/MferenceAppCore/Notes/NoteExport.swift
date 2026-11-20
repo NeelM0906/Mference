@@ -138,8 +138,12 @@ public enum NoteExport {
             folderName = "\(base) attachments \(number)"
             number += 1
         }
+        // One copy per file: a pasted block keeps its attachment's ID, so
+        // several blocks can show the same file.
+        var seen = Set<String>()
         let ids = document.attachmentIDs.filter {
-            FileManager.default.fileExists(atPath: attachments.url(of: $0, in: noteID).path(percentEncoded: false))
+            seen.insert($0).inserted
+                && FileManager.default.fileExists(atPath: attachments.url(of: $0, in: noteID).path(percentEncoded: false))
         }
         var written: [URL] = []
         if !ids.isEmpty {

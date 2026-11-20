@@ -74,6 +74,23 @@ import Testing
         #expect(try Data(contentsOf: folder.appending(path: "Trip attachments/\(id)")) == Data([1, 2, 3]))
     }
 
+    @Test func aFileShownTwiceIsCopiedOnce() throws {
+        // Codex review on #251: a pasted copy keeps its attachment's ID.
+        let attachments = NoteAttachments.temporary()
+        let noteID = UUID()
+        let id = try attachments.write(Data([1, 2, 3]), fileExtension: "png", into: noteID)
+        let document = NoteDocument(blocks: [.heading(level: .title, runs: [TextRun("Trip")]),
+                                             .image(attachmentID: id), .image(attachmentID: id)])
+        let folder = FileManager.default.temporaryDirectory.appending(path: "mference-export-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "Trip.md")
+        let written = try NoteExport.writeMarkdown(document, noteID: noteID, attachments: attachments, to: file)
+        #expect(written.count == 2, "the note and one copy")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        #expect(text == "# Trip\n\n![](<Trip attachments/\(id)>)\n\n![](<Trip attachments/\(id)>)\n")
+    }
+
     @Test func contentFromANewerVersionExportsItsText() {
         let document = NoteDocument.decode(Data(#"{"v":1,"blocks":[{"type":"callout","runs":[{"t":"Keep *this*"}]},{"type":"video"}]}"#.utf8))
         #expect(NoteExport.markdown(document) == "Keep \\*this\\*\n")
