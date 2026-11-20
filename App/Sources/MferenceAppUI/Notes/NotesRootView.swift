@@ -44,6 +44,7 @@ enum NotesMetrics {
 /// Record meeting and New note (⌘N).
 public struct NotesRootView: View {
     @Environment(ScreenModels.self) private var screens: ScreenModels?
+    @Environment(VoiceModels.self) private var voice: VoiceModels?
     private let injected: NotesModel?
 
     /// The shell's slot: the model comes from `ScreenModels.notes`.
@@ -55,6 +56,9 @@ public struct NotesRootView: View {
     public var body: some View {
         if let model = injected ?? screens?.notes {
             NotesScreen(model: model)
+                .task(id: voice.map(ObjectIdentifier.init)) {
+                    if let voice { model.connect(voice) }
+                }
         } else {
             NotesEmptyState(systemImage: "note.text", title: "Notes",
                             message: "Notes is starting. Try again in a moment.")

@@ -18,6 +18,27 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     /// Called after every change to the text (typing, styles, ticks).
     var onTextChange: (() -> Void)?
+    /// Called when the view gains or loses keyboard focus.
+    var onFocusChange: ((Bool) -> Void)?
+    /// Esc: returns true when it was handled (dictation stopped).
+    var onCancel: (() -> Bool)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocusChange?(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocusChange?(false) }
+        return resigned
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if onCancel?() == true { return }
+        super.cancelOperation(sender)
+    }
     /// Called with the time of a clicked transcript chip or marker.
     var onTimeChipClick: ((TimeInterval) -> Void)?
     /// Stores pasted or dropped image data as an attachment; returns its id.

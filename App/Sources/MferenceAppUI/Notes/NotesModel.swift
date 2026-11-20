@@ -18,13 +18,29 @@ public struct NotesVoiceActions {
     /// N3's voice toolbar (Transcribe file, Record meeting with its popover),
     /// shown in the shell bar in place of Notes' own two buttons.
     public var toolbar: (() -> AnyView)?
+    /// Whether dictation is going into the note (the Dictate button shows
+    /// "Dictating").
+    public var isDictating: ((UUID) -> Bool)?
+    /// Stops dictation (switching notes: its last phrase lands in its note).
+    public var stopDictation: (() -> Void)?
+    /// The note editor gained (the controller) or lost (nil) keyboard focus:
+    /// ⇧⌘D dictates into the focused one.
+    public var editorFocus: ((NoteEditorController?) -> Void)?
+    /// Audio or video files dropped on Notes: queued for transcription.
+    public var transcribe: (([URL]) -> Bool)?
 
     public init(transcribeFile: (() -> Void)? = nil, recordMeeting: (() -> Void)? = nil,
-                toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil) {
+                toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil,
+                isDictating: ((UUID) -> Bool)? = nil, stopDictation: (() -> Void)? = nil,
+                editorFocus: ((NoteEditorController?) -> Void)? = nil, transcribe: (([URL]) -> Bool)? = nil) {
         self.transcribeFile = transcribeFile
         self.recordMeeting = recordMeeting
         self.toggleDictation = toggleDictation
         self.toolbar = toolbar
+        self.isDictating = isDictating
+        self.stopDictation = stopDictation
+        self.editorFocus = editorFocus
+        self.transcribe = transcribe
     }
 }
 
@@ -272,7 +288,12 @@ public final class NotesModel {
     // MARK: Selection
 
     public func select(_ note: Note?) {
-        if note?.id != selectedNoteID { revealedSegmentID = nil }
+        if note?.id != selectedNoteID {
+            revealedSegmentID = nil
+            // Dictating into the note being left: stop; its last phrase still
+            // lands there (the editor keeps it with its note).
+            if let current = selectedNoteID, voice.isDictating?(current) == true { voice.stopDictation?() }
+        }
         selectedNoteID = note?.id
         editor.open(note)
     }
@@ -283,6 +304,17 @@ public final class NotesModel {
         let rows = sections.flatMap(\.items)
         if let selectedNoteID, rows.contains(where: { $0.id == selectedNoteID }) { return }
         select(rows.first)
+    }
+
+    /// Shows a note by id (the recording timer chip, Open note in the file
+    /// queue, a started meeting): All notes, search cleared, that note.
+    public func open(noteID: UUID) {
+        guard let note = try? store.note(id: noteID) else { return }
+        query = ""
+        commitQuery()
+        let target: NoteScope = note.deletedAt != nil ? .recentlyDeleted : .all
+        if scope != target, !notes.contains(where: { $0.id == noteID }) { scope = target }
+        select(note)
     }
 
     /// ↑ / ↓ in the list.

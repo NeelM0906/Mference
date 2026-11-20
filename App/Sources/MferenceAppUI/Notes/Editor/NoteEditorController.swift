@@ -151,6 +151,8 @@ public final class NoteEditorController {
         }
         self.textView = textView
         textView.onTextChange = { [weak self] in self?.textDidChange() }
+        textView.onFocusChange = { [weak self] focused in self?.onFocusChange?(focused) }
+        textView.onCancel = { [weak self] in self?.onCancel?() ?? false }
         textView.onTimeChipClick = onTimeChipClick
         textView.importImage = { [weak self] data, ext in
             guard let self, let id = note?.id else { return nil }
@@ -333,6 +335,12 @@ public final class NoteEditorController {
             ? .audio(attachmentID: id) : .image(attachmentID: id)
         textView.insertAttachment(block)
     }
+
+    /// The editor gained or lost keyboard focus (⇧⌘D dictates into the
+    /// focused editor).
+    @ObservationIgnored public var onFocusChange: ((Bool) -> Void)?
+    /// Esc in the editor; returns true when handled (dictation stopped).
+    @ObservationIgnored public var onCancel: (() -> Bool)?
 
     /// The note as Markdown, for the share sheet (spec 4.1).
     public var shareText: String {
