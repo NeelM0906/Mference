@@ -98,22 +98,22 @@ struct OnboardingPicture: View {
 }
 
 enum OnboardingPictureMetrics {
-    static let height: CGFloat = 196
+    static let height: CGFloat = 212
     static let tile = CGSize(width: 92, height: 72)
     static let screen = CGSize(width: 452, height: 112)
     static let screenStand = CGSize(width: 96, height: 10)
     static let tileTravel: CGFloat = 70
     static let barHeight: CGFloat = 26
     static let barWidth: CGFloat = 560
-    static let gridColumns = 24
+    static let gridColumns = 37
     static let gridRows = 3
     static let gridCell: CGFloat = 12
     static let gridGap: CGFloat = 3
     static let permissionCard = CGSize(width: 128, height: 104)
-    static let pile = CGSize(width: 150, height: 146)
+    static let pile = CGSize(width: 168, height: 146)
     /// Below each pile's name.
     static let letterTop: CGFloat = 32
-    static let letter = CGSize(width: 104, height: 22)
+    static let letter = CGSize(width: 148, height: 22)
     static let tiles: [(String, String)] = [
         ("Chat", "bubble.left.and.bubble.right"),
         ("Mail", "envelope"),
@@ -218,18 +218,23 @@ private struct ModelsPicture: View {
                 RoundedRectangle(cornerRadius: MFRadius.s).fill(MFColor.fill)
                 HStack(spacing: MFSpacing.xxs) {
                     if let quickMemory {
-                        segment("Quick 4B · \(MenuBarSummary.gigabytes(quickMemory))", fill: MFColor.accent,
-                                text: MFColor.onInk,
-                                width: width * min(Double(quickMemory) / physical, 1) * grow)
+                        segment(fill: MFColor.accent, width: width * min(Double(quickMemory) / physical, 1) * grow)
                     }
                     if let deepMemory {
-                        segment("Deep 27B · \(MenuBarSummary.gigabytes(deepMemory))", fill: MFColor.accentFill,
-                                text: MFColor.accentStrong,
-                                width: width * min(Double(deepMemory) / physical, 1) * grow)
+                        segment(fill: MFColor.accentFill, width: width * min(Double(deepMemory) / physical, 1) * grow)
                     }
                 }
             }
             .frame(width: width, height: OnboardingPictureMetrics.barHeight)
+            HStack(spacing: MFSpacing.l) {
+                if let quickMemory {
+                    legend("Quick 4B · \(MenuBarSummary.gigabytes(quickMemory))", fill: MFColor.accent)
+                }
+                if let deepMemory {
+                    legend("Deep 27B · \(MenuBarSummary.gigabytes(deepMemory)), only if you say yes",
+                           fill: MFColor.accentFill)
+                }
+            }
             DownloadGrid(fraction: Self.fraction(quick?.state))
             Text(Self.caption(quick))
                 .font(MFFont.caption)
@@ -238,16 +243,21 @@ private struct ModelsPicture: View {
         .frame(width: width)
     }
 
-    private func segment(_ label: String, fill: Color, text: Color, width: CGFloat) -> some View {
-        Text(label)
-            .font(MFFont.chip)
-            .foregroundStyle(text)
-            .lineLimit(1)
-            .padding(.horizontal, MFSpacing.s)
-            .frame(width: max(width, 0), alignment: .leading)
-            .frame(maxHeight: .infinity)
-            .background(RoundedRectangle(cornerRadius: MFRadius.s).fill(fill))
-            .clipped()
+    private func segment(fill: Color, width: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: MFRadius.s)
+            .fill(fill)
+            .frame(width: max(width, 0))
+    }
+
+    private func legend(_ label: String, fill: Color) -> some View {
+        HStack(spacing: MFSpacing.xs) {
+            RoundedRectangle(cornerRadius: MFRadius.xs / 2)
+                .fill(fill)
+                .frame(width: OnboardingPictureMetrics.gridCell, height: OnboardingPictureMetrics.gridCell)
+            Text(label)
+                .font(MFFont.caption)
+                .foregroundStyle(MFColor.secondary)
+        }
     }
 
     /// How full Quick's grid is: 1 once installed, the download's share while
