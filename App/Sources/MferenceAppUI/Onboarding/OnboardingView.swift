@@ -28,6 +28,7 @@ public struct OnboardingView: View {
     @State var step: Step
     /// The person said "Not now" to Deep.
     @State var declinedDeep = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(library: any ModelLibraryModel, step: Step = .welcome, onFinish: @escaping () -> Void) {
         self.library = library
@@ -70,8 +71,14 @@ public struct OnboardingView: View {
             Rectangle().fill(MFColor.hairline).frame(width: MFLayout.hairline)
             VStack(alignment: .leading, spacing: 0) {
                 MFScroll {
-                    content
-                        .padding(.top, OnboardingMetrics.contentTop)
+                    VStack(alignment: .leading, spacing: MFSpacing.xl) {
+                        OnboardingPicture(step: step, library: library)
+                        content
+                    }
+                    .id(step)
+                    .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
+                                            removal: .opacity))
+                    .padding(.top, OnboardingMetrics.contentTop)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 footer
@@ -352,7 +359,8 @@ public struct OnboardingView: View {
     }
 
     private func move(by offset: Int) {
-        if let next = Step(rawValue: step.rawValue + offset) { step = next }
+        guard let next = Step(rawValue: step.rawValue + offset) else { return }
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.45)) { step = next }
     }
 }
 

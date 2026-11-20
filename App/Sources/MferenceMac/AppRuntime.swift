@@ -14,6 +14,10 @@ final class AppRuntime {
     let screenModels: ScreenModels
     /// Team N3's voice models: the speech setup card and Settings › Speech.
     let voice: VoiceModels
+    /// The menu-bar extra's view of the engine (chat's engine, so Apple's
+    /// model is listed while Settings allows it).
+    let menuBar: MenuBarModel
+    private var menuBarTask: Task<Void, Never>?
 
     /// Quit steps, run in order: speech first (a recording ends and its
     /// files close, Notes spec 6.1), then web answers (SearXNG), then Find,
@@ -44,6 +48,8 @@ final class AppRuntime {
         voice.connect(meetings: services.meetings)
         voice.connect(files: services.files)
         if let notes = screenModels.notes { voice.connect(notes: notes) }
+        let menuBar = MenuBarModel(engine: services.chatEngine)
+        self.menuBar = menuBar
         let engine = services.engine
         let voice = voice
         let find = services.find
@@ -64,10 +70,12 @@ final class AppRuntime {
         ]
         // Find picks up where it left off (nothing runs while it is off).
         Task { await find?.start() }
+        menuBarTask = Task { await menuBar.run() }
     }
 
     /// Runs every quit step in order.
     func shutdown() async {
+        menuBarTask?.cancel()
         for step in shutdownSteps {
             await step()
         }

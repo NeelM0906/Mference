@@ -65,7 +65,7 @@ public struct LlamaBackend: EngineBackend {
     /// checks before enabling simdgroup matrix multiply. False when there
     /// is no GPU, or the GPU is a paravirtual device capped at Apple5.
     static func metalSupportsFastPaths() -> Bool {
-        guard let device = MTLCreateSystemDefaultDevice() else { return false }
+        guard let device = MetalContext.makeSystemDefaultDevice() else { return false }
         return device.supportsFamily(.apple7)
     }
 

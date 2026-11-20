@@ -100,4 +100,31 @@ import Testing
         let view = OnboardingView(library: library, step: .models, onFinish: {})
         try Snapshot.render(view, name: "01-first-run", framing: .centered(width: 1040), colorScheme: colorScheme)
     }
+
+    /// Every step renders with its picture at rest (Reduce Motion and
+    /// snapshots show the resting frame).
+    @Test(arguments: OnboardingView.Step.allCases)
+    func everyStepRendersItsPicture(step: OnboardingView.Step) throws {
+        let library = FixtureModelLibrary(quick: .downloading(TransferProgress(completedBytes: 1_100_000_000,
+                                                                               totalBytes: 2_900_000_000)),
+                                          deep: .notInstalled)
+        for scheme in [ColorScheme.light, .dark] {
+            try Snapshot.render(OnboardingView(library: library, step: step, onFinish: {}),
+                                name: "01-first-run-\(step.rawValue)", framing: .centered(width: 1040),
+                                colorScheme: scheme)
+        }
+        #expect(!OnboardingPicture.description(step).isEmpty)
+    }
+
+    @Test func motionRestsWithEverythingInPlace() {
+        let rest = OnboardingMotion.restingTime(lettersCount: OnboardingPictureMetrics.letters.count,
+                                                permissionsCount: OnboardingPictureMetrics.permissions.count)
+        for index in 0..<5 { #expect(OnboardingMotion.tile(index, at: rest) == 1) }
+        #expect(OnboardingMotion.memoryBar(at: rest) == 1)
+        #expect(OnboardingMotion.litPermissions(4, at: rest) == 4)
+        for index in 0..<4 { #expect(OnboardingMotion.letter(index, of: 4, at: rest) == 1) }
+        #expect(OnboardingMotion.tile(0, at: 0) == 0, "tiles start outside the Mac")
+        #expect(OnboardingMotion.litPermissions(4, at: 0) == 1, "cards light one at a time")
+        #expect(OnboardingMotion.letter(0, of: 4, at: 0) == 0, "letters start in the Inbox")
+    }
 }

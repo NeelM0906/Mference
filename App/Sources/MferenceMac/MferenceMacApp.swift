@@ -91,5 +91,47 @@ struct MferenceMacApp: App {
                 RecordingMenuLabel(live: live)
             }
         }
+
+        // The menu-bar extra: engine state at a glance and quick actions,
+        // over the same AppServices as the window.
+        MenuBarExtra {
+            MenuBarContent(runtime: delegate.runtime, shell: shell)
+        } label: {
+            MenuBarLabel(model: delegate.runtime.menuBar)
+        }
+        .menuBarExtraStyle(.menu)
+    }
+}
+
+/// The menu's content, with the actions pointed at the window, the chat and
+/// the app's quit sequence.
+private struct MenuBarContent: View {
+    let runtime: AppRuntime
+    let shell: ShellModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        MenuBarMenu(model: runtime.menuBar, library: runtime.screenModels.library,
+                    settings: runtime.services.settings,
+                    actions: MenuBarActions(
+                        openWindow: showWindow,
+                        newChat: {
+                            runtime.chat.newChat()
+                            shell.show(.chat)
+                            showWindow()
+                        },
+                        selectModel: { runtime.chat.selectModel($0) },
+                        openSettings: {
+                            shell.show(.settings)
+                            showWindow()
+                        },
+                        // Runs applicationShouldTerminate, so the quit
+                        // sequence (web, Find, then engine) runs as from ⌘Q.
+                        quit: { NSApplication.shared.terminate(nil) }))
+    }
+
+    private func showWindow() {
+        openWindow(id: "main")
+        NSApplication.shared.activate()
     }
 }
