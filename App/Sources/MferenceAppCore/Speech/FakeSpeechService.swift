@@ -315,7 +315,12 @@ public final class FakeSpeechService: SpeechServicing {
 
     public func shutdown() async {
         record(.shutdown)
-        let owners = state.withLock { Array($0.enders.keys) }
+        // File jobs are cancelled (nothing more plays); a live session
+        // finishes its last phrases, then ends.
+        let owners = state.withLock { s -> [UUID] in
+            s.pending.removeAll { $0.owner != s.liveOwner }
+            return Array(s.enders.keys)
+        }
         for owner in owners { end(owner) }
     }
 
