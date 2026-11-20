@@ -165,6 +165,9 @@ import Testing
         #expect(SpeechSettingsModel.spaceUsedLine(bytes: 0) == "No recordings yet")
         #expect(SpeechSettingsView.speechLine(.ready, bytes: 653_388_064) == "653 MB · Neural Engine · CC BY 4.0")
         #expect(SpeechSettingsView.credit.hasPrefix("Fluid Speech Pro by FluidVoice"), "the licence credit (spec 3)")
+        for credit in ["pyannote", "WeSpeaker", "BUT Speech@FIT", "Fluid Inference", "LS-EEND (MIT)", "FluidAudio (Apache 2.0)"] {
+            #expect(SpeechSettingsView.credit.contains(credit), "the speaker-label and SDK credits (SOURCES.md)")
+        }
     }
 
     @Test func removeTurnsVoiceFeaturesBackToSetup() async throws {
