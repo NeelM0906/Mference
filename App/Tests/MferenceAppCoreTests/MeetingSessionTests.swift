@@ -473,6 +473,45 @@ import Testing
         #expect(after == 0)
     }
 
+    @Test func aMeetingAfterAQuitStepEndsNormally() async throws {
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        var summarized: [UUID] = []
+        h.session.afterMeeting = { id, summarize in if summarize { summarized.append(id) } }
+        _ = try await h.session.start(MeetingStartOptions())
+        await h.session.stopForQuit()
+        #expect(summarized.isEmpty)
+        // Quit was cancelled (or the step ran early): the next meeting is ordinary.
+        let next = try await h.session.start(MeetingStartOptions())
+        await h.session.stop()
+        await h.session.waitUntilFinished()
+        #expect(summarized == [next])
+    }
+
+    @Test func aRenameInAnOlderModelKeepsNewerNames() async throws {
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        let id = UUID()
+        try h.writer.createNote(id: id, kind: .meeting, title: "Call", createdAt: Self.start)
+        let record = NoteRecording(startedAt: Self.start)
+        record.endedAt = Self.start
+        record.transcriptionState = .done
+        record.speakers = [SpeakerInfo(id: "s2", name: "Speaker 2", colorIndex: 2),
+                           SpeakerInfo(id: "s3", name: "Speaker 3", colorIndex: 3)]
+        h.context.insert(record)
+        h.note(id)?.recording = record
+        try h.context.save()
+        let older = try #require(h.session.transcript(for: id))
+        // The cache let it go (a view still holds it); a newer model is made.
+        h.session.forgetTranscript(for: id)
+        let newer = try #require(h.session.transcript(for: id))
+        #expect(newer !== older)
+        newer.rename(speakerID: "s2", to: "Priya")
+        older.rename(speakerID: "s3", to: "Sam")
+        #expect(h.recording(id)?.speakers.map(\.name) == ["Priya", "Sam"])
+        #expect(newer.speaker(id: "s3").name == "Sam")
+    }
+
     @Test func quitWhileFinishingDoesNotWaitForTheSpeakerPass() async throws {
         let speech = ManualMeetingSpeech()
         let h = try harness(speech)

@@ -170,7 +170,10 @@ public final class MeetingSummaries {
             return
         }
         statuses[noteID] = .writing(nil)
-        record.summaryState = .pending
+        // Stored as failed until it succeeds: if the app dies while Quick
+        // runs, the next launch shows Retry instead of trying again by
+        // itself every launch (`resumePending()` only resumes pending).
+        record.summaryState = .failed
         try? context.save()
         let segments = record.segments
         let speakers = record.speakers
