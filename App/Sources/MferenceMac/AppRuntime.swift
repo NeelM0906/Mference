@@ -40,7 +40,10 @@ final class AppRuntime {
         // Notes' voice buttons talk to the voice screens.
         voice.connect(meetings: services.meetings)
         voice.connect(files: services.files)
-        if let notes = screenModels.notes { voice.connect(notes: notes) }
+        if let notes = screenModels.notes {
+            voice.connect(notes: notes)
+            VoiceModels.connectMarkers(meetings: services.meetings, notes: notes)
+        }
         let engine = services.engine
         let voice = voice
         // Spec 6.1: voice (dictation, the speech service, the meeting's save),

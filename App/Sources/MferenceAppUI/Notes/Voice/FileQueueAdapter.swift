@@ -73,4 +73,11 @@ extension VoiceModels {
         notes.voice.transcribe = { [weak self] urls in self?.transcribe(urls) ?? false }
         openNote = { [weak notes] noteID in notes?.open(noteID: noteID) }
     }
+
+    /// Mark moment (⇧⌘M) puts its marker at the caret when the Notes editor
+    /// shows the meeting's note (N1's `MeetingNoteTarget`, which checks the
+    /// note id), and at the end of the note through the store otherwise.
+    public static func connectMarkers(meetings: MeetingSession, notes: NotesModel) {
+        meetings.noteTarget = notes.editor
+    }
 }
