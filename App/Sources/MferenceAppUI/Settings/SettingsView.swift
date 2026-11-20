@@ -4,11 +4,11 @@ import SwiftUI
 
 /// Settings (`08-settings.png`): Models, Memory, Privacy, Connections on one
 /// scrolling page with a section sidebar that follows the scroll; the model
-/// library (`08b`) opens from Models. Phase C and D rows (dictation, errands,
+/// library (`08b`) opens from Models. Later rows (errands,
 /// payments, other mail providers, iPhone) are shown as "Later".
 public struct SettingsView: View {
     public enum Pane: String, CaseIterable, Identifiable, Hashable, Sendable {
-        case models, memory, privacy, connections, dictation, shortcuts, iPhone
+        case models, memory, privacy, connections, speech, shortcuts, iPhone
 
         public var id: String { rawValue }
 
@@ -18,7 +18,7 @@ public struct SettingsView: View {
             case .memory: "Memory"
             case .privacy: "Privacy"
             case .connections: "Connections"
-            case .dictation: "Dictation"
+            case .speech: "Speech"
             case .shortcuts: "Shortcuts"
             case .iPhone: "iPhone"
             }
@@ -177,7 +177,7 @@ public struct SettingsView: View {
             memorySection.id(Pane.memory)
             privacySection.id(Pane.privacy)
             connectionsSection.id(Pane.connections)
-            dictationSection.id(Pane.dictation)
+            speechSection.id(Pane.speech)
             shortcutsSection.id(Pane.shortcuts)
             iPhoneSection.id(Pane.iPhone)
         }
@@ -246,8 +246,8 @@ public struct SettingsView: View {
                         .allowsHitTesting(false)
                         .accessibilityValue("Off, coming later")
                 }
-                MFListRow("Speech · Cactus Whistle",
-                          subtitle: "Dictation and meeting notes, transcribed on this Mac. Arrives with Notes in a later version.") {
+                MFListRow("Speech · Fluid Speech Pro",
+                          subtitle: "Dictation, meetings and audio files, transcribed on this Mac. Set up in Speech.") {
                     MFBadge(.later)
                 }
                 MFListRow("Text recognition · Apple Vision",
@@ -503,10 +503,12 @@ public struct SettingsView: View {
 
     // MARK: Later sections
 
-    private var dictationSection: some View {
-        section("Dictation", "Dictate into any app with Cactus Whistle, on this Mac.") {
+    /// Settings › Speech (Notes spec 4.8). Team N3 replaces this with
+    /// `SpeechSettingsView`; until then it says what the pane will hold.
+    private var speechSection: some View {
+        section("Speech", "Dictation, meetings and audio files, transcribed on this Mac by Fluid Speech Pro.") {
             MFCard {
-                MFListRow("Dictation and meeting notes", subtitle: "Arrives in a later version. Nothing is recorded today.") {
+                MFListRow("Fluid Speech Pro", subtitle: "Being set up with Notes. Nothing is recorded today.") {
                     MFBadge(.later)
                 }
             }
