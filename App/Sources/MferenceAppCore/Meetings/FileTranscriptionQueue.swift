@@ -55,6 +55,9 @@ public final class FileTranscriptionQueue {
 
     /// Runs after a file's transcript is saved, when it asked for a summary.
     @ObservationIgnored public var afterTranscript: (@MainActor (_ noteID: UUID) -> Void)?
+    /// Runs after every file's transcript is saved (the meeting session
+    /// refreshes a transcript model already shown for that note).
+    @ObservationIgnored public var transcriptSaved: (@MainActor (_ noteID: UUID) -> Void)?
 
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let context: ModelContext
@@ -236,6 +239,7 @@ public final class FileTranscriptionQueue {
             row.languageCode = result.languageCode ?? row.languageCode
             row.speakerCount = Set(result.segments.map(\.speakerID)).count
         }
+        transcriptSaved?(noteID)
         if summarize { afterTranscript?(noteID) }
     }
 

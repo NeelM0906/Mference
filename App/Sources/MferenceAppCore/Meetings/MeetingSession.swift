@@ -243,6 +243,16 @@ public final class MeetingSession {
         }
     }
 
+    /// The saved transcript changed outside the live meeting (a file job
+    /// finished, a meeting closed at launch): the note's model, if one is
+    /// shown, takes it in, so it never stays at the empty snapshot it was
+    /// made from while the file was still queued.
+    public func transcriptDidChange(for noteID: UUID) {
+        guard noteID != self.noteID, let model = transcripts[noteID],
+              let record = fetchNote(noteID)?.recording else { return }
+        model.reload(from: record)
+    }
+
     /// Forgets a cached transcript (the note was purged or re-transcribed).
     public func forgetTranscript(for noteID: UUID) {
         guard noteID != self.noteID else { return }
@@ -314,6 +324,7 @@ public final class MeetingSession {
         try? writer.appendParagraph(MeetingCopy.endedUnexpectedly(at: end, locale: locale, timeZone: timeZone),
                                     to: noteID)
         writer.transcriptDidChange(in: noteID)
+        transcriptDidChange(for: noteID)
     }
 
     // MARK: Events
