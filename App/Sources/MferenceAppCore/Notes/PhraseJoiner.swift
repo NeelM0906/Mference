@@ -14,7 +14,8 @@ public enum PhraseJoiner {
         guard !words.isEmpty else { return "" }
 
         let before = preceding.last
-        let atLineStart = before == nil || before!.isNewline
+        // A chip or image on the line counts as a line start.
+        let atLineStart = before == nil || before!.isNewline || before! == "\u{FFFC}"
         let lastVisible = preceding.last { !$0.isWhitespace || $0.isNewline }
         // A sentence end may sit inside closing quotes or brackets ('." ', '.)').
         let lastMeaningful = preceding.last { !($0.isWhitespace && !$0.isNewline) && !closingQuotes.contains($0) }
@@ -22,6 +23,13 @@ public enum PhraseJoiner {
 
         if atLineStart || afterSentence || (lastVisible?.isNewline ?? false) {
             words = capitalizingFirstLetter(words)
+        } else if !isOpening(before!, in: preceding), words.contains(" ") {
+            // Mid-sentence: the model capitalises each phrase on its own, so a
+            // sentence-opener word continues the sentence in lower case
+            // ("…lower right" + "And whether" → "and whether"). Not after an
+            // opening quote or bracket, and not a lone word ("Vitamin" + "A").
+            // Names and "I" are never in the list.
+            words = lowercasingOpener(words)
         }
         let leading: String
         if atLineStart || before!.isWhitespace || isOpening(before!, in: preceding) || startsWithClosingPunctuation(words) {
@@ -59,6 +67,20 @@ public enum PhraseJoiner {
 
     private static func collapseSpaces(_ text: String) -> String {
         text.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
+    }
+
+    private static let sentenceOpeners: Set<String> = [
+        "And", "But", "So", "Then", "Or", "Also", "Because", "Which", "That", "The", "A", "An", "If", "When",
+        "While", "With", "To", "Of", "In", "On", "For", "It", "We", "This", "There", "Who", "What", "Where",
+    ]
+
+    private static func lowercasingOpener(_ text: String) -> String {
+        let word = String(text.prefix { $0.isLetter })
+        guard sentenceOpeners.contains(word) else { return text }
+        let rest = text.dropFirst(word.count)
+        // "And," keeps going; "A-team" or "So2" are not the opener word.
+        guard rest.first.map({ $0.isWhitespace || $0.isPunctuation && $0 != "-" }) ?? true else { return text }
+        return word.lowercased() + rest
     }
 
     /// Capitalises a first word that starts with a lowercase letter and is

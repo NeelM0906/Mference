@@ -344,7 +344,7 @@ enum NotesFixtures {
     }
 
     @Test func everySymbolTheScreenNamesExists() {
-        for name in ["checklist", "checkmark", "doc", "folder", "magnifyingglass", "mic", "note.text", "paperclip", "pin", "pin.fill", "plus", "square.and.arrow.up", "square.and.pencil", "text.document", "trash", "waveform", "xmark.circle.fill"] {
+        for name in ["checklist", "checkmark", "doc", "folder", "magnifyingglass", "mic", "mic.fill", "note.text", "paperclip", "pin", "pin.fill", "plus", "square.and.arrow.up", "square.and.pencil", "text.document", "trash", "waveform", "xmark.circle.fill"] {
             #expect(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil, "\(name)")
         }
     }

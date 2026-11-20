@@ -18,13 +18,36 @@ public struct NotesVoiceActions {
     /// N3's voice toolbar (Transcribe file, Record meeting with its popover),
     /// shown in the shell bar in place of Notes' own two buttons.
     public var toolbar: (() -> AnyView)?
+    /// Whether dictation is going into the note (the Dictate button shows
+    /// "Dictating").
+    public var isDictating: ((UUID) -> Bool)?
+    /// Stops dictation and returns once its last phrase is in (switching
+    /// notes; the editor keeps that phrase with the note it began in).
+    public var stopDictation: (() async -> Void)?
+    /// The note editor gained (the controller) or lost (nil) keyboard focus:
+    /// ⇧⌘D dictates into the focused one.
+    public var editorFocusChanged: ((NoteEditorController?) -> Void)?
+    /// Esc in the editor; returns true when it handled it (a dictation
+    /// stopped). Otherwise Esc is the text view's own.
+    public var escape: (() -> Bool)?
+    /// Audio or video files dropped on Notes: queued for transcription.
+    public var transcribe: (([URL]) -> Bool)?
 
+    // N1 defines and calls these; N3 sets them (`VoiceModels.connect(notes:)`).
     public init(transcribeFile: (() -> Void)? = nil, recordMeeting: (() -> Void)? = nil,
-                toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil) {
+                toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil,
+                isDictating: ((UUID) -> Bool)? = nil, stopDictation: (() async -> Void)? = nil,
+                editorFocusChanged: ((NoteEditorController?) -> Void)? = nil, escape: (() -> Bool)? = nil,
+                transcribe: (([URL]) -> Bool)? = nil) {
         self.transcribeFile = transcribeFile
         self.recordMeeting = recordMeeting
         self.toggleDictation = toggleDictation
         self.toolbar = toolbar
+        self.isDictating = isDictating
+        self.stopDictation = stopDictation
+        self.editorFocusChanged = editorFocusChanged
+        self.escape = escape
+        self.transcribe = transcribe
     }
 }
 
@@ -118,6 +141,13 @@ public final class NotesModel {
                 self?.speechStatus = status
             }
         }
+        // The editor publishes itself to the voice side when it gains or
+        // loses focus, and offers Esc to it first.
+        let editor = self.editor
+        editor.onFocusChange = { [weak self, weak editor] focused in
+            self?.voice.editorFocusChanged?(focused ? editor : nil)
+        }
+        editor.onCancel = { [weak self] in self?.voice.escape?() ?? false }
     }
 
     public convenience init(services: AppServices) {
@@ -272,7 +302,14 @@ public final class NotesModel {
     // MARK: Selection
 
     public func select(_ note: Note?) {
-        if note?.id != selectedNoteID { revealedSegmentID = nil }
+        if note?.id != selectedNoteID {
+            revealedSegmentID = nil
+            // Dictating into the note being left: stop; its last phrase still
+            // lands there (the editor keeps it with its note).
+            if let current = selectedNoteID, voice.isDictating?(current) == true, let stop = voice.stopDictation {
+                Task { await stop() }
+            }
+        }
         selectedNoteID = note?.id
         editor.open(note)
     }
@@ -283,6 +320,17 @@ public final class NotesModel {
         let rows = sections.flatMap(\.items)
         if let selectedNoteID, rows.contains(where: { $0.id == selectedNoteID }) { return }
         select(rows.first)
+    }
+
+    /// Shows a note by id (the recording timer chip, Open note in the file
+    /// queue, a started meeting): All notes, search cleared, that note.
+    public func open(noteID: UUID) {
+        guard let note = try? store.note(id: noteID) else { return }
+        query = ""
+        commitQuery()
+        let target: NoteScope = note.deletedAt != nil ? .recentlyDeleted : .all
+        if scope != target, !notes.contains(where: { $0.id == noteID }) { scope = target }
+        select(note)
     }
 
     /// ↑ / ↓ in the list.

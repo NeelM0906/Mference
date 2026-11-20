@@ -47,6 +47,10 @@ struct NotesList: View {
             }
         }
         .background(MFColor.surface)
+        // Audio or video dropped on the list: transcribed into new notes.
+        .dropDestination(for: URL.self) { (urls: [URL], _: CGPoint) -> Bool in
+            model.voice.transcribe?(urls) ?? false
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Notes")
     }
