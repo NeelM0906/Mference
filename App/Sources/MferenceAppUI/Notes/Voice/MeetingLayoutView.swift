@@ -33,6 +33,11 @@ public struct MeetingLayoutView<Notes: View>: View {
                          callSourceName: Self.callSourceName(started?.callAudio ?? voice.preferences.callAudio),
                          summaryOn: started?.summaryWhenYouStop ?? voice.preferences.writesMeetingSummary,
                          onToggleSidebar: onShowSidebar)
+            if let hint = session.callAudioHint {
+                CallAudioHintLine(message: hint,
+                                  onOpenSettings: { voice.openCallAudioSettings() },
+                                  onDismiss: { session.dismissCallAudioHint() })
+            }
             if let message = Self.notice(session) {
                 Label(message, systemImage: "exclamationmark.circle")
                     .font(MFFont.preview)
@@ -99,6 +104,8 @@ extension VoiceModels {
     public func connect(meetings: MeetingSession) {
         recordingControls = meetings
         meetingIsActive = { meetings.isActive }
+        meetingCallAudioHint = { meetings.callAudioHint }
+        dismissMeetingCallAudioHint = { meetings.dismissCallAudioHint() }
         meetingIsFinishing = { if case .finishing = meetings.phase { true } else { false } }
         startMeeting = { request in
             try await meetings.start(MeetingStartOptions(

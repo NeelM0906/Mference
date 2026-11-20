@@ -62,8 +62,10 @@ shown as denied from silence. Two additions to `SpeechServicing` cover the gap:
   `MeetingEvent.noCallAudioHeardMessage`: "No call audio yet. If the other
   side is talking, check Call audio in System Settings."
   `FakeSpeechService.MeetingScript(noCallAudioHeard: true)` sends it right
-  after `.started` when the meeting records call audio. The meeting session
-  ignores it for now; the meeting screen renders it (N3/N4).
+  after `.started` when the meeting records call audio. `MeetingSession`
+  keeps it as `callAudioHint` (cleared once the call track carries speech,
+  when call audio stops, on dismiss, and when the meeting ends; never written
+  into the note), and the meeting screen and the menu bar show it.
 
 ## Build and test
 

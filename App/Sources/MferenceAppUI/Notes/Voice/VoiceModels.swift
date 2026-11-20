@@ -41,6 +41,10 @@ public final class VoiceModels {
     /// finishing), and whether it is finishing; set by `connect(meetings:)`.
     @ObservationIgnored public var meetingIsActive: (@MainActor () -> Bool)?
     @ObservationIgnored public var meetingIsFinishing: (@MainActor () -> Bool)?
+    /// The live meeting's call-audio hint and its close (N4's
+    /// `MeetingSession.callAudioHint`); set by `connect(meetings:)`.
+    @ObservationIgnored public var meetingCallAudioHint: (@MainActor () -> String?)?
+    @ObservationIgnored public var dismissMeetingCallAudioHint: (@MainActor () -> Void)?
     /// Pause, resume and stop for the menu bar and quit (N4's `MeetingSession`).
     @ObservationIgnored public var recordingControls: (any LiveRecordingControls)?
     /// The file queue the import sheet shows (N4's `FileTranscriptionQueue`
@@ -151,6 +155,17 @@ public final class VoiceModels {
     public func markMoment() {
         guard canMarkMoment, let controls = recordingControls else { return }
         Task { await controls.markMomentInRecording() }
+    }
+
+    /// "No call audio yet…" while a meeting's tap hears only silence, for
+    /// the menu bar; nil otherwise (or once dismissed).
+    public var callAudioHint: String? { meetingCallAudioHint?() }
+
+    public func dismissCallAudioHint() { dismissMeetingCallAudioHint?() }
+
+    /// The hint's Open System Settings: Call audio, through the broker.
+    public func openCallAudioSettings() {
+        settings.openSystemSettings(for: .systemAudio)
     }
 
     /// The timer chip and the menu bar's Open: the meeting note.

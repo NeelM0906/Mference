@@ -1,4 +1,6 @@
 import Foundation
+import Observation
+import Synchronization
 import MferenceAppCore
 @testable import MferenceAppUI
 import MferenceDesign
@@ -137,6 +139,65 @@ import Testing
         #expect(LiveTranscriptView.segment(at: 15, in: segments)?.text == "a")
         #expect(LiveTranscriptView.segment(at: 5, in: segments)?.text == "a", "before the first line: the first")
         #expect(SpeakerPalette.color(7) == SpeakerPalette.color(1), "the palette cycles")
+    }
+
+    @Test func theCallAudioHintShowsOpensSettingsThroughTheBrokerAndHides() async throws {
+        let speech = FakeSpeechService(meeting: FakeSpeechService.MeetingScript(
+            noCallAudioHeard: true, live: [.segment(Self.segment("Hello?", 31, speaker: "you"))],
+            result: TranscriptResult(segments: [], speakers: [.you], duration: 40)))
+        let container = try AppModelContainer.inMemory()
+        let writer = InMemoryMeetingNoteWriter(context: container.mainContext)
+        let session = MeetingSession(speech: speech, writer: writer)
+        let broker = FakePermissionBroker()
+        let voice = VoiceModels(speech: speech, permissions: broker,
+                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
+        voice.connect(meetings: session)
+        voice.setup.start()
+        defer { voice.setup.stop() }
+        #expect(voice.callAudioHint == nil)
+        #expect(await voice.recordMeetingModel.startRecording())
+        await settle { voice.callAudioHint != nil && session.transcript?.segments.count == 1 }
+        #expect(voice.callAudioHint == MeetingEvent.noCallAudioHeardMessage)
+        // The menu bar reads the same hint, and redraws when it changes.
+        let changed = Mutex(false)
+        withObservationTracking { _ = voice.callAudioHint } onChange: { changed.withLock { $0 = true } }
+        voice.openCallAudioSettings()
+        await settle { broker.calls.contains(.openSystemSettings(.systemAudio)) }
+        voice.dismissCallAudioHint()
+        #expect(voice.callAudioHint == nil && session.callAudioHint == nil)
+        #expect(changed.withLock { $0 })
+        let noteID = try #require(session.noteID)
+        #expect(!writer.body(of: noteID).paragraphs.contains(MeetingEvent.noCallAudioHeardMessage))
+        await voice.shutDownForQuit()
+        #expect(voice.callAudioHint == nil)
+    }
+
+    @Test(arguments: [ColorScheme.light, .dark])
+    func meetingCallAudioHintBoard(colorScheme: ColorScheme) async throws {
+        var script = Self.boardScript
+        script.noCallAudioHeard = true
+        // Only your side so far: the call track has not spoken.
+        script.live = script.live.filter {
+            if case .segment(let segment) = $0 { segment.track == .microphone } else { true }
+        }
+        let h = try harness(script)
+        defer { h.voice.setup.stop() }
+        #expect(await h.voice.recordMeetingModel.startRecording())
+        await h.voice.recordMeetingModel.load()
+        await settle { h.session.transcript?.segments.count == 2 && h.session.callAudioHint != nil }
+        var status = h.speech.status
+        status.liveSession?.recordedTime = 768
+        status.liveSession?.updatedAt = .now
+        h.speech.setStatus(status)
+        await settle { h.voice.liveMeeting?.recordedTime == 768 }
+        let board = VStack(spacing: 0) {
+            ShellChromeBar(model: ShellModel(selection: .notes, defaults: nil))
+            MeetingLayoutView(session: h.session, voice: h.voice, onShowSidebar: {}) { _ in MeetingNotesStandIn() }
+        }
+        .mfWindowBackground()
+        .environment(h.voice)
+        try Snapshot.render(board, name: "notes-04-meeting-call-audio-hint", colorScheme: colorScheme)
+        await h.voice.shutDownForQuit()
     }
 
     @Test(arguments: [ColorScheme.light, .dark])

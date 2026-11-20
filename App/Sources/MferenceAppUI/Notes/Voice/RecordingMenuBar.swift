@@ -20,21 +20,43 @@ public protocol LiveRecordingControls: AnyObject {
     func finishForQuit() async
 }
 
-/// The menu bar item's menu while a meeting records (D7): the time, Open,
-/// Pause or Resume, Stop.
+/// The menu bar item's menu while a meeting records (D7): the time, the
+/// call-audio hint when there is one, Open, Pause or Resume, Stop.
 public struct RecordingMenuContent: View {
     let live: LiveSessionStatus
     let controls: (any LiveRecordingControls)?
+    let callAudioHint: CallAudioHintActions?
     let onOpen: () -> Void
 
-    public init(live: LiveSessionStatus, controls: (any LiveRecordingControls)?, onOpen: @escaping () -> Void) {
+    /// The hint line's text and actions, from `VoiceModels`.
+    public struct CallAudioHintActions {
+        let message: String
+        let openSettings: () -> Void
+        let dismiss: () -> Void
+
+        public init(message: String, openSettings: @escaping () -> Void, dismiss: @escaping () -> Void) {
+            self.message = message
+            self.openSettings = openSettings
+            self.dismiss = dismiss
+        }
+    }
+
+    public init(live: LiveSessionStatus, controls: (any LiveRecordingControls)?,
+                callAudioHint: CallAudioHintActions? = nil, onOpen: @escaping () -> Void) {
         self.live = live
         self.controls = controls
+        self.callAudioHint = callAudioHint
         self.onOpen = onOpen
     }
 
     public var body: some View {
         Text(Self.title(live, at: .now))
+        if let callAudioHint {
+            Divider()
+            Text(callAudioHint.message)
+            Button("Open Call Audio in System Settings…", action: callAudioHint.openSettings)
+            Button("Hide This Hint", action: callAudioHint.dismiss)
+        }
         Divider()
         Button("Open the meeting note", action: onOpen)
         if live.isPaused {

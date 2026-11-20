@@ -63,7 +63,12 @@ struct MferenceMacApp: App {
         // While a meeting records: the time, Open, Pause or Resume, Stop (D7).
         MenuBarExtra(isInserted: Binding(get: { delegate.runtime.voice.liveMeeting != nil }, set: { _ in })) {
             if let live = delegate.runtime.voice.liveMeeting {
-                RecordingMenuContent(live: live, controls: delegate.runtime.voice.recordingControls) {
+                let voice = delegate.runtime.voice
+                RecordingMenuContent(live: live, controls: voice.recordingControls,
+                                     callAudioHint: voice.callAudioHint.map { message in
+                                         .init(message: message, openSettings: { voice.openCallAudioSettings() },
+                                               dismiss: { voice.dismissCallAudioHint() })
+                                     }) {
                     openWindow(id: "main")
                     NSApp.activate()
                     shell.show(.notes)
