@@ -137,6 +137,49 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         typingAttributes = typingAttributesForCaret()
     }
 
+    /// Shows a newer version of the same note (written elsewhere), keeping
+    /// the caret, the selection and pending phrases where they were relative
+    /// to the text around them.
+    func reload(_ document: NoteDocument) {
+        // A copy: `string` is the live storage and changes with the load.
+        let old = NSString(string: string)
+        let selections = selectedRanges.map(\.rangeValue)
+        let phrases = pendingPhrases
+        let lastStyle = emptyLastLineStyle
+        load(document)
+        if (string as NSString).length == 0 { emptyLastLineStyle = lastStyle }
+        let new = NSString(string: string)
+        let move = Self.positionMap(from: old, to: new)
+        pendingPhrases = phrases.map { ($0.id, move($0.location)) }
+        let mapped = selections.map { range -> NSValue in
+            let start = move(range.location)
+            let end = move(NSMaxRange(range))
+            return NSValue(range: NSRange(location: start, length: max(0, end - start)))
+        }
+        setSelectedRanges(mapped, affinity: .downstream, stillSelecting: false)
+        needsDisplay = true
+    }
+
+    /// Maps positions in `old` to `new` around the one changed stretch
+    /// between their common start and common end.
+    static func positionMap(from old: NSString, to new: NSString) -> (Int) -> Int {
+        let oldLength = old.length, newLength = new.length
+        var prefix = 0
+        while prefix < oldLength, prefix < newLength, old.character(at: prefix) == new.character(at: prefix) { prefix += 1 }
+        var suffix = 0
+        while suffix < oldLength - prefix, suffix < newLength - prefix,
+              old.character(at: oldLength - 1 - suffix) == new.character(at: newLength - 1 - suffix) { suffix += 1 }
+        return { position in
+            // After the changed stretch (or at a pure insertion point): moves
+            // with the text after it.
+            if position >= oldLength - suffix, position >= prefix {
+                return min(newLength, max(0, position + newLength - oldLength))
+            }
+            // Before it: stays. Inside it: the start of what replaced it.
+            return min(position, prefix, newLength)
+        }
+    }
+
     /// The document as it is now (pending dictation markers left out).
     var document: NoteDocument {
         guard let textStorage else { return .empty }
