@@ -304,6 +304,23 @@ import Testing
         #expect(h.engine.requests.count == 1)
     }
 
+    @Test func longTypedNotesAreClippedToTheBudget() async throws {
+        let h = try harness(chunkCharacters: 400)
+        let id = try meeting(h, lines: 9)
+        h.writer.typedNotes[id] = String(repeating: "Agenda item with details. ", count: 200)
+        h.summaries.summarize(id)
+        await h.summaries.waitUntilIdle()
+        #expect(h.summaries.status(for: id) == .written)
+        let withNotes = h.engine.requests.compactMap { $0.turns.last?.content }
+            .filter { $0.contains("The person's own notes:") }
+        #expect(withNotes.count == 1)
+        let notes = try #require(withNotes.first?.components(separatedBy: "The person's own notes:\n").last)
+            .replacingOccurrences(of: "\n</untrusted>", with: "")
+        #expect(notes.count <= 100 && notes.hasSuffix("…"))
+        #expect(MeetingSummarizer.clip("one two three", to: 9) == "one two…")
+        #expect(MeetingSummarizer.clip("short", to: 9) == "short")
+    }
+
     @Test func typedNotesGoWithTheTranscript() async throws {
         let h = try harness()
         let id = try meeting(h)

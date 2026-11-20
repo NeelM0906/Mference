@@ -11,7 +11,6 @@ import Testing
 @MainActor
 @Suite(.serialized) struct MeetingSummaryEditorTests {
     static let summary = #"{"summary": ["Notes uses three panes."], "decisions": [], "actionItems": [{"text": "Draw the empty state", "owner": "Sam"}]}"#
-    static let pendingEditor = "Needs #232: the editor takes in writes made through the store while a note is open."
 
     struct Setup {
         let services: AppServices
@@ -46,7 +45,7 @@ import Testing
     }
 
     func hasSummary(_ document: NoteDocument) -> Bool {
-        document.blocks.contains(.heading(level: .heading, runs: [TextRun("Summary")]))
+        document.blocks.contains(.heading(level: .heading, runs: [TextRun("Summary\u{2060}")]))
     }
 
     @Test func aSummaryWrittenWhileTheNoteIsOpenIsKept() async throws {
@@ -58,10 +57,8 @@ import Testing
         // Nothing was typed: saving the open note keeps the summary.
         s.controller.saveNow(force: true)
         #expect(hasSummary(s.stored))
-        withKnownIssue(Comment(rawValue: Self.pendingEditor), isIntermittent: true) {
-            // The open editor shows it.
-            #expect(hasSummary(s.harness.view.document))
-        }
+        // The open editor shows it.
+        #expect(hasSummary(s.harness.view.document))
     }
 
     @Test func typingDuringTheSummaryKeepsBoth() async throws {
@@ -76,10 +73,8 @@ import Testing
         s.controller.saveNow(force: true)
         let saved = s.stored
         #expect(saved.plainText.contains("Ask Priya about the budget"))
-        withKnownIssue(Comment(rawValue: Self.pendingEditor), isIntermittent: true) {
-            // The editor's save merged the summary in instead of dropping it.
-            #expect(hasSummary(saved))
-            #expect(s.services.summaries.uncheckedActionItemCount(for: s.noteID) == 1)
-        }
+        // The editor's save merged the summary in instead of dropping it.
+        #expect(hasSummary(saved))
+        #expect(s.services.summaries.uncheckedActionItemCount(for: s.noteID) == 1)
     }
 }

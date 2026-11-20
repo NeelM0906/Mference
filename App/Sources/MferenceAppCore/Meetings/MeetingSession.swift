@@ -460,6 +460,12 @@ public enum MeetingCopy {
 
     public static let micOnly = "Call audio was off, so only your microphone was recorded."
 
+    /// A line this layer wrote into the note (not the person's own notes).
+    public static func isMeetingLine(_ line: String) -> Bool {
+        line == micOnly || line.hasPrefix("Recording ended unexpectedly at ")
+            || (line.hasPrefix("Call audio stopped at ") && line.hasSuffix("recorded after that."))
+    }
+
     /// Call audio failed partway through a meeting.
     public static func callAudioStopped(at date: Date, locale: Locale = .current,
                                         timeZone: TimeZone = .current) -> String {

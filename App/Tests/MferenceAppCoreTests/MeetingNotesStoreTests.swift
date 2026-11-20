@@ -40,7 +40,7 @@ import Testing
         let note = try #require(try notes.note(id: id))
         let blocks = notes.document(of: note).blocks
         #expect(blocks.map(\.text) == [
-            "Design review", "Summary", "Notes uses three panes.", "Dictation inserts text after each pause.",
+            "Design review", "Summary\u{2060}", "Notes uses three panes.", "Dictation inserts text after each pause.",
             "Decisions", "Group the list by day.", "Action items",
             "Draw the empty state for Meetings · Sam", "Check call-audio permission copy", "My own line.",
         ])
@@ -68,8 +68,20 @@ import Testing
         #expect(notes.actionItems(in: id).map(\.isDone) == [true, false])
 
         try notes.replaceMeetingSections(MeetingSections(summary: ["Short."]), in: id)
-        #expect(notes.document(of: note).blocks.map(\.text) == ["Call", "Summary", "Short.", "Typed after."])
+        #expect(notes.document(of: note).blocks.map(\.text) == ["Call", "Summary\u{2060}", "Short.", "Typed after."])
         #expect(notes.actionItems(in: id).isEmpty)
+    }
+
+    @Test func sectionsBelowATypedLineAreStillFoundAndReplacedInPlace() throws {
+        // The editor merges a line typed during the summary in above it.
+        let blocks: [NoteDocument.Block] = [.heading(level: .title, runs: [TextRun("Call")]),
+                                            .paragraph(runs: [TextRun("Typed while it ran.")])]
+            + MeetingBlocks.blocks(for: Self.sections)
+            + [.paragraph(runs: [TextRun("Typed after.")])]
+        #expect(MeetingBlocks.actionItems(in: blocks).count == 2)
+        #expect(MeetingBlocks.personalNotes(in: blocks) == "Typed while it ran.\nTyped after.")
+        let redone = MeetingBlocks.replacingSections(in: blocks, with: MeetingSections(summary: ["Short."]))
+        #expect(redone.map(\.text) == ["Call", "Typed while it ran.", "Summary\u{2060}", "Short.", "Typed after."])
     }
 
     @Test func markersAndLinesGoAtTheEnd() throws {
@@ -112,11 +124,11 @@ import Testing
         let note = try #require(try services.notes.note(id: id))
         // Read back from the stored body, as after a relaunch.
         let stored = NoteDocument.decode(note.bodyJSON)
-        #expect(stored.blocks.contains(.heading(level: .heading, runs: [TextRun("Summary")])))
+        #expect(stored.blocks.contains(.heading(level: .heading, runs: [TextRun("Summary\u{2060}")])))
         #expect(services.summaries.uncheckedActionItemCount(for: id) == 2)
     }
 
-    @Test func quittingStopsTheMeetingThenSpeech() async throws {
+    @Test func quittingStopsTheMeetingAndWaitsForItsTranscript() async throws {
         let speech = FakeSpeechService(stepped: true)
         let services = AppServices.preview(speech: speech)
         let id = try await services.meetings.start(MeetingStartOptions(summaryWhenStopped: false))
@@ -124,9 +136,34 @@ import Testing
         #expect(!services.meetings.isActive)
         let record = try #require(try services.notes.note(id: id)?.recording)
         #expect(record.endedAt != nil && record.transcriptionState == .done)
-        let calls = speech.calls
-        let stop = try #require(calls.firstIndex(of: .stopMeeting))
-        let shutdown = try #require(calls.firstIndex(of: .shutdown))
-        #expect(stop < shutdown)
+        #expect(speech.calls.contains(.stopMeeting))
+        // AppRuntime shuts speech down next; this step doesn't do it twice.
+        #expect(!speech.calls.contains(.shutdown))
+    }
+
+    @Test func aSummaryHeadingThePersonTypedIsNeverReplaced() throws {
+        let (notes, _) = try store()
+        let id = UUID()
+        let note = try notes.createNote(id: id, kind: .meeting, title: "Planning", now: .now)
+        // The person typed their own Summary section during the meeting.
+        try notes.save(NoteDocument(blocks: [.heading(level: .title, runs: [TextRun("Planning")]),
+                                             .heading(level: .heading, runs: [TextRun("Summary")]),
+                                             .bullet(runs: [TextRun("My own point.")], indent: 0)]), to: note)
+        try notes.replaceMeetingSections(Self.sections, in: id)
+        try notes.replaceMeetingSections(MeetingSections(summary: ["Redone."]), in: id)
+        let texts = notes.document(of: note).blocks.map(\.text)
+        #expect(texts == ["Planning", "Summary\u{2060}", "Redone.", "Summary", "My own point."])
+        #expect(notes.personalNotes(in: id) == "Summary\nMy own point.")
+        #expect(notes.actionItems(in: id).isEmpty)
+    }
+
+    @Test func meetingLinesAreNotSentAsThePersonsNotes() throws {
+        let (notes, _) = try store()
+        let id = UUID()
+        try notes.createNote(id: id, kind: .meeting, title: "Call", createdAt: .now)
+        try notes.appendParagraph(MeetingCopy.micOnly, to: id)
+        try notes.appendParagraph("Recording ended unexpectedly at 10:42", to: id)
+        try notes.appendParagraph("Budget is tight.", to: id)
+        #expect(notes.personalNotes(in: id) == "Budget is tight.")
     }
 }

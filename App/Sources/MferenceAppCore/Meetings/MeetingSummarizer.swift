@@ -161,7 +161,10 @@ public struct MeetingSummarizer: Sendable {
 
     private func summarize(lines: [String], notes: String, limit: Int,
                            progress: @Sendable (Step) async -> Void) async throws -> MeetingSections {
-        let trimmedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The person's notes go in every final request: at most a quarter of
+        // the budget, and the transcript chunks and combine step get the rest.
+        let trimmedNotes = Self.clip(notes.trimmingCharacters(in: .whitespacesAndNewlines), to: limit / 4)
+        let transcriptLimit = max(Self.smallestChunk / 2, limit - trimmedNotes.count)
         let whole = lines.joined(separator: "\n")
         if whole.count + trimmedNotes.count <= limit {
             return try await ask(system: prompt.system, input: Self.input(transcript: whole, notes: trimmedNotes))
@@ -174,7 +177,16 @@ public struct MeetingSummarizer: Sendable {
             partNotes.append(try await ask(system: prompt.mapSystem, input: Self.input(transcript: part, notes: "")))
         }
         await progress(.combining)
-        return try await reduce(partNotes, notes: trimmedNotes, limit: limit)
+        // Room for the notes in every combine request.
+        return try await reduce(partNotes, notes: trimmedNotes, limit: transcriptLimit)
+    }
+
+    /// At most `limit` characters, cut at a word where it can be, with "…".
+    static func clip(_ text: String, to limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let head = text.prefix(max(0, limit - 1))
+        let cut = head.lastIndex(where: \.isWhitespace).map { head[..<$0] } ?? head
+        return String(cut) + "…"
     }
 
     /// Combines parts' notes, in rounds when they are themselves too long.

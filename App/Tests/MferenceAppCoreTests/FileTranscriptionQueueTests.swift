@@ -118,6 +118,25 @@ import Testing
         #expect(speech.calls.contains { if case .cancel = $0 { true } else { false } })
     }
 
+    @Test func cancellingThroughTheNotesStoreDeletesTheNoteAndItsRecordings() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let container = try AppModelContainer.inMemory()
+        let notes = NoteStore(container: container, attachments: .temporary(), speech: speech)
+        let queue = FileTranscriptionQueue(speech: speech, writer: notes)
+        let ids = await queue.add([URL(filePath: "/tmp/lecture.m4a")], options: FileImportOptions(summarize: true))
+        let id = try #require(ids.first)
+        speech.advance() // queued
+        speech.advance() // started
+        for _ in 0..<50 { await Task.yield() }
+        await queue.cancel(id)
+        for _ in 0..<500 where (try? notes.note(id: id)) != nil { await Task.yield() }
+        #expect(try notes.note(id: id) == nil)
+        #expect(speech.calls.contains(.deleteRecordings(id)))
+        #expect(queue.rows.isEmpty)
+        // Nothing is left for the next launch to re-queue.
+        #expect(await queue.recoverInterruptedJobs().isEmpty)
+    }
+
     @Test func filesWaitWhileAMeetingRecords() async throws {
         let speech = FakeSpeechService(stepped: true)
         let h = try harness(speech)

@@ -187,6 +187,13 @@ public final class FileTranscriptionQueue {
             fail(noteID, message: error.message)
         case .cancelled:
             rows.removeAll { $0.noteID == noteID }
+            // Never left "running": if the note can't be deleted for good
+            // it stays in Recently deleted as failed, and is not re-queued.
+            if let record = fetchNote(noteID)?.recording {
+                record.transcriptionState = .failed
+                record.summaryState = .none
+                try? context.save()
+            }
             // Through the Notes store: the note and its recordings go together.
             Task { [writer] in await writer.discardNote(noteID) }
         }
@@ -251,7 +258,8 @@ public final class FileTranscriptionQueue {
         var requeued: [UUID] = []
         for record in open {
             // A file added during launch is already queued: leave it.
-            guard let note = record.note, let fileName = record.sourceFileName, jobs[note.id] == nil else { continue }
+            guard let note = record.note, note.deletedAt == nil, let fileName = record.sourceFileName,
+                  jobs[note.id] == nil else { continue }
             let copy = speech.recordingsDirectory(for: note.id).appending(path: fileName)
             guard FileManager.default.fileExists(atPath: copy.path) else {
                 upsertRow(Row(noteID: note.id, fileName: fileName, phase: .queued, fraction: 0))

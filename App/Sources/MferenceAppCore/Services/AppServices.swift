@@ -92,6 +92,7 @@ public final class AppServices {
         // Meeting and file notes write through the one Notes store (its
         // context, its revision), so an open editor takes their writes in.
         let writer = meetingWriter ?? notes
+        precondition(writer.context === notes.context, "Meeting notes must be written on the Notes store's context")
         let meetings = MeetingSession(speech: speech, writer: writer)
         let summaries = MeetingSummaries(
             engine: engine,
@@ -168,13 +169,11 @@ public final class AppServices {
         return services
     }
 
-    /// The voice part of quitting (spec 6.1), after the person confirmed:
-    /// stops a meeting and waits until its transcript is saved, then shuts
-    /// the speech service down (capture stopped, files closed, file jobs
-    /// cancelled). `AppRuntime` runs it before web and the engine.
+    /// The meeting part of quitting (spec 6.1), after the person confirmed:
+    /// stops a recording meeting and waits until its transcript is saved.
+    /// `AppRuntime` then shuts speech down, then web, then the engine.
     public func shutDownVoice() async {
         await meetings.stopForQuit()
-        await speech.shutdown()
     }
 
     /// Closes meetings and re-queues files the app quit in, once, before any

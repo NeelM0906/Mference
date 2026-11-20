@@ -36,8 +36,12 @@ extension NoteStore: MeetingNoteWriting {
         try edit(noteID) { $0.append(.marker(time: time)) }
     }
 
+    /// Deleting for good applies only to notes in Recently deleted, so the
+    /// note goes there first. If its files can't be removed it stays there,
+    /// and the next purge retries.
     public func discardNote(_ noteID: UUID) async {
         guard let note = try? self.note(id: noteID) else { return }
+        if note.deletedAt == nil { try? moveToTrash(note) }
         try? await deletePermanently(note)
     }
 
@@ -59,14 +63,22 @@ extension NoteStore: MeetingNoteWriting {
 /// How the meeting sections look as note blocks, right after the title line:
 /// heading "Summary" + bullets, heading "Decisions" + bullets (when there are
 /// some), heading "Action items" + checklist rows ("text · owner").
+///
+/// The generated "Summary" heading ends with an invisible word joiner
+/// (U+2060): it marks the range as written by the summary, so only that range
+/// is ever replaced or left out of the person's notes. A "Summary" heading the
+/// person typed has no mark and is never touched; if the person retypes the
+/// generated heading, the mark goes and the next summary is inserted fresh.
 enum MeetingBlocks {
+    static let generatedMark = "\u{2060}"
     static let summaryHeading = "Summary"
     static let decisionsHeading = "Decisions"
     static let actionItemsHeading = "Action items"
     static let ownerSeparator = " · "
 
     static func blocks(for sections: MeetingSections) -> [NoteDocument.Block] {
-        var blocks: [NoteDocument.Block] = [heading(summaryHeading)]
+        var blocks: [NoteDocument.Block] = [.heading(level: .heading,
+                                                     runs: [TextRun(summaryHeading + generatedMark)])]
         blocks += sections.summary.map { .bullet(runs: [TextRun($0)], indent: 0) }
         if !sections.decisions.isEmpty {
             blocks.append(heading(decisionsHeading))
@@ -83,12 +95,14 @@ enum MeetingBlocks {
         return blocks
     }
 
-    /// The written sections' blocks, if the body starts (after its title
-    /// line) with them: the Summary heading and everything that still has
-    /// the sections' shape after it.
+    /// The generated sections' blocks: the marked "Summary" heading and
+    /// everything after it that still has the sections' shape. They are
+    /// written right after the title line, but lines the person typed while
+    /// the summary was written are merged in above them, so the heading is
+    /// looked for wherever it is.
     static func sectionRange(in blocks: [NoteDocument.Block]) -> Range<Int>? {
-        let start = firstBodyIndex(blocks)
-        guard start < blocks.count, isHeading(blocks[start], summaryHeading) else { return nil }
+        guard let start = blocks.firstIndex(where: { isHeading($0, summaryHeading + generatedMark) })
+        else { return nil }
         var index = start + 1
         var section = summaryHeading
         while index < blocks.count {
@@ -143,7 +157,8 @@ enum MeetingBlocks {
         return rows
     }
 
-    /// What the person typed: the body's text outside the title line and the sections.
+    /// What the person typed: the body's text outside the title line, the
+    /// generated sections and the lines the meeting layer wrote.
     static func personalNotes(in blocks: [NoteDocument.Block]) -> String {
         let skipped = sectionRange(in: blocks)
         let start = firstBodyIndex(blocks)
@@ -151,7 +166,7 @@ enum MeetingBlocks {
             .map { blocks[$0] }
             .filter(\.isText)
             .map { $0.text.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+            .filter { !$0.isEmpty && !MeetingCopy.isMeetingLine($0) }
             .joined(separator: "\n")
     }
 
