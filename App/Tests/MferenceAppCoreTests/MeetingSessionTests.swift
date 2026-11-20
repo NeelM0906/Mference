@@ -11,7 +11,7 @@ import Testing
     static let start = Date(timeIntervalSince1970: 1_795_082_520) // 2026-11-19 10:02 UTC
     static let utc = TimeZone(identifier: "UTC")!
 
-    struct Harness {
+    @MainActor struct Harness {
         let container: ModelContainer
         let writer: InMemoryMeetingNoteWriter
         let session: MeetingSession
@@ -109,7 +109,7 @@ import Testing
         let h = try harness(speech)
         let noteID = try await h.session.start(MeetingStartOptions())
         while speech.advance() {}
-        await settle { h.recording(noteID)?.segments.count == 1 }
+        await settle { h.session.transcript?.segments.map(\.track) == [.call] }
         #expect(h.recording(noteID)?.segments.map(\.track) == [.call])
         #expect(h.session.transcript?.segments.count == 1)
     }
@@ -178,7 +178,7 @@ import Testing
 
     @Test func theDefaultTitleIsTimeStamped() {
         #expect(MeetingCopy.defaultTitle(Self.start, locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
-            == "Meeting 19 Nov, 10:02")
+            == "Meeting 19 Nov at 10:02")
     }
 
     @Test func notKeepingAudioIsRecorded() async throws {

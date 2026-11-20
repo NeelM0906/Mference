@@ -356,7 +356,7 @@ public final class MeetingSession {
 
 /// The meeting lines the note shows (spec 4.3, 6.3).
 public enum MeetingCopy {
-    /// The title a meeting note has until the summary names it: "Meeting 19 Nov, 10:02".
+    /// The title a meeting note has until the summary names it: "Meeting 19 Nov at 10:02" (en_GB).
     public static func defaultTitle(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
         "Meeting " + date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone)
             .day().month(.abbreviated).hour().minute())
