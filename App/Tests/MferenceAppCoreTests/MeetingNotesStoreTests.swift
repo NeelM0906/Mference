@@ -42,7 +42,7 @@ import Testing
         #expect(blocks.map(\.text) == [
             "Design review", "Summary\u{2060}", "Notes uses three panes.", "Dictation inserts text after each pause.",
             "Decisions", "Group the list by day.", "Action items",
-            "Draw the empty state for Meetings · Sam", "Check call-audio permission copy", "My own line.",
+            "Draw the empty state for Meetings · Sam", "Check call-audio permission copy", "\u{2060}", "My own line.",
         ])
         #expect(notes.actionItems(in: id) == [
             MeetingActionItemRow(item: MeetingActionItem(text: "Draw the empty state for Meetings", owner: "Sam"),
@@ -68,7 +68,8 @@ import Testing
         #expect(notes.actionItems(in: id).map(\.isDone) == [true, false])
 
         try notes.replaceMeetingSections(MeetingSections(summary: ["Short."]), in: id)
-        #expect(notes.document(of: note).blocks.map(\.text) == ["Call", "Summary\u{2060}", "Short.", "Typed after."])
+        #expect(notes.document(of: note).blocks.map(\.text) == ["Call", "Summary\u{2060}", "Short.", "\u{2060}",
+                                                                 "Typed after."])
         #expect(notes.actionItems(in: id).isEmpty)
     }
 
@@ -81,7 +82,29 @@ import Testing
         #expect(MeetingBlocks.actionItems(in: blocks).count == 2)
         #expect(MeetingBlocks.personalNotes(in: blocks) == "Typed while it ran.\nTyped after.")
         let redone = MeetingBlocks.replacingSections(in: blocks, with: MeetingSections(summary: ["Short."]))
-        #expect(redone.map(\.text) == ["Call", "Typed while it ran.", "Summary\u{2060}", "Short.", "Typed after."])
+        #expect(redone.map(\.text) == ["Call", "Typed while it ran.", "Summary\u{2060}", "Short.", "\u{2060}",
+                                       "Typed after."])
+    }
+
+    @Test func thePersonsListRightAfterTheSummaryStaysTheirs() throws {
+        // Codex review on #251: bullets and checklist rows the person had
+        // under the title must not be taken for generated ones.
+        let blocks: [NoteDocument.Block] = [.heading(level: .title, runs: [TextRun("Call")])]
+            + MeetingBlocks.blocks(for: MeetingSections(summary: ["Generated."]))
+            + [.bullet(runs: [TextRun("Mine.")], indent: 0), .check(runs: [TextRun("My task")], done: false, indent: 0)]
+        #expect(MeetingBlocks.personalNotes(in: blocks) == "Mine.\nMy task")
+        #expect(MeetingBlocks.actionItems(in: blocks).isEmpty)
+        let redone = MeetingBlocks.replacingSections(in: blocks, with: MeetingSections(summary: ["Short."]))
+        #expect(redone.map(\.text) == ["Call", "Summary\u{2060}", "Short.", "\u{2060}", "Mine.", "My task"])
+    }
+
+    @Test func withoutItsEndLineTheSectionsAreFoundByShape() throws {
+        // The person typed into the end line: the sections' shape decides.
+        var blocks: [NoteDocument.Block] = [.heading(level: .title, runs: [TextRun("Call")])]
+            + MeetingBlocks.blocks(for: Self.sections)
+        blocks[blocks.count - 1] = .paragraph(runs: [TextRun("\u{2060}Typed here.")])
+        #expect(MeetingBlocks.actionItems(in: blocks).count == 2)
+        #expect(MeetingBlocks.personalNotes(in: blocks) == "Typed here.")
     }
 
     @Test func markersAndLinesGoAtTheEnd() throws {
@@ -152,7 +175,7 @@ import Testing
         try notes.replaceMeetingSections(Self.sections, in: id)
         try notes.replaceMeetingSections(MeetingSections(summary: ["Redone."]), in: id)
         let texts = notes.document(of: note).blocks.map(\.text)
-        #expect(texts == ["Planning", "Summary\u{2060}", "Redone.", "Summary", "My own point."])
+        #expect(texts == ["Planning", "Summary\u{2060}", "Redone.", "\u{2060}", "Summary", "My own point."])
         #expect(notes.personalNotes(in: id) == "Summary\nMy own point.")
         #expect(notes.actionItems(in: id).isEmpty)
     }

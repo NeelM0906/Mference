@@ -71,11 +71,22 @@ public final class RecordingStore: Sendable {
 
     func manifestURL(_ noteID: UUID) -> URL { directory(for: noteID).appending(path: Self.manifestName) }
 
-    func readManifest(_ noteID: UUID) -> Manifest? {
-        guard let data = try? Data(contentsOf: manifestURL(noteID)) else { return nil }
+    func readManifest(_ noteID: UUID) -> Manifest? { Self.readManifest(in: directory(for: noteID)) }
+
+    static func readManifest(in folder: URL) -> Manifest? {
+        guard let data = try? Data(contentsOf: folder.appending(path: manifestName)) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(Manifest.self, from: data)
+    }
+
+    /// The kept tracks of a recording already recovered at an earlier launch,
+    /// for a note that never saved them (the app quit in between).
+    static func recoveredTracks(in folder: URL) -> [RecordedTrack] {
+        guard let manifest = readManifest(in: folder), manifest.state == .recovered, manifest.keepAudio else { return [] }
+        return manifest.tracks.filter {
+            FileManager.default.fileExists(atPath: folder.appending(path: $0.fileName).path)
+        }
     }
 
     func writeManifest(_ manifest: Manifest) throws {

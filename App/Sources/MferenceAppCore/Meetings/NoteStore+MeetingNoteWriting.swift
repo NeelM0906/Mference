@@ -70,8 +70,10 @@ extension NoteStore: MeetingNoteWriting {
 /// some), heading "Action items" + checklist rows ("text · owner").
 ///
 /// The generated "Summary" heading ends with an invisible word joiner
-/// (U+2060): it marks the range as written by the summary, so only that range
-/// is ever replaced or left out of the person's notes. A "Summary" heading the
+/// (U+2060), and a line holding only that mark ends the sections: together
+/// they mark the range as written by the summary, so only that range is ever
+/// replaced or left out of the person's notes (the person's own bullets or
+/// checklist right after it stay theirs). A "Summary" heading the
 /// person typed has no mark and is never touched; if the person retypes the
 /// generated heading, the mark goes and the next summary is inserted fresh.
 enum MeetingBlocks {
@@ -97,7 +99,17 @@ enum MeetingBlocks {
                 return .check(runs: runs, done: false, indent: 0)
             }
         }
+        blocks.append(endMarker)
         return blocks
+    }
+
+    /// The line that ends the generated sections: just the mark, shown as
+    /// an empty line.
+    static let endMarker = NoteDocument.Block.paragraph(runs: [TextRun(generatedMark)])
+
+    private static func isEndMarker(_ block: NoteDocument.Block) -> Bool {
+        guard case .paragraph(let runs) = block else { return false }
+        return runs.map(\.text).joined() == generatedMark
     }
 
     /// The generated sections' blocks: the marked "Summary" heading and
@@ -108,6 +120,9 @@ enum MeetingBlocks {
     static func sectionRange(in blocks: [NoteDocument.Block]) -> Range<Int>? {
         guard let start = blocks.firstIndex(where: { isHeading($0, summaryHeading + generatedMark) })
         else { return nil }
+        if let end = blocks[(start + 1)...].firstIndex(where: isEndMarker) { return start..<(end + 1) }
+        // No end line (the person typed into it or deleted it): the blocks
+        // that still have the sections' shape.
         var index = start + 1
         var section = summaryHeading
         while index < blocks.count {
@@ -170,7 +185,7 @@ enum MeetingBlocks {
         return blocks.indices.filter { $0 >= start && !(skipped?.contains($0) ?? false) }
             .map { blocks[$0] }
             .filter(\.isText)
-            .map { $0.text.trimmingCharacters(in: .whitespaces) }
+            .map { $0.text.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: generatedMark))) }
             .filter { !$0.isEmpty && !MeetingCopy.isMeetingLine($0) }
             .joined(separator: "\n")
     }

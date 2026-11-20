@@ -315,6 +315,11 @@ public final class MeetingSession {
             predicate: #Predicate { $0.endedAt == nil }))) ?? []
         for record in open {
             guard let note = record.note, note.kind == .meeting, note.id != noteID else { continue }
+            // Recovered at an earlier launch that quit before the note saved
+            // its tracks: they are still in the recording's manifest.
+            if record.tracks.isEmpty {
+                record.tracks = RecordingStore.recoveredTracks(in: speech.recordingsDirectory(for: note.id))
+            }
             closeInterrupted(record, noteID: note.id, endedAt: nil)
             closed.append(note.id)
         }

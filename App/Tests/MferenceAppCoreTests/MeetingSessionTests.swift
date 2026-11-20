@@ -731,6 +731,32 @@ import Testing
         #expect(speech.calls.filter { $0 == .recoverInterruptedRecordings }.count == 1)
     }
 
+    @Test func tracksRecoveredByALaunchThatQuitEarlyAreStillAttached() async throws {
+        // Codex review on #251: the recording was marked recovered, then the
+        // app quit before the note saved its tracks.
+        let root = FileManager.default.temporaryDirectory.appending(path: "n4-recovered-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let speech = FakeSpeechService(recordingsRoot: root)
+        let h = try harness(speech)
+        let id = UUID()
+        try h.writer.createNote(id: id, kind: .meeting, title: "Meeting", createdAt: Self.start)
+        let record = NoteRecording(startedAt: Self.start)
+        record.transcriptionState = .live
+        h.context.insert(record)
+        h.note(id)?.recording = record
+        try h.context.save()
+        let store = RecordingStore(root: root)
+        let track = RecordedTrack(fileName: "microphone-1.m4a", kind: .microphone, startOffset: 0, duration: 40)
+        try store.writeManifest(RecordingStore.Manifest(noteID: id, startedAt: Self.start, state: .recovered,
+                                                        keepAudio: true, tracks: [track], updatedAt: Self.start))
+        try Data([0]).write(to: store.directory(for: id).appending(path: track.fileName))
+
+        #expect(await h.session.recoverInterruptedMeetings() == [id])
+        let recovered = try #require(h.recording(id))
+        #expect(recovered.tracks == [track])
+        #expect(recovered.audioKept)
+    }
+
     @Test func recoveryLeavesTheLiveMeetingAlone() async throws {
         let speech = FakeSpeechService(stepped: true)
         let h = try harness(speech)
