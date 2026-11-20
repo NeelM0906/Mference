@@ -3,5 +3,10 @@
 !Sources/**/Models/
 !Tests/**/Models/
 
+# It also drops any `notes/` directory (program notes), which on a
+# case-insensitive file system matches the app's Notes source folders.
+!Sources/**/Notes/
+!Tests/**/Notes/
+
 # Scripts/bundle.sh output (Mference.app).
 /build/

@@ -1,0 +1,94 @@
+import Foundation
+
+/// Joins a dictated phrase into the text around the place it lands
+/// (Notes spec 4.2): one space between phrases, never two; no leading space
+/// at the start of a line; a capital letter after the end of a sentence or at
+/// the start of a line. Pure, so dictation tests need no editor.
+public enum PhraseJoiner {
+    /// The text to insert for `phrase` between `preceding` and `following`
+    /// (the text before and after the insertion point; only their ends
+    /// matter). Empty when the phrase has no words.
+    public static func text(for phrase: String, preceding: some StringProtocol,
+                            following: some StringProtocol) -> String {
+        var words = collapseSpaces(phrase.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !words.isEmpty else { return "" }
+
+        let before = preceding.last
+        // A chip or image on the line counts as a line start.
+        let atLineStart = before == nil || before!.isNewline || before! == "\u{FFFC}"
+        let lastVisible = preceding.last { !$0.isWhitespace || $0.isNewline }
+        // A sentence end may sit inside closing quotes or brackets ('." ', '.)').
+        let lastMeaningful = preceding.last { !($0.isWhitespace && !$0.isNewline) && !closingQuotes.contains($0) }
+        let afterSentence = lastMeaningful.map { sentenceEnds.contains($0) } ?? false
+
+        if atLineStart || afterSentence || (lastVisible?.isNewline ?? false) {
+            words = capitalizingFirstLetter(words)
+        } else if !isOpening(before!, in: preceding), words.contains(" ") {
+            // Mid-sentence: the model capitalises each phrase on its own, so a
+            // sentence-opener word continues the sentence in lower case
+            // ("…lower right" + "And whether" → "and whether"). Not after an
+            // opening quote or bracket, and not a lone word ("Vitamin" + "A").
+            // Names and "I" are never in the list.
+            words = lowercasingOpener(words)
+        }
+        let leading: String
+        if atLineStart || before!.isWhitespace || isOpening(before!, in: preceding) || startsWithClosingPunctuation(words) {
+            leading = ""
+        } else {
+            leading = " "
+        }
+        let trailing: String
+        if let next = following.first, !next.isWhitespace, !closers.contains(next) {
+            trailing = " "
+        } else {
+            trailing = ""
+        }
+        return leading + words + trailing
+    }
+
+    private static let sentenceEnds: Set<Character> = [".", "!", "?", "…", "。", "！", "？"]
+    private static let closingQuotes: Set<Character> = ["\"", "'", "”", "’", "»", ")", "]"]
+    private static let openers: Set<Character> = ["(", "[", "{", "\"", "'", "“", "‘", "«", "/", "-", "—"]
+    private static let closers: Set<Character> = [".", ",", ";", ":", "!", "?", ")", "]", "}", "\"", "'", "”", "’", "»", "…"]
+
+    /// An opening bracket or quote. A straight quote opens only after a
+    /// space or at the start ("said \"" opens; "stop.\"" closes).
+    private static func isOpening(_ character: Character, in preceding: some StringProtocol) -> Bool {
+        guard openers.contains(character) else { return false }
+        guard character == "\"" || character == "'" else { return true }
+        let beforeQuote = preceding.dropLast().last
+        return beforeQuote == nil || beforeQuote!.isWhitespace || openers.contains(beforeQuote!)
+    }
+
+    private static func startsWithClosingPunctuation(_ text: String) -> Bool {
+        guard let first = text.first else { return false }
+        return [",", ".", ";", ":", "!", "?", ")"].contains(first)
+    }
+
+    private static func collapseSpaces(_ text: String) -> String {
+        text.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
+    }
+
+    private static let sentenceOpeners: Set<String> = [
+        "And", "But", "So", "Then", "Or", "Also", "Because", "Which", "That", "The", "A", "An", "If", "When",
+        "While", "With", "To", "Of", "In", "On", "For", "It", "We", "This", "There", "Who", "What", "Where",
+    ]
+
+    private static func lowercasingOpener(_ text: String) -> String {
+        let word = String(text.prefix { $0.isLetter })
+        guard sentenceOpeners.contains(word) else { return text }
+        let rest = text.dropFirst(word.count)
+        // "And," keeps going; "A-team" or "So2" are not the opener word.
+        guard rest.first.map({ $0.isWhitespace || $0.isPunctuation && $0 != "-" }) ?? true else { return text }
+        return word.lowercased() + rest
+    }
+
+    /// Capitalises a first word that starts with a lowercase letter and is
+    /// all lowercase ("next" → "Next"); leaves "3 apples", "iPhone", "eBay".
+    private static func capitalizingFirstLetter(_ text: String) -> String {
+        guard let first = text.first, first.isLetter, first.isLowercase else { return text }
+        let word = text.prefix { !$0.isWhitespace }
+        guard !word.dropFirst().contains(where: \.isUppercase) else { return text }
+        return first.uppercased() + text.dropFirst()
+    }
+}

@@ -46,6 +46,12 @@ import Testing
         #expect(ShellModel.Appearance.system.colorScheme == nil)
     }
 
+    @Test func notesIsBuiltWithItsNoteIcon() {
+        #expect(!AppSection.notes.isComingLater)
+        #expect(AppSection.notes.systemImage == "note.text")
+        #expect(AppSection.allCases.filter(\.isComingLater) == [.errands])
+    }
+
     @Test func phaseCSectionsHaveHonestCopy() {
         for section in AppSection.allCases where section.isComingLater {
             let copy = ComingLaterView.copy(for: section)
@@ -62,7 +68,7 @@ import Testing
     static let boards: [(AppSection, String)] = [
         (.chat, "02-chat-web"),
         (.errands, "05-errands"),
-        (.notes, "06-notes-dictation"),
+        (.notes, "notes-01-main"),
     ]
 
     @Test(arguments: [ColorScheme.light, .dark])

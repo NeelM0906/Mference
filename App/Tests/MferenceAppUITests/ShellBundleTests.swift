@@ -33,6 +33,7 @@ import Testing
             .camera: ["NSCameraUsageDescription"],
             .mailAutomation: ["NSAppleEventsUsageDescription"],
             .microphone: ["NSMicrophoneUsageDescription"],
+            .systemAudio: ["NSAudioCaptureUsageDescription"],
             .photos: ["NSPhotoLibraryUsageDescription"],
             .fullDiskAccess: [],
         ]

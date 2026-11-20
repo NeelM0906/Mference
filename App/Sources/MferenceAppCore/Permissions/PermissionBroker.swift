@@ -13,6 +13,9 @@ public enum AppPermission: String, Sendable, Hashable, Codable, CaseIterable {
     case fullDiskAccess
     case mailAutomation
     case microphone
+    /// Call audio: a Core Audio process tap on other apps' output (Notes
+    /// spec 4.3, meetings).
+    case systemAudio
     /// Find reads the Photos library (Settings › Find › Photos library).
     case photos
 
@@ -24,7 +27,8 @@ public enum AppPermission: String, Sendable, Hashable, Codable, CaseIterable {
         case .camera: "To scan a receipt or document with the camera."
         case .fullDiskAccess: "To read Apple Mail on this Mac. Mail never leaves this Mac."
         case .mailAutomation: "To send a reply through Mail when you click Send."
-        case .microphone: "To take dictation on this Mac."
+        case .microphone: "To hear you when you dictate or record a meeting."
+        case .systemAudio: "To hear the other side of a call while you record a meeting."
         case .photos: "To find photos and videos in your Photos library by what is in them, on this Mac."
         }
     }

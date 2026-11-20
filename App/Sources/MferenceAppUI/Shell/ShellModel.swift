@@ -96,7 +96,51 @@ public final class ShellModel {
     /// The section to return to when Settings closes.
     public private(set) var sectionBeforeSettings: AppSection = .chat
 
+    /// Work that must finish before a section is left, or nil when nothing
+    /// waits. Notes sets it so dictation lands its last phrase before the
+    /// editor goes away (spec 4.2); the switch happens when it returns.
+    @ObservationIgnored public var finishBeforeLeaving: (@MainActor (AppSection) -> (@MainActor () async -> Void)?)?
+    @ObservationIgnored private var pendingLeave: Task<Void, Never>?
+
+    /// The longest a section switch waits for that work; past it the switch
+    /// happens anyway (the editor keeps a phrase it was holding).
+    @ObservationIgnored public var leaveTimeout: Duration = .seconds(3)
+
     public func show(_ section: AppSection) {
+        // A switch already waiting: the newest choice wins (Chat, then back
+        // to Notes, stays in Notes).
+        if let pending = pendingLeave {
+            pending.cancel()
+            pendingLeave = nil
+            if section == selection { return }
+        }
+        if section != selection, let finish = finishBeforeLeaving?(selection) {
+            let limit = leaveTimeout
+            pendingLeave = Task { [weak self] in
+                await Self.waitAtMost(limit, for: finish)
+                guard !Task.isCancelled else { return }
+                self?.pendingLeave = nil
+                self?.switchTo(section)
+            }
+            return
+        }
+        switchTo(section)
+    }
+
+    /// Runs `work`, but returns after `limit` even if it hasn't finished.
+    static func waitAtMost(_ limit: Duration, for work: @escaping @MainActor () async -> Void) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await work() }
+            group.addTask { try? await Task.sleep(for: limit) }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// Waits for a section switch that is finishing work first (tests).
+    func waitForPendingSwitch() async { await pendingLeave?.value }
+
+    private func switchTo(_ section: AppSection) {
         if section == .settings, selection != .settings {
             sectionBeforeSettings = selection
         }

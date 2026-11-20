@@ -34,7 +34,7 @@ import Testing
 
     @Test func paneTitlesFollowTheMockup() {
         #expect(SettingsView.Pane.allCases.map(\.title)
-                == ["Models", "Find", "Memory", "Privacy", "Connections", "Dictation", "Shortcuts", "iPhone"])
+                == ["Models", "Find", "Memory", "Privacy", "Connections", "Speech", "Shortcuts", "iPhone"])
     }
 
     @Test func memoryAddEditDelete() throws {

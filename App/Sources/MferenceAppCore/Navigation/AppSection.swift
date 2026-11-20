@@ -33,13 +33,14 @@ public enum AppSection: String, Sendable, Hashable, Codable, CaseIterable, Ident
         case .find: "doc.text.magnifyingglass"
         case .mail: "envelope"
         case .calendar: "calendar"
-        case .notes: "waveform"
+        case .notes: "note.text"
         case .errands: "globe"
         case .scan: "viewfinder"
         case .settings: "gearshape"
         }
     }
 
-    /// Phase C sections (P3/P7): shown, but with a "Coming later" screen.
-    public var isComingLater: Bool { self == .notes || self == .errands }
+    /// Sections shown with a "Coming later" screen (P7). Notes left this
+    /// list with the Notes program (spec v1.0, D10).
+    public var isComingLater: Bool { self == .errands }
 }
