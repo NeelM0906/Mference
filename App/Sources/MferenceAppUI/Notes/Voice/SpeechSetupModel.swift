@@ -177,7 +177,6 @@ public final class SpeechSetupModel {
         guard generation == installGeneration else { return }
         installTask = nil
         pauseRequested = false
-        installError = error
         if resumeAfterWindDown {
             resumeAfterWindDown = false
             if !finished, error == nil, case .paused = speech.status.speech {
@@ -186,6 +185,10 @@ public final class SpeechSetupModel {
             }
         }
         apply(speech.status)
+        // After applying the status: a status change clears an old error,
+        // and a stale value the status stream still holds (its initial "not
+        // installed") must not hide this one.
+        installError = error
         guard finished, status.speech.isReady, let action = continuation else { return }
         continuation = nil
         pendingAction = nil
