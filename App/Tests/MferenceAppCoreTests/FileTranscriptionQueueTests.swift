@@ -228,6 +228,21 @@ import Testing
         #expect(h.queue.rows.map(\.noteID) == ids)
     }
 
+    @Test func theInputCopyIsFoundAfterRepeatedInterruptions() throws {
+        // Codex review on #251: each recovery copies the copy again, adding
+        // one `import-<8 hex>-` per run.
+        let folder = FileManager.default.temporaryDirectory.appending(path: "n4-copy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for name in ["import-zz112233-kept.m4a", "import-0a1b2c3d-other.m4a", "import-0a1b-kept.m4a"] {
+            try Data([0]).write(to: folder.appending(path: name))
+        }
+        #expect(FileTranscriptionQueue.inputCopy(of: "kept.m4a", in: folder) == nil, "not the service's names")
+        let twice = "import-11112222-import-0a1b2c3d-kept.m4a"
+        try Data([0]).write(to: folder.appending(path: twice))
+        #expect(FileTranscriptionQueue.inputCopy(of: "kept.m4a", in: folder)?.lastPathComponent == twice)
+    }
+
     @Test func launchRequeuesFilesWithACopyAndFailsTheRest() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "n4-queue-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

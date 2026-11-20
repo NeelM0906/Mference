@@ -316,15 +316,19 @@ public final class FileTranscriptionQueue {
     private nonisolated static let importPrefix = "import-"
 
     /// The speech service's copy of an imported file in the note's folder:
-    /// `import-<8 hex>-<name>` (what `transcribeFile` writes), or the name
-    /// itself. The newest wins when there are several.
+    /// `import-<8 hex>-<name>` (what `transcribeFile` writes; a file
+    /// recovered and interrupted again carries one such prefix per run), or
+    /// the name itself. The newest wins when there are several.
     nonisolated static func inputCopy(of fileName: String, in folder: URL) -> URL? {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         let copies = names.filter { name in
-            guard name.hasPrefix(importPrefix), name.hasSuffix("-" + fileName),
-                  name.count == importPrefix.count + 9 + fileName.count else { return name == fileName }
-            let tag = name.dropFirst(importPrefix.count).prefix(8)
-            return tag.allSatisfy(\.isHexDigit)
+            var rest = Substring(name)
+            while rest != Substring(fileName), rest.hasPrefix(importPrefix) {
+                let tag = rest.dropFirst(importPrefix.count).prefix(9)
+                guard tag.count == 9, tag.last == "-", tag.dropLast().allSatisfy(\.isHexDigit) else { return false }
+                rest = rest.dropFirst(importPrefix.count + 9)
+            }
+            return rest == Substring(fileName)
         }
         .map { folder.appending(path: $0) }
         func modified(_ url: URL) -> Date {

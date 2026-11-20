@@ -69,10 +69,9 @@ public final class CompositionPlayback: AudioPlayback {
         let composition = AVMutableComposition()
         var loaded = 0
         for track in tracks {
-            let url = directory.appending(path: track.fileName)
             // A missing file (one track deleted, a crash before a file was
             // written) leaves the rest playable.
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            guard let url = Self.audioFile(for: track, in: directory) else { continue }
             let asset = AVURLAsset(url: url)
             guard let source = try? await asset.loadTracks(withMediaType: .audio).first else { continue }
             let range = try await source.load(.timeRange)
@@ -98,6 +97,17 @@ public final class CompositionPlayback: AudioPlayback {
         }
         itemDuration = composition.duration.seconds.isFinite ? composition.duration.seconds : 0
         return itemDuration
+    }
+
+    /// The track's file, or the CAF it was to be converted from: a meeting
+    /// ended at quit names its tracks `.m4a` before the conversion at the
+    /// next launch, and a failed conversion keeps the CAF.
+    nonisolated static func audioFile(for track: RecordedTrack, in directory: URL) -> URL? {
+        let url = directory.appending(path: track.fileName)
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard url.pathExtension == "m4a" else { return nil }
+        let caf = url.deletingPathExtension().appendingPathExtension("caf")
+        return FileManager.default.fileExists(atPath: caf.path) ? caf : nil
     }
 
     public func play() { player.playImmediately(atRate: desiredRate) }

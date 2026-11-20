@@ -46,6 +46,18 @@ import Testing
         #expect(playback.currentTime == 0)
     }
 
+    @Test func aTrackNamedM4APlaysItsKeptCAF() async throws {
+        // Codex review on #251: a meeting ended at quit names its tracks
+        // .m4a; when the conversion at the next launch fails, the CAF stays.
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Self.writeTone(folder.appending(path: "microphone-1.caf"), seconds: 1, frequency: 440)
+        let track = RecordedTrack(fileName: "microphone-1.m4a", kind: .microphone, startOffset: 0, duration: 1)
+        #expect(CompositionPlayback.audioFile(for: track, in: folder)?.lastPathComponent == "microphone-1.caf")
+        let length = try await CompositionPlayback().load(tracks: [track], directory: folder)
+        #expect(abs(length - 1) < 0.05)
+    }
+
     @Test func noFileAtAllIsNoAudio() async throws {
         let folder = try directory()
         defer { try? FileManager.default.removeItem(at: folder) }
