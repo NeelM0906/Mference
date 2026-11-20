@@ -128,6 +128,27 @@ final class InboxTarget: DictationInsertionTarget {
         #expect(dictation.pendingPhrases.isEmpty)
     }
 
+    @Test func aFailureKeepsTheOtherPhrasesMarkers() async throws {
+        // Codex review on #251: one phrase failing must not send the others
+        // to the caret.
+        let speech = DrivenDictationSpeech()
+        let inbox = Inbox()
+        let dictation = DictationController(speech: speech, permissions: FakePermissionBroker(), preferences: preferences())
+        await dictation.start(in: InboxTarget(inbox))
+        let first = UUID(), second = UUID()
+        speech.send(.phraseStarted(first))
+        speech.send(.phraseStarted(second))
+        speech.send(.failed(.failed("recognition failed")))
+        speech.send(.phraseDropped(first))
+        speech.send(.phraseFinished(second, text: "Still here.", languageCode: "en"))
+        await waitUntil("the second phrase") { inbox.phrases == ["Still here."] }
+        #expect(inbox.dropAllCount == 0, "the other markers stay until the end")
+        speech.end()
+        await waitUntil("dictation to end") { !dictation.isActive }
+        #expect(dictation.error == .failed("recognition failed"))
+        #expect(inbox.dropAllCount >= 1)
+    }
+
     @Test func theLastPhraseLandsEvenWhenTheEditorIsGone() async throws {
         let speech = FakeSpeechService(dictation: .saying("last words"), stepped: true)
         let inbox = Inbox()

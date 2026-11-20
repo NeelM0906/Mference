@@ -207,9 +207,10 @@ public final class DictationController {
         case .level(let value):
             level = min(max(value, 0), 1)
         case .failed(let failure):
+            // The pipeline drops only the failed phrase (`.phraseDropped`)
+            // and keeps going to `.ended`: the other phrases keep their
+            // markers, and whatever is still open goes at the end.
             error = failure
-            target?.dropAllPhrases()
-            pendingPhrases = []
         case .ended:
             break
         }
