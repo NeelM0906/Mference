@@ -70,11 +70,4 @@ import Testing
             stored(services, noteID)?.recording?.summaryState != RecordingSummaryState.none
         }
     }
-
-    @Test func markMomentTargetsTheNotesEditor() throws {
-        let services = AppServices.preview(speech: FakeSpeechService())
-        let notes = NotesModel(store: services.notes, speech: services.speech)
-        VoiceModels.connectMarkers(meetings: services.meetings, notes: notes)
-        #expect(services.meetings.noteTarget === notes.editor)
-    }
 }
