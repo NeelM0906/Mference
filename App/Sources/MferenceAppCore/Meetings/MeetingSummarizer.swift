@@ -56,6 +56,8 @@ public enum MeetingSummaryError: Error, Sendable, Hashable {
     case unreadableAnswer
     /// A request was too long for Quick's context even after halving the chunks.
     case inputTooLarge
+    /// The note's body is from a newer version or damaged: nothing may be written into it.
+    case readOnlyNote
     /// There is nothing to summarize.
     case emptyTranscript
     /// The engine could not run Quick; `message` is its user-facing line.
@@ -65,6 +67,7 @@ public enum MeetingSummaryError: Error, Sendable, Hashable {
         switch self {
         case .unreadableAnswer, .inputTooLarge, .engine: "Couldn't write a summary"
         case .emptyTranscript: "Nothing was said, so there is no summary."
+        case .readOnlyNote: "This note can't be changed by this version of Mference, so no summary was written."
         }
     }
 }
@@ -247,8 +250,14 @@ public struct MeetingSummarizer: Sendable {
     /// One request, asked once more when the answer is not readable.
     private func ask(system: String, input: String) async throws -> MeetingSections {
         for _ in 0..<2 {
-            let answer = try await generate(system: system + "\n\n" + prompt.untrustedRule, input: input)
-            if let sections = Self.parse(answer) { return sections }
+            // An answer that isn't the JSON asked for, or a stream that ended
+            // without completing, is asked for once more.
+            do {
+                let answer = try await generate(system: system + "\n\n" + prompt.untrustedRule, input: input)
+                if let sections = Self.parse(answer) { return sections }
+            } catch MeetingSummaryError.unreadableAnswer {
+                continue
+            }
         }
         throw MeetingSummaryError.unreadableAnswer
     }
