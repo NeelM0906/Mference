@@ -24,7 +24,7 @@ public struct FoundationChatModel: AppleChatModeling {
 
     static func labels(of model: SystemLanguageModel) -> AppleModelLabels {
         #if compiler(>=6.4)
-        if #available(macOS 27, *) {
+        if #available(macOS 27, iOS 27, *) {
             let variant = model.variant
             let short = switch variant {
             case .core3: "Apple 3B"
@@ -116,10 +116,10 @@ public struct FoundationChatModel: AppleChatModeling {
         .response(Transcript.Response(assetIDs: [], segments: [text(content)]))
     }
 
-    /// Exact counts where macOS can give them (26.4 and later), else a
+    /// Exact counts where the OS can give them (26.4 and later), else a
     /// cautious estimate of three characters per token.
     private static func tokens(in entries: [Transcript.Entry], model: SystemLanguageModel) async throws -> Int {
-        if #available(macOS 26.4, *) {
+        if #available(macOS 26.4, iOS 26.4, *) {
             return try await model.tokenCount(for: entries)
         }
         let characters = entries.reduce(0) { total, entry in
