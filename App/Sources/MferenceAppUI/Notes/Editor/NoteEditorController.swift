@@ -23,6 +23,8 @@ public final class NoteEditorController {
     /// summary, a marker, a title): the editor takes that in instead of
     /// saving over it.
     @ObservationIgnored private var loadedBody: Data?
+    /// An outside write arrived while an input method was composing.
+    @ObservationIgnored private var absorbWhenComposed = false
     /// A ⌘K transcript hit waiting for the editor to show its note.
     @ObservationIgnored private var pendingReveal: UUID?
     /// Phrases still being transcribed when their note left the editor
@@ -88,6 +90,13 @@ public final class NoteEditorController {
     func absorbExternalChanges() -> Bool {
         guard let note, let textView, note.modelContext != nil, !note.isDeleted,
               note.bodyJSON != loadedBody else { return false }
+        // Never in the middle of an input method's composition: taken in
+        // as soon as the composed text is committed.
+        if textView.hasMarkedText() {
+            absorbWhenComposed = true
+            return false
+        }
+        absorbWhenComposed = false
         let theirs = store.document(of: note)
         guard theirs.readOnlyReason == nil else { return false }
         if saveState == .saved {
@@ -256,6 +265,7 @@ public final class NoteEditorController {
 
     private func textDidChange() {
         guard note != nil else { return }
+        if absorbWhenComposed, let textView, !textView.hasMarkedText() { absorbExternalChanges() }
         saveState = .editing
         autosave?.cancel()
         let delay = autosaveDelay
@@ -281,7 +291,9 @@ public final class NoteEditorController {
         }
         autosave?.cancel()
         autosave = nil
-        // A write from elsewhere not yet taken in is merged first.
+        // A write from elsewhere not yet taken in is merged first (a forced
+        // save commits an unfinished composition first).
+        if force, textView.hasMarkedText(), note.bodyJSON != loadedBody { textView.unmarkText() }
         if absorbExternalChanges(), saveState == .saved { return }
         let document = textView.document
         wordCount = document.wordCount

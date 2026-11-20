@@ -143,13 +143,18 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     func reload(_ document: NoteDocument) {
         // A copy: `string` is the live storage and changes with the load.
         let old = NSString(string: string)
+        let oldBlocks = self.document.blocks
         let selections = selectedRanges.map(\.rangeValue)
         let phrases = pendingPhrases
         let lastStyle = emptyLastLineStyle
         load(document)
         if (string as NSString).length == 0 { emptyLastLineStyle = lastStyle }
         let new = NSString(string: string)
-        let move = Self.positionMap(from: old, to: new)
+        // Block by block: writes in several places (a title and a marker, a
+        // summary and a marker) leave every unchanged block's positions with
+        // it. The text-level map is the fallback when lines and blocks differ.
+        let move = Self.blockPositionMap(old: old, oldBlocks: oldBlocks, new: new, newBlocks: self.document.blocks)
+            ?? Self.positionMap(from: old, to: new)
         pendingPhrases = phrases.map { ($0.id, move($0.location)) }
         let mapped = selections.map { range -> NSValue in
             let start = move(range.location)
@@ -158,6 +163,55 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         }
         setSelectedRanges(mapped, affinity: .downstream, stillSelecting: false)
         needsDisplay = true
+    }
+
+    /// Start and length (without the line break) of each line.
+    static func lines(_ text: NSString) -> [(start: Int, length: Int)] {
+        var result: [(Int, Int)] = []
+        var location = 0
+        repeat {
+            let line = text.lineRange(for: NSRange(location: location, length: 0))
+            var length = line.length
+            while length > 0, NoteTextMapping.isLineTerminator(text.character(at: line.location + length - 1)) { length -= 1 }
+            result.append((line.location, length))
+            location = NSMaxRange(line)
+        } while location < text.length
+        if text.length > 0, NoteTextMapping.isLineTerminator(text.character(at: text.length - 1)) {
+            result.append((text.length, 0))
+        }
+        return result
+    }
+
+    /// Maps positions through the block alignment of two versions of a
+    /// note: a position in a block both have keeps its offset in it; one in
+    /// a block replaced in place keeps its offset in the replacement; one in
+    /// a removed block goes to the start of the next block both have. Nil
+    /// when a version's lines and blocks don't line up one to one.
+    static func blockPositionMap(old: NSString, oldBlocks: [NoteDocument.Block],
+                                 new: NSString, newBlocks: [NoteDocument.Block]) -> ((Int) -> Int)? {
+        let oldLines = lines(old), newLines = lines(new)
+        guard oldLines.count == oldBlocks.count, newLines.count == newBlocks.count else { return nil }
+        let kept = NoteDocumentMerge.matches(oldBlocks, newBlocks)
+        let keptOld = kept.keys.sorted()
+        return { position in
+            guard let index = oldLines.lastIndex(where: { $0.start <= position }) else { return 0 }
+            let offset = position - oldLines[index].start
+            func at(_ newIndex: Int, offset: Int) -> Int {
+                guard newIndex < newLines.count else { return new.length }
+                return newLines[newIndex].start + min(offset, newLines[newIndex].length)
+            }
+            if let newIndex = kept[index] { return at(newIndex, offset: offset) }
+            let previousOld = keptOld.last { $0 < index }
+            let nextOld = keptOld.first { $0 > index }
+            let previousNew = previousOld.flatMap { kept[$0] } ?? -1
+            let nextNew = nextOld.flatMap { kept[$0] } ?? newLines.count
+            let span = (previousOld ?? -1, nextOld ?? oldLines.count)
+            if span.1 - span.0 == nextNew - previousNew {
+                // Replaced in place, one for one.
+                return at(previousNew + (index - span.0), offset: offset)
+            }
+            return at(nextNew, offset: 0)
+        }
     }
 
     /// Maps positions in `old` to `new` around the one changed stretch

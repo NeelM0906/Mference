@@ -62,6 +62,49 @@ import Testing
         #expect(h.view.document.blocks.last == .paragraph(runs: [TextRun("My notes on the roadmap.")]))
     }
 
+    @Test func writesInTwoPlacesLeaveTheCaretAndPhrasesWithTheirText() async throws {
+        let (store, note, controller, h) = try setUp()
+        // Caret inside "My notes"; a phrase waiting at its end.
+        let body = (h.view.string as NSString).range(of: "My notes")
+        h.view.setSelectedRange(NSRange(location: body.location + 3, length: 0))
+        let phrase = UUID()
+        h.view.setSelectedRange(NSRange(location: NSMaxRange(body), length: 0))
+        controller.beginPhrase(phrase)
+        h.view.setSelectedRange(NSRange(location: body.location + 3, length: 0))
+        // The end of a meeting: a new title and a marker at the end, at once.
+        var doc = store.document(of: note)
+        doc.setTitle("Weekly sync, 20 November")
+        doc.blocks.append(.marker(time: 754))
+        try store.save(doc, to: note)
+        #expect(await eventually { h.view.document.blocks.last == .marker(time: 754) })
+        let moved = (h.view.string as NSString).range(of: "My notes")
+        #expect(h.view.selectedRange().location == moved.location + 3)
+        h.type("own ")
+        controller.finishPhrase(phrase, text: "ok.")
+        #expect(h.view.document.blocks[1] == .paragraph(runs: [TextRun("My own notes ok.")]))
+        #expect(h.view.document.blocks.first == .heading(level: .title, runs: [TextRun("Weekly sync, 20 November")]))
+    }
+
+    @Test func aWriteWaitsWhileAnInputMethodComposes() async throws {
+        let (store, note, controller, h) = try setUp()
+        h.view.setSelectedRange(NSRange(location: (h.view.string as NSString).length, length: 0))
+        h.view.setMarkedText(" か", selectedRange: NSRange(location: 2, length: 0),
+                             replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(h.view.hasMarkedText())
+        var doc = store.document(of: note)
+        doc.blocks.append(.marker(time: 5))
+        try store.save(doc, to: note)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(h.view.hasMarkedText())
+        #expect(!h.view.document.blocks.contains(.marker(time: 5)))
+        // Committing the composition takes the write in, with the text kept.
+        h.view.insertText(" か", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(h.view.document.blocks.contains(.marker(time: 5)))
+        #expect(h.view.document.blocks.contains(.paragraph(runs: [TextRun("My notes か")])))
+        controller.saveNow(force: true)
+        #expect(store.document(of: note).blocks.contains(.marker(time: 5)))
+    }
+
     @Test func theMergeKeepsBothSides() {
         let a = NoteDocument.Block.paragraph(runs: [TextRun("a")])
         let b = NoteDocument.Block.paragraph(runs: [TextRun("b")])
