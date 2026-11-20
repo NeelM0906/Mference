@@ -85,6 +85,8 @@ public final class DictationController {
         phase = .starting
         activeNoteID = target.noteID
         self.target = target
+        // Every phrase of this dictation belongs to that note (N1's editor binds it).
+        target.dictationWillStart()
         guard await permissions.request(.microphone) == .granted else {
             if attempt == generation { finish(with: .permissionDenied(.microphone)) }
             return
