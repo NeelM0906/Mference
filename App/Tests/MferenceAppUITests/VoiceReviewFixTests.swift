@@ -100,12 +100,10 @@ final class GatedInstallSpeech: SpeechServicing {
                     preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { offline })
     }
 
-    private func eventually(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<400 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        Issue.record("condition never became true")
+    /// Waits for `condition` (see `waitUntil`), never for a count of yields.
+    private func eventually(sourceLocation: SourceLocation = #_sourceLocation,
+                            _ condition: @MainActor () -> Bool) async throws {
+        await waitUntil(timeout: .seconds(10), sourceLocation: sourceLocation, condition)
     }
 
     @Test func pauseThenResumeInstallsAgainAndContinues() async throws {
@@ -256,3 +254,67 @@ final class GatedInstallSpeech: SpeechServicing {
         #expect(models.settings.speechFailure == nil)
     }
 }
+
+/// A speech service whose status stream the test feeds by hand (to deliver
+/// a stale value late); everything else is the fake's.
+final class ManualStatusSpeech: SpeechServicing {
+    let base: FakeSpeechService
+    private let continuation = Mutex<AsyncStream<SpeechStatus>.Continuation?>(nil)
+
+    init(_ base: FakeSpeechService) { self.base = base }
+
+    func deliver(_ status: SpeechStatus) { _ = continuation.withLock { $0?.yield(status) } }
+
+    var status: SpeechStatus { base.status }
+    func statusUpdates() -> AsyncStream<SpeechStatus> {
+        let (stream, continuation) = AsyncStream.makeStream(of: SpeechStatus.self)
+        self.continuation.withLock { $0 = continuation }
+        return stream
+    }
+    func downloadSize(of package: SpeechPackageID) -> Int64 { base.downloadSize(of: package) }
+    func install(_ package: SpeechPackageID) async throws { try await base.install(package) }
+    func pauseInstall(_ package: SpeechPackageID) async { await base.pauseInstall(package) }
+    func cancelInstall(_ package: SpeechPackageID) async { await base.cancelInstall(package) }
+    func remove(_ package: SpeechPackageID) async throws { try await base.remove(package) }
+    func startDictation(_ options: DictationOptions) async throws -> DictationSession {
+        try await base.startDictation(options)
+    }
+    func startMeeting(_ options: MeetingOptions) async throws -> MeetingRecording { try await base.startMeeting(options) }
+    func transcribeFile(_ url: URL, options: FileTranscriptionOptions) async throws -> FileJob {
+        try await base.transcribeFile(url, options: options)
+    }
+    func cancel(_ job: FileJob.ID) async { await base.cancel(job) }
+    func inputDevices() async -> [AudioInputDevice] { await base.inputDevices() }
+    func runningAudioApps() async -> [RunningAudioApp] { await base.runningAudioApps() }
+    func recordingsSize() async -> Int64 { await base.recordingsSize() }
+    func deleteRecordings(for noteID: UUID) async throws { try await base.deleteRecordings(for: noteID) }
+    func recordingsDirectory(for noteID: UUID) -> URL { base.recordingsDirectory(for: noteID) }
+    func recoverInterruptedRecordings() async -> [InterruptedRecording] { await base.recoverInterruptedRecordings() }
+    func shutdown() async { await base.shutdown() }
+}
+
+@MainActor
+@Suite struct VoiceStaleStatusTests {
+    @Test func aStaleStatusArrivingLateDoesNotHideAFailedDownload() async throws {
+        let base = FakeSpeechService.notInstalled()
+        base.failNextInstall(with: .verificationFailed(file: "Encoder.mlmodelc/weights/weight.bin"))
+        let speech = ManualStatusSpeech(base)
+        let models = VoiceModels(speech: speech, permissions: FakePermissionBroker(),
+                                 preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
+        models.setup.start()
+        defer { models.setup.stop() }
+        let failed = SetupDisplay.failed("A downloaded file didn't match. Download again.")
+        models.setup.download()
+        await models.setup.waitForInstall()
+        #expect(models.setup.display == failed)
+        // The stream's values arrive late, oldest first (load on the main actor).
+        speech.deliver(SpeechStatus())
+        await waitUntil("the stale status applied") { models.setup.status.speech == .notInstalled }
+        #expect(models.setup.display == failed, "the stale Not installed doesn't bring Download back")
+        speech.deliver(base.status)
+        await waitUntil("the current status applied") { models.setup.status.speech != .notInstalled }
+        #expect(models.setup.display == failed)
+    }
+}
+
+private typealias SetupDisplay = SpeechSetupModel.Display

@@ -76,10 +76,11 @@ final class Inbox {
 
 @MainActor
 final class InboxTarget: DictationInsertionTarget {
-    let noteID = UUID()
+    var noteID = UUID()
+    var begun: [UUID] = []
     let inbox: Inbox
     init(_ inbox: Inbox) { self.inbox = inbox }
-    func beginPhrase(_ id: UUID) {}
+    func beginPhrase(_ id: UUID) { begun.append(id) }
     func finishPhrase(_ id: UUID, text: String) { inbox.phrases.append(text) }
     func dropPhrase(_ id: UUID) {}
     func dropAllPhrases() { inbox.dropAllCount += 1 }
@@ -94,7 +95,7 @@ final class InboxTarget: DictationInsertionTarget {
         let broker = GatedBroker()
         let dictation = DictationController(speech: speech, permissions: broker, preferences: preferences())
         let start = Task { await dictation.start(in: InboxTarget(Inbox())) }
-        for _ in 0..<200 where !broker.isAsking { await Task.yield() }
+        await waitUntil("the microphone prompt") { broker.isAsking }
         #expect(dictation.phase == .starting)
         await dictation.stop() // Esc while the prompt shows
         #expect(dictation.phase == .idle)
@@ -114,7 +115,7 @@ final class InboxTarget: DictationInsertionTarget {
         speech.send(.phraseStarted(UUID()))
         speech.send(.failed(.failed("audio engine stopped")))
         speech.end()
-        for _ in 0..<200 where dictation.isActive { await Task.yield() }
+        await waitUntil("dictation to end") { !dictation.isActive }
         #expect(!dictation.isActive && dictation.error == .failed("audio engine stopped"))
         #expect(inbox.dropAllCount >= 1, "the pending marker goes")
         #expect(dictation.pendingPhrases.isEmpty)
@@ -128,9 +129,27 @@ final class InboxTarget: DictationInsertionTarget {
             let target = InboxTarget(inbox)
             await dictation.start(in: target)
         } // The view's own reference is gone (leaving Notes).
-        await step(speech, 2) // level, phrase started
+        await step(speech, dictation, 2) // level, phrase started
         await dictation.stop()
         #expect(inbox.phrases == ["last words"], "the controller holds the note until stop returns")
+    }
+
+    @Test func aPhraseNeverBeginsInAnotherNote() async {
+        let speech = FakeSpeechService(dictation: .saying("for note A", "would land in B"), stepped: true)
+        let inbox = Inbox()
+        let target = InboxTarget(inbox)
+        let dictation = DictationController(speech: speech, permissions: FakePermissionBroker(), preferences: preferences())
+        await dictation.start(in: target)
+        await step(speech, dictation, 3) // level, phrase 1 started and finished
+        #expect(inbox.phrases == ["for note A"])
+        target.noteID = UUID() // the editor now names another note (the binding broke)
+        let before = dictation.handledEventCount
+        speech.advance() // phrase 2 starts
+        await waitUntil("the stray phrase handled") { dictation.handledEventCount > before }
+        #expect(target.begun.count == 1, "the second phrase is not begun in the other note")
+        await waitUntil("dictation to stop") { !dictation.isActive }
+        #expect(inbox.phrases == ["for note A"], "and its text lands nowhere")
+        #expect(inbox.dropAllCount >= 1, "the editor's binding ends")
     }
 
     @Test func theFillersChipSaysItAppliesNextTime() async {

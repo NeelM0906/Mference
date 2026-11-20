@@ -36,6 +36,11 @@ final class AppRuntime {
                              defaultModel: { [settings = services.settings] in settings.defaultModel })
         screenModels = ScreenModels.live(services: services)
         voice = VoiceModels.live(services: services)
+        // The voice screens talk to N4's meeting session and file queue, and
+        // Notes' voice buttons talk to the voice screens.
+        voice.connect(meetings: services.meetings)
+        voice.connect(files: services.files)
+        if let notes = screenModels.notes { voice.connect(notes: notes) }
         let engine = services.engine
         let speech = services.speech
         let voice = voice
@@ -137,12 +142,15 @@ enum QuitConfirmation {
     }
 
     static func copy(finishing: Bool) -> Copy {
+        // Quit stops capture and closes the audio files; what is still being
+        // transcribed or labelled is finished the next time Mference opens
+        // (launch recovery), so the copy promises nothing within the deadline.
         finishing
             ? Copy(title: "A meeting is finishing",
-                   message: "Mference is transcribing the last phrases and labelling speakers. Quit waits until the transcript is saved.",
-                   quit: "Finish and Quit", stay: "Keep Open")
+                   message: "Mference is still transcribing the last phrases and labelling speakers. If you quit now, it finishes them the next time you open it.",
+                   quit: "Quit", stay: "Keep Open")
             : Copy(title: "A meeting is recording",
-                   message: "Quitting stops the recording. Everything transcribed so far is saved in the meeting note.",
+                   message: "Quitting stops the recording. The meeting note keeps what was transcribed, and Mference finishes the rest the next time you open it.",
                    quit: "Stop and Quit", stay: "Keep Recording")
     }
 

@@ -74,7 +74,7 @@ final class FakeFileQueue: FileQueueModel {
         models.preferences.language = .fixed("es")
         models.preferences.fileSummary = false
         models.transcribe([URL(fileURLWithPath: "/tmp/lecture.mp3"), URL(fileURLWithPath: "/tmp/talk.mov")])
-        for _ in 0..<100 where queue.added.isEmpty { await Task.yield() }
+        await waitUntil("the files to be queued") { !queue.added.isEmpty }
         let added = try #require(queue.added.first)
         #expect(added.urls.map(\.lastPathComponent) == ["lecture.mp3", "talk.mov"])
         #expect(added.language == .fixed("es") && added.speakerLabels && !added.summary)

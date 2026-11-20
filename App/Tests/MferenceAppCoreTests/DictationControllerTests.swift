@@ -75,18 +75,14 @@ final class FakeDictationTarget: DictationInsertionTarget {
     }
 }
 
-/// Lets the controller's consumer task handle what the fake just yielded.
+/// Plays scripted events one at a time and waits until the controller has
+/// handled each (its handled-event count moves), not for a number of yields.
 @MainActor
-func settle() async {
-    for _ in 0..<20 { await Task.yield() }
-}
-
-/// Plays one scripted event and lets the controller handle it.
-@MainActor
-func step(_ speech: FakeSpeechService, _ count: Int = 1) async {
+func step(_ speech: FakeSpeechService, _ dictation: DictationController, _ count: Int = 1) async {
     for _ in 0..<count {
-        speech.advance()
-        await settle()
+        let before = dictation.handledEventCount
+        guard speech.advance() else { return }
+        await waitUntil("the dictation event to be handled") { dictation.handledEventCount > before }
     }
 }
 
@@ -115,14 +111,14 @@ func step(_ speech: FakeSpeechService, _ count: Int = 1) async {
         let dictation = controller(speech)
         let note = FakeDictationTarget(text: "Start.\n")
         await dictation.start(in: note)
-        await step(speech) // level
-        await step(speech) // phrase 1 started at "Start.\n|"
+        await step(speech, dictation) // level
+        await step(speech, dictation) // phrase 1 started at "Start.\n|"
         note.type("typed while talking")
-        await step(speech) // phrase 1 finished
+        await step(speech, dictation) // phrase 1 finished
         note.moveCaretToEnd()
         note.type("\n")
-        await step(speech) // phrase 2 started on the new line
-        await step(speech) // phrase 2 finished
+        await step(speech, dictation) // phrase 2 started on the new line
+        await step(speech, dictation) // phrase 2 finished
         await dictation.stop()
         #expect(note.visibleText == "Start.\nFirst phrase typed while talking\nSecond phrase")
     }
@@ -132,7 +128,7 @@ func step(_ speech: FakeSpeechService, _ count: Int = 1) async {
         let dictation = controller(speech)
         let note = FakeDictationTarget()
         await dictation.start(in: note)
-        await step(speech, 2) // "one" started, still pending
+        await step(speech, dictation, 2) // "one" started, still pending
         #expect(dictation.pendingPhrases.count == 1)
         await dictation.stop()
         #expect(note.visibleText == "One two", "the phrase in progress finishes before dictation lets go")
@@ -156,7 +152,7 @@ func step(_ speech: FakeSpeechService, _ count: Int = 1) async {
         let second = FakeDictationTarget(text: "B.")
         await dictation.toggle(first)
         #expect(dictation.isDictating(into: first.noteID))
-        await step(speech, 2) // phrase started in the first note
+        await step(speech, dictation, 2) // phrase started in the first note
         await dictation.toggle(second) // switching notes
         #expect(first.visibleText == "A. Hello there", "the old note gets its last phrase")
         #expect(dictation.isDictating(into: second.noteID))
@@ -208,9 +204,9 @@ func step(_ speech: FakeSpeechService, _ count: Int = 1) async {
                                        stepped: true)
         let dictation = controller(speech)
         await dictation.start(in: FakeDictationTarget())
-        await step(speech)
+        await step(speech, dictation)
         #expect(dictation.level == 0.4)
-        await step(speech, 2)
+        await step(speech, dictation, 2)
         #expect(dictation.detectedLanguage == "de")
         await dictation.stop()
         #expect(dictation.level == 0)

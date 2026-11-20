@@ -40,6 +40,10 @@ public final class DictationController {
 
     public var isActive: Bool { phase != .idle }
 
+    /// Events handled since launch, so tests can wait for one specific event
+    /// instead of yielding and hoping (deterministic under load).
+    @ObservationIgnored public private(set) var handledEventCount = 0
+
     public let preferences: SpeechPreferences
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let permissions: any PermissionBroker
@@ -50,6 +54,8 @@ public final class DictationController {
     @ObservationIgnored private var target: (any DictationInsertionTarget)?
     @ObservationIgnored private var session: DictationSession?
     @ObservationIgnored private var consumer: Task<Void, Never>?
+    /// Phrases that were not begun because the target named another note.
+    @ObservationIgnored private var strayPhrases: Set<UUID> = []
     /// Bumped by each start and by a stop during a start, so a start that
     /// was overtaken does nothing more.
     @ObservationIgnored private var generation: UInt64 = 0
@@ -168,17 +174,31 @@ public final class DictationController {
     // MARK: Events
 
     private func handle(_ event: DictationEvent) {
+        defer { handledEventCount += 1 }
         switch event {
         case .phraseStarted(let id):
+            // Second guard (N1's editor binds a dictation to its note and
+            // reports that note while dictating): a phrase never begins in a
+            // note other than the one dictation started in. If the target now
+            // names another note, the phrase is not begun and dictation stops.
+            guard let target, target.noteID == activeNoteID else {
+                strayPhrases.insert(id)
+                Task { [weak self] in await self?.stop() }
+                return
+            }
             pendingPhrases.insert(id)
-            target?.beginPhrase(id)
+            target.beginPhrase(id)
         case .phraseFinished(let id, let text, let languageCode):
+            // A finish goes through even if the shown note changed: the
+            // editor routes it by phrase id to the note it began in.
+            if strayPhrases.remove(id) != nil { return }
             pendingPhrases.remove(id)
             if let languageCode { detectedLanguage = languageCode }
             // The editor joins the text to what is around the marker
             // (PhraseJoiner: spacing, capitals).
             target?.finishPhrase(id, text: text)
         case .phraseDropped(let id):
+            if strayPhrases.remove(id) != nil { return }
             pendingPhrases.remove(id)
             target?.dropPhrase(id)
         case .level(let value):
@@ -203,6 +223,7 @@ public final class DictationController {
         phase = .idle
         level = 0
         pendingPhrases = []
+        strayPhrases = []
         activeNoteID = nil
         target = nil
         session = nil

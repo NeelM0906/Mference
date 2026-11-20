@@ -39,8 +39,7 @@ import Testing
     func harness(_ script: FakeSpeechService.MeetingScript = boardScript, stepped: Bool = false) throws -> Harness {
         let speech = FakeSpeechService(meeting: script, stepped: stepped)
         let container = try AppModelContainer.inMemory()
-        let session = MeetingSession(speech: speech, context: container.mainContext,
-                                     writer: InMemoryMeetingNoteWriter(context: container.mainContext))
+        let session = MeetingSession(speech: speech, writer: InMemoryMeetingNoteWriter(context: container.mainContext))
         let preferences = SpeechPreferences(store: InMemorySettingsStore())
         preferences.callAudio = .app(bundleID: "us.zoom.xos", name: "Zoom")
         let voice = VoiceModels(speech: speech, permissions: FakePermissionBroker(), preferences: preferences,
@@ -50,11 +49,8 @@ import Testing
         return Harness(container: container, speech: speech, session: session, voice: voice)
     }
 
-    func settle(until condition: () -> Bool) async {
-        for _ in 0..<400 {
-            if condition() { return }
-            await Task.yield()
-        }
+    func settle(sourceLocation: SourceLocation = #_sourceLocation, until condition: @MainActor () -> Bool) async {
+        await waitUntil(sourceLocation: sourceLocation, condition)
     }
 
     @Test func popoverStartsTheMeetingThroughTheSessionAndOpensItsNote() async throws {

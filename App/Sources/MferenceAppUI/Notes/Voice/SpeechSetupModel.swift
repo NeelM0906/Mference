@@ -53,6 +53,8 @@ public final class SpeechSetupModel {
     /// service would join that install and end paused (its contract), so the
     /// download starts again once it has ended.
     @ObservationIgnored private var resumeAfterWindDown = false
+    /// Pause was pressed for the running download.
+    @ObservationIgnored private var pauseRequested = false
 
     public init(speech: any SpeechServicing, isOffline: @escaping @MainActor () -> Bool) {
         self.speech = speech
@@ -133,7 +135,10 @@ public final class SpeechSetupModel {
         guard !offline else { return }
         // The service's own status: the cached copy can lag a pause by a beat.
         if installTask != nil {
+            // Paused (or a pause asked and not yet reported): start again
+            // once the paused download has ended.
             if case .paused = speech.status.speech { resumeAfterWindDown = true }
+            if pauseRequested { resumeAfterWindDown = true }
             return
         }
         installGeneration &+= 1
@@ -155,6 +160,7 @@ public final class SpeechSetupModel {
 
     public func pause() {
         resumeAfterWindDown = false
+        pauseRequested = installTask != nil
         Task { [speech] in await speech.pauseInstall(.speech) }
     }
 
@@ -170,7 +176,7 @@ public final class SpeechSetupModel {
     private func installEnded(_ generation: UInt64, error: SpeechError?, finished: Bool) {
         guard generation == installGeneration else { return }
         installTask = nil
-        installError = error
+        pauseRequested = false
         if resumeAfterWindDown {
             resumeAfterWindDown = false
             if !finished, error == nil, case .paused = speech.status.speech {
@@ -179,6 +185,10 @@ public final class SpeechSetupModel {
             }
         }
         apply(speech.status)
+        // After applying the status: a status change clears an old error,
+        // and a stale value the status stream still holds (its initial "not
+        // installed") must not hide this one.
+        installError = error
         guard finished, status.speech.isReady, let action = continuation else { return }
         continuation = nil
         pendingAction = nil

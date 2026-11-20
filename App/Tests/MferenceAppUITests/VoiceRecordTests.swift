@@ -123,7 +123,7 @@ final class FakeRecordingControls: LiveRecordingControls {
         models.openNote = { opened.append($0) }
         let note = UUID()
         _ = try await speech.startMeeting(MeetingOptions(noteID: note))
-        for _ in 0..<200 where models.liveMeeting == nil { try await Task.sleep(for: .milliseconds(5)) }
+        await waitUntil("the live meeting") { models.liveMeeting != nil }
         #expect(models.liveMeeting?.noteID == note)
         models.recordMeeting()
         #expect(opened == [note] && !models.showsRecordPopover, "Record meeting opens the running meeting")
@@ -137,7 +137,7 @@ final class FakeRecordingControls: LiveRecordingControls {
         models.setup.start()
         defer { models.setup.stop() }
         _ = try await speech.startDictation(DictationOptions())
-        for _ in 0..<50 { await Task.yield() }
+        await waitUntil("the dictation status") { models.setup.status.liveSession != nil }
         #expect(models.setup.status.liveSession?.kind == .dictation)
         #expect(models.liveMeeting == nil, "no timer chip for dictation")
     }
@@ -166,7 +166,9 @@ final class FakeRecordingControls: LiveRecordingControls {
         #expect(models.isMeetingActive && models.isMeetingFinishing, "finishing still counts as active")
         await models.stopLiveSessions()
         #expect(controls.calls == ["stop"], "quit lets the finishing meeting save")
-        #expect(QuitConfirmation.copy(finishing: true).quit == "Finish and Quit")
+        #expect(QuitConfirmation.copy(finishing: true).quit == "Quit")
+        #expect(QuitConfirmation.copy(finishing: true).message.hasSuffix("the next time you open it."),
+                "quit promises nothing inside the shutdown deadline; launch recovery finishes it")
         #expect(QuitConfirmation.copy(finishing: false).title == "A meeting is recording")
         #expect(QuitConfirmation.copy(finishing: true) != QuitConfirmation.copy(finishing: false))
     }
@@ -188,7 +190,7 @@ final class FakeRecordingControls: LiveRecordingControls {
         defer { models.setup.stop() }
         #expect(!models.recordMeetingModel.speakerLabelsAvailable)
         try await speech.install(.speakerLabels)
-        for _ in 0..<200 where !models.recordMeetingModel.speakerLabelsAvailable { await Task.yield() }
+        await waitUntil("speaker labels ready") { models.recordMeetingModel.speakerLabelsAvailable }
         #expect(models.recordMeetingModel.speakerLabelsAvailable)
     }
 
@@ -225,7 +227,7 @@ final class FakeRecordingControls: LiveRecordingControls {
                                                                      recordedTime: 768, updatedAt: .now)))
         models.setup.start()
         defer { models.setup.stop() }
-        for _ in 0..<200 where models.liveMeeting == nil { try await Task.sleep(for: .milliseconds(5)) }
+        await waitUntil("the live meeting") { models.liveMeeting != nil }
         let screenModels = ScreenModels()
         try Snapshot.render(ShellBoard(selection: .calendar, screenModels: screenModels) {
             Color.clear
