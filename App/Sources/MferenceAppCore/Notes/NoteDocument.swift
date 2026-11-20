@@ -9,6 +9,16 @@ public struct NoteDocument: Sendable, Hashable, Codable {
 
     public var version: Int
     public var blocks: [Block]
+    /// Set by `decode` when this body must not be saved over: it was written
+    /// by a newer build, or could not be read. Never stored.
+    public var readOnlyReason: ReadOnlyReason?
+
+    public enum ReadOnlyReason: String, Sendable, Hashable {
+        /// Written by a newer version of Mference.
+        case newerVersion
+        /// The stored body is damaged (not readable JSON).
+        case damaged
+    }
 
     public init(blocks: [Block] = []) {
         self.version = Self.currentVersion
@@ -43,6 +53,9 @@ public struct NoteDocument: Sendable, Hashable, Codable {
         case transcriptAnchor(segmentID: UUID)
         /// "Mark moment" during a meeting, at a recording time in seconds.
         case marker(time: TimeInterval)
+        /// A block this build does not know (written by a newer one, or
+        /// damaged), kept exactly as stored so saving never loses it.
+        case unknown(NoteJSON)
 
         /// The text runs of a text block; empty for the others.
         public var runs: [TextRun] {
@@ -50,18 +63,22 @@ public struct NoteDocument: Sendable, Hashable, Codable {
             case .heading(_, let runs), .paragraph(let runs), .bullet(let runs, _),
                  .numbered(let runs, _), .check(let runs, _, _):
                 runs
-            case .image, .audio, .transcriptAnchor, .marker:
+            case .image, .audio, .transcriptAnchor, .marker, .unknown:
                 []
             }
         }
 
-        /// The block's plain text (empty for attachments and markers).
-        public var text: String { runs.map(\.text).joined() }
+        /// The block's plain text (empty for attachments and markers; an
+        /// unknown block's text when it has runs).
+        public var text: String {
+            if case .unknown(let json) = self { return json.runText }
+            return runs.map(\.text).joined()
+        }
 
         public var isText: Bool {
             switch self {
             case .heading, .paragraph, .bullet, .numbered, .check: true
-            case .image, .audio, .transcriptAnchor, .marker: false
+            case .image, .audio, .transcriptAnchor, .marker, .unknown: false
             }
         }
 
@@ -82,9 +99,17 @@ public struct NoteDocument: Sendable, Hashable, Codable {
         return runs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The text blocks, one line each, in order.
+    /// The text blocks, one line each, in order (an unknown block's text
+    /// included, so it is still found by search).
     public var plainText: String {
-        blocks.filter(\.isText).map(\.text).joined(separator: "\n")
+        textBlocks.map(\.text).joined(separator: "\n")
+    }
+
+    private var textBlocks: [Block] {
+        blocks.filter { block in
+            if case .unknown = block { return !block.text.isEmpty }
+            return block.isText
+        }
     }
 
     /// The first non-empty line: the list shows it when the note has no title.
@@ -101,7 +126,7 @@ public struct NoteDocument: Sendable, Hashable, Codable {
 
     /// Non-empty lines of text.
     public var lines: [String] {
-        blocks.filter(\.isText)
+        textBlocks
             .map { $0.text.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
     }
@@ -132,16 +157,25 @@ public struct NoteDocument: Sendable, Hashable, Codable {
 
     // MARK: Storage
 
-    public func encoded() -> Data {
-        // Every value here encodes; a failure would be a programming error.
-        (try? Self.encoder.encode(self)) ?? Data()
+    /// The stored form. Throws for values JSON cannot hold (a NaN time):
+    /// a caller must never store a body that did not encode.
+    public func encoded() throws -> Data {
+        try Self.encoder.encode(self)
     }
 
-    /// Decodes a stored body. Nil or unreadable data is an empty note, so a
-    /// damaged body never blocks opening the rest of the store.
+    /// Decodes a stored body. Nil or empty data is a new, empty note.
+    /// Blocks are read one by one: one this build does not know is kept
+    /// as `.unknown` and written back unchanged. A body from a newer build,
+    /// or one that is not readable at all, comes back with `readOnlyReason`
+    /// set, and `NoteStore` refuses to save over it.
     public static func decode(_ data: Data?) -> NoteDocument {
-        guard let data, !data.isEmpty,
-              let document = try? JSONDecoder().decode(NoteDocument.self, from: data) else { return .empty }
+        guard let data, !data.isEmpty else { return .empty }
+        guard var document = try? JSONDecoder().decode(NoteDocument.self, from: data) else {
+            var damaged = NoteDocument(blocks: [])
+            damaged.readOnlyReason = .damaged
+            return damaged
+        }
+        if document.version > currentVersion { document.readOnlyReason = .newerVersion }
         return document
     }
 
@@ -152,6 +186,25 @@ public struct NoteDocument: Sendable, Hashable, Codable {
     }()
 
     enum CodingKeys: String, CodingKey { case version = "v", blocks }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Bodies from before the version key are version 1.
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        var list = try c.nestedUnkeyedContainer(forKey: .blocks)
+        var blocks: [Block] = []
+        while !list.isAtEnd {
+            let json = try list.decode(NoteJSON.self)
+            blocks.append(Block(json: json) ?? .unknown(json))
+        }
+        self.blocks = blocks
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(blocks, forKey: .blocks)
+    }
 }
 
 /// A stretch of text with one set of styles.
@@ -227,11 +280,7 @@ extension NoteDocument.Block: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let runs = { try c.decodeIfPresent([TextRun].self, forKey: .runs) ?? [] }
         let indent = { try c.decodeIfPresent(Int.self, forKey: .indent) ?? 0 }
-        // A block written by a newer build is kept as its text, not lost.
-        guard let kind = try? c.decode(Kind.self, forKey: .type) else {
-            self = .paragraph(runs: (try? runs()) ?? [])
-            return
-        }
+        let kind = try c.decode(Kind.self, forKey: .type)
         switch kind {
         case .heading:
             let raw = try c.decodeIfPresent(Int.self, forKey: .level) ?? 1
@@ -249,7 +298,18 @@ extension NoteDocument.Block: Codable {
         }
     }
 
+    /// A known block from its JSON, or nil (then it is kept as `.unknown`).
+    init?(json: NoteJSON) {
+        guard case .object = json, let data = try? JSONEncoder().encode(json),
+              let block = try? JSONDecoder().decode(NoteDocument.Block.self, from: data) else { return nil }
+        self = block
+    }
+
     public func encode(to encoder: any Encoder) throws {
+        if case .unknown(let json) = self {
+            try json.encode(to: encoder)
+            return
+        }
         var c = encoder.container(keyedBy: CodingKeys.self)
         func put(_ runs: [TextRun]) throws { if !runs.isEmpty { try c.encode(runs, forKey: .runs) } }
         func put(indent: Int) throws { if indent != 0 { try c.encode(indent, forKey: .indent) } }
@@ -286,6 +346,50 @@ extension NoteDocument.Block: Codable {
         case .marker(let time):
             try c.encode(Kind.marker, forKey: .type)
             try c.encode(time, forKey: .time)
+        case .unknown:
+            break
         }
+    }
+}
+
+/// Any JSON value, kept exactly (unknown blocks round-trip through it).
+public indirect enum NoteJSON: Sendable, Hashable, Codable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([NoteJSON])
+    case object([String: NoteJSON])
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let value = try? c.decode(Bool.self) { self = .bool(value) }
+        else if let value = try? c.decode(Double.self) { self = .number(value) }
+        else if let value = try? c.decode(String.self) { self = .string(value) }
+        else if let value = try? c.decode([NoteJSON].self) { self = .array(value) }
+        else { self = .object(try c.decode([String: NoteJSON].self)) }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let value): try c.encode(value)
+        case .number(let value): try c.encode(value)
+        case .string(let value): try c.encode(value)
+        case .array(let value): try c.encode(value)
+        case .object(let value): try c.encode(value)
+        }
+    }
+
+    /// The text of a block-shaped value's runs (`runs[].t`), for search and
+    /// the list preview of a block this build does not know.
+    public var runText: String {
+        guard case .object(let fields) = self, case .array(let runs)? = fields["runs"] else { return "" }
+        return runs.compactMap { run -> String? in
+            guard case .object(let parts) = run, case .string(let text)? = parts["t"] else { return nil }
+            return text
+        }.joined()
     }
 }
