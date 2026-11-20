@@ -65,6 +65,14 @@ public final class VoiceModels {
         }
     }
 
+    /// The shell's hook: leaving Notes while dictating stops dictation first,
+    /// so its last phrase lands in its note before the editor goes away.
+    public static func finishBeforeLeaving(_ section: AppSection,
+                                           voice: VoiceModels) -> (@MainActor () async -> Void)? {
+        guard section == .notes, voice.dictation.isActive else { return nil }
+        return { await voice.stopDictation() }
+    }
+
     /// Switching notes or leaving Notes: the last phrase lands in the note
     /// it belongs to, then dictation stops (N1 calls this).
     public func stopDictation() async {
