@@ -124,9 +124,11 @@ public final class NoteStore {
 
     /// A new empty note, saved at once, in `folder` if given.
     @discardableResult
-    public func createNote(kind: NoteKind = .note, title: String = "", in folder: NoteFolder? = nil,
+    /// `id` is fixed by the caller when files already use it (a meeting's or
+    /// a transcribed file's `Recordings/<id>/`).
+    public func createNote(id: UUID = UUID(), kind: NoteKind = .note, title: String = "", in folder: NoteFolder? = nil,
                            now: Date = .now) throws -> Note {
-        let note = Note(title: title, kind: kind, createdAt: now, folder: folder)
+        let note = Note(id: id, title: title, kind: kind, createdAt: now, folder: folder)
         let document = title.isEmpty ? NoteDocument.empty : NoteDocument.titled(title)
         note.bodyJSON = try document.encoded()
         note.searchText = NoteSearch.searchText(title: title, document: document, transcript: [])
