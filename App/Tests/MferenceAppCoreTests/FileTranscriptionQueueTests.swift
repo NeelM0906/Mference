@@ -163,7 +163,8 @@ import Testing
         let notes = NoteStore(container: container, attachments: .temporary(), speech: speech)
         let queue = FileTranscriptionQueue(speech: speech, writer: notes)
         let ids = await queue.add([URL(filePath: "/tmp/a.m4a"), URL(filePath: "/tmp/b.m4a")],
-                                  options: FileImportOptions(summarize: true))
+                                  options: FileImportOptions(language: .fixed("de"), speakerLabels: true,
+                                                             summarize: true))
         speech.advance() // a: queued
         speech.advance() // a: started
         for _ in 0..<50 { await Task.yield() }
@@ -184,8 +185,20 @@ import Testing
         }
         #expect(!speech.calls.contains { if case .deleteRecordings = $0 { true } else { false } })
         // Next launch: both start again.
-        let relaunched = FileTranscriptionQueue(speech: FakeSpeechService(recordingsRoot: root), writer: notes)
+        let relaunchedSpeech = FakeSpeechService(recordingsRoot: root)
+        let relaunched = FileTranscriptionQueue(speech: relaunchedSpeech, writer: notes)
         #expect(Set(await relaunched.recoverInterruptedJobs()) == Set(ids))
+        // Restarted as they were asked for (Codex review on #251).
+        let restarted = relaunchedSpeech.calls.compactMap { call -> FileTranscriptionOptions? in
+            if case .transcribeFile(_, let options) = call { options } else { nil }
+        }
+        #expect(restarted.count == 2)
+        #expect(restarted.allSatisfy { $0.speakerLabels && $0.language == .fixed("de") })
+        await relaunched.waitUntilIdle()
+        for id in ids {
+            let sidecar = relaunchedSpeech.recordingsDirectory(for: id).appending(path: FileTranscriptionQueue.optionsFileName)
+            #expect(!FileManager.default.fileExists(atPath: sidecar.path), "dropped once the job ends")
+        }
     }
 
     @Test func cancelDuringAStartThatFailsStillDiscards() async throws {

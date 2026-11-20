@@ -119,7 +119,16 @@ public final class RecordingStore: Sendable {
             let crashed = manifest.state == .recording
             var endedAt = manifest.updatedAt
             for (index, track) in manifest.tracks.enumerated() {
-                let url = folder.appending(path: track.fileName)
+                var url = folder.appending(path: track.fileName)
+                // Died between a conversion deleting its CAF and the manifest
+                // being saved: the finished .m4a is the track.
+                if url.pathExtension == "caf", !FileManager.default.fileExists(atPath: url.path) {
+                    let m4a = url.deletingPathExtension().appendingPathExtension("m4a")
+                    if FileManager.default.fileExists(atPath: m4a.path) {
+                        manifest.tracks[index].fileName = m4a.lastPathComponent
+                        url = m4a
+                    }
+                }
                 guard FileManager.default.fileExists(atPath: url.path) else { continue }
                 if let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
                     endedAt = max(endedAt, modified)

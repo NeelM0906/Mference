@@ -3,7 +3,7 @@ import Observation
 import SwiftData
 
 /// The import sheet's options (spec 4.6).
-public struct FileImportOptions: Sendable, Hashable {
+public struct FileImportOptions: Sendable, Hashable, Codable {
     public var language: SpeechLanguage
     public var speakerLabels: Bool
     public var keepAudio: Bool
@@ -148,6 +148,7 @@ public final class FileTranscriptionQueue {
                 context.insert(record)
                 note.recording = record
                 try context.save()
+                saveOptions(options, noteID: noteID)
             } catch {
                 rows.append(Row(noteID: noteID, fileName: fileName, phase: .failed("Couldn't create the note."),
                                 fraction: 0))
@@ -237,6 +238,7 @@ public final class FileTranscriptionQueue {
     }
 
     private func finish(_ noteID: UUID, result: TranscriptResult) {
+        removeOptions(noteID: noteID)
         var summarize = false
         if let record = fetchNote(noteID)?.recording {
             record.segments = result.segments.filter(\.isFinal)
@@ -265,6 +267,7 @@ public final class FileTranscriptionQueue {
     }
 
     private func fail(_ noteID: UUID, message: String) {
+        removeOptions(noteID: noteID)
         if let record = fetchNote(noteID)?.recording {
             record.transcriptionState = .failed
             if record.summaryState == .pending { record.summaryState = .none }
@@ -303,7 +306,11 @@ public final class FileTranscriptionQueue {
                 fail(note.id, message: MeetingCopy.fileGone)
                 continue
             }
-            let options = FileImportOptions(keepAudio: record.audioKept, summarize: record.summaryState == .pending)
+            // The choices made at import (speaker labels, language), kept
+            // beside the copy; the note's own state for the rest.
+            var options = loadOptions(noteID: note.id) ?? FileImportOptions()
+            options.keepAudio = record.audioKept
+            options.summarize = record.summaryState == .pending
             if await enqueue(copy, fileName: fileName, noteID: note.id, options: options, createNote: false) != nil {
                 requeued.append(note.id)
                 // The speech service copied it again for the new job.
@@ -314,6 +321,28 @@ public final class FileTranscriptionQueue {
     }
 
     private nonisolated static let importPrefix = "import-"
+
+    /// An import's options, saved beside its copy until the job ends, so
+    /// launch recovery restarts it as it was asked for.
+    nonisolated static let optionsFileName = "import-options.json"
+
+    private func optionsURL(_ noteID: UUID) -> URL {
+        speech.recordingsDirectory(for: noteID).appending(path: Self.optionsFileName)
+    }
+
+    private func saveOptions(_ options: FileImportOptions, noteID: UUID) {
+        let url = optionsURL(noteID)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONEncoder().encode(options).write(to: url, options: .atomic)
+    }
+
+    private func loadOptions(noteID: UUID) -> FileImportOptions? {
+        (try? Data(contentsOf: optionsURL(noteID))).flatMap { try? JSONDecoder().decode(FileImportOptions.self, from: $0) }
+    }
+
+    private func removeOptions(noteID: UUID) {
+        try? FileManager.default.removeItem(at: optionsURL(noteID))
+    }
 
     /// The speech service's copy of an imported file in the note's folder:
     /// `import-<8 hex>-<name>` (what `transcribeFile` writes; a file

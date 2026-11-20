@@ -151,6 +151,26 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "call-1.caf").path))
     }
 
+    @Test func aConvertedTrackWhoseManifestWasNotSavedIsKept() async throws {
+        // Codex review on #251: dying after a conversion deleted its CAF but
+        // before the manifest was saved must not lose the finished .m4a.
+        let root = Self.root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingStore(root: root, availableBytes: { _ in 10 << 30 })
+        let note = UUID()
+        let session = try store.begin(noteID: note, startedAt: .now, keepAudio: true)
+        try session.openTrack(.microphone, at: 0)
+        try session.write(FakeAudioSource.tone(seconds: 1), to: .microphone)
+        _ = await session.finish(keepAudio: true, stopEarly: { true })
+        let folder = store.directory(for: note)
+        // The conversion finishes; the process dies before the manifest is saved.
+        _ = try await AudioFileConverter.convertToM4A(folder.appending(path: "microphone-1.caf"))
+        #expect(store.readManifest(note)?.tracks.map(\.fileName) == ["microphone-1.caf"])
+        #expect(await store.recoverInterrupted().isEmpty)
+        #expect(store.readManifest(note)?.state == .finished)
+        #expect(store.readManifest(note)?.tracks.map(\.fileName) == ["microphone-1.m4a"])
+    }
+
     @Test func theManifestFollowsEachConvertedTrack() async throws {
         // Review #223: dying between two conversions must not orphan the first .m4a.
         let root = Self.root()
