@@ -159,6 +159,30 @@ import Testing
         #expect(ask.isStale)
     }
 
+    @Test @MainActor func deletingABlockALaterAnswerReadMakesItStale() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let (_, ask) = await Self.setUp(service: service)
+        await ask.ask("When am I free for 2 hours?")
+        let slot = try #require(ask.highlightedOpenTimes.first)
+        await ask.block(slot)
+        let added = try #require(ask.blocked[slot])
+        await ask.ask("When is the focus block?")
+        #expect(ask.answers.last?.facts.eventIDs.contains(added.id) == true)
+        try await service.remove(added.reference)
+        await ask.calendarChanged()
+        #expect(ask.isStale)
+    }
+
+    @Test @MainActor func aQuestionIsPendingBeforeCalendarIsRead() async {
+        let (_, ask) = await Self.setUp()
+        let running = Task { await ask.ask("When am I free for 2 hours?") }
+        await Task.yield()
+        ask.clear()
+        await running.value
+        #expect(ask.answers.isEmpty)
+        #expect(ask.pending == nil)
+    }
+
     @Test @MainActor func twoQuickBlockClicksAddOneEvent() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
         let (_, ask) = await Self.setUp(service: service)

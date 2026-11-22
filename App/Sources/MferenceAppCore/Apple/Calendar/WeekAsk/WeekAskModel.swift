@@ -43,6 +43,9 @@ public final class WeekAskModel {
     /// The week the answers are about.
     @ObservationIgnored private var week: DateInterval?
     @ObservationIgnored private var fingerprint: Int?
+    /// The events the answers' snapshot held: a Focus block among them is
+    /// part of what the answers read, so its edits and deletion count.
+    @ObservationIgnored private var snapshotEventIDs: Set<String> = []
     /// Events Block added: they do not make an answer out of date.
     @ObservationIgnored private var ownEvents: [String: CalendarEvent] = [:]
     @ObservationIgnored private var task: Task<WeekAnswer, any Error>?
@@ -125,20 +128,27 @@ public final class WeekAskModel {
             return
         }
         let interval = scope
-        let snapshot: WeekSnapshot
-        do {
-            snapshot = WeekSnapshot(interval: interval, now: calendar.currentTime, calendar: calendar.calendar,
-                                    events: try await calendar.events(in: interval), todos: calendar.todos)
-        } catch {
-            notice = WeekAskNotice(text: "Calendar could not be read. Try again.", canUndo: false)
-            return
-        }
+        // Pending before the first wait, so Stop, Clear and a week change
+        // reach a question whose Calendar read is still running.
         draft = ""
         notice = nil
         generation += 1
         let mine = generation
         pending = WeekAskPending(question: question, step: .readingQuestion)
         pendingWeek = interval
+        let snapshot: WeekSnapshot
+        do {
+            snapshot = WeekSnapshot(interval: interval, now: calendar.currentTime, calendar: calendar.calendar,
+                                    events: try await calendar.events(in: interval), todos: calendar.todos)
+        } catch {
+            guard mine == generation else { return }
+            notice = WeekAskNotice(text: "Calendar could not be read. Try again.", canUndo: false)
+            draft = question
+            pending = nil
+            pendingWeek = nil
+            return
+        }
+        guard mine == generation else { return }
         let previous = isStale ? nil : answers.last?.query
         let answerer = answerer
         let report: @Sendable (WeekAskStep) async -> Void = { [weak self] step in
@@ -161,7 +171,8 @@ public final class WeekAskModel {
                 isStale = false
             }
             week = interval
-            fingerprint = Self.fingerprint(snapshot, ignoring: ownEvents)
+            snapshotEventIDs = Set(snapshot.events.map(\.id))
+            fingerprint = Self.fingerprint(snapshot, ignoring: ignoredOwnEvents)
             answers.append(answer)
             // The calendar may have changed while the answer was worked
             // out (no change notice reaches an answer not yet shown).
@@ -184,7 +195,7 @@ public final class WeekAskModel {
         guard let events = try? await calendar.events(in: snapshot.interval), generation == self.generation else { return }
         let now = WeekSnapshot(interval: snapshot.interval, now: calendar.currentTime, calendar: calendar.calendar,
                                events: events, todos: calendar.todos)
-        if Self.fingerprint(now, ignoring: ownEvents) != Self.fingerprint(snapshot, ignoring: ownEvents) {
+        if Self.fingerprint(now, ignoring: ignoredOwnEvents) != Self.fingerprint(snapshot, ignoring: ignoredOwnEvents) {
             isStale = true
         }
     }
@@ -219,6 +230,7 @@ public final class WeekAskModel {
         answers = []
         week = nil
         fingerprint = nil
+        snapshotEventIDs = []
         ownEvents = [:]
         isStale = false
         blocked = [:]
@@ -264,7 +276,7 @@ public final class WeekAskModel {
         guard let events = try? await calendar.events(in: week) else { return }
         let now = WeekSnapshot(interval: week, now: calendar.currentTime, calendar: calendar.calendar,
                                events: events, todos: calendar.todos)
-        if Self.fingerprint(now, ignoring: ownEvents) != fingerprint { isStale = true }
+        if Self.fingerprint(now, ignoring: ignoredOwnEvents) != fingerprint { isStale = true }
     }
 
     /// What an answer read, minus the events Block added.
@@ -288,6 +300,12 @@ public final class WeekAskModel {
             hasher.combine(todo.due)
         }
         return hasher.finalize()
+    }
+
+    /// Focus blocks added after the answers' snapshot: only these are left
+    /// out of the comparison (while unchanged).
+    private var ignoredOwnEvents: [String: CalendarEvent] {
+        ownEvents.filter { !snapshotEventIDs.contains($0.key) }
     }
 
     static func isUnchanged(_ event: CalendarEvent, _ own: [String: CalendarEvent]) -> Bool {
