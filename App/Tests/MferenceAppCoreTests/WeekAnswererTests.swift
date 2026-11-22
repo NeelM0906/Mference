@@ -282,6 +282,18 @@ import Testing
         #expect(answer.openTimes.allSatisfy { CalendarFixtures.calendar.component(.hour, from: $0.end) <= 12 })
     }
 
+    @Test func followUpsKeepTheirOwnIntentAndWindow() throws {
+        let week = Self.week()
+        let window = try #require(WeekQuestionRouter.fastPath("Am I free Wednesday from 2 PM to 4 PM?", in: week))
+        #expect(WeekQuestionRouter.fastPath("What's on Friday?", in: week, previous: window)
+            == .daySummary(day: CalendarFixtures.date(18, 0)))
+        #expect(WeekQuestionRouter.fastPath("What about Friday from 6 PM to 8 PM?", in: week, previous: window)
+            == .freeTime(FreeTimeRequest(minimumMinutes: 120, after: CalendarFixtures.date(18, 18),
+                                         before: CalendarFixtures.date(18, 20), day: CalendarFixtures.date(18, 0),
+                                         includesWeekend: true)))
+        #expect(WeekQuestionRouter.fastPath("and friday at 3 pm?", in: week, previous: window) == nil)
+    }
+
     @Test func appleModelGetsTheToolSchemaAsText() async throws {
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: #"{"type":"overlaps"}"#)
         let query = try await WeekQuestionRouter.route("do any meetings collide?", in: Self.week(), previous: nil,

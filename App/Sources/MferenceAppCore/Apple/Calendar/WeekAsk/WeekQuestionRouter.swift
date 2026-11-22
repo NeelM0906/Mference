@@ -47,6 +47,10 @@ public enum WeekQuestionRouter {
             return .freeTime(FreeTimeRequest(minimumMinutes: minutes ?? 60, part: part, day: dayDate,
                                              includesWeekend: has(text, #"\b(weekend|saturday|sunday|sat|sun)\b"#)))
         }
+        if has(text, #"\b(what's on|what is on|what do i have|my schedule|agenda|how does .* look|what's happening)\b"#) {
+            guard let day = dayDate ?? (week.contains(week.today) ? week.today : nil) else { return nil }
+            return .daySummary(day: day)
+        }
         // A follow-up on free time: "only mornings", "what about Friday?",
         // "and for 3 hours?".
         if case .freeTime(var request) = previous, minutes != nil || part != nil || dayDate != nil,
@@ -57,6 +61,20 @@ public enum WeekQuestionRouter {
                 request.part = part
                 request.after = nil
                 request.before = nil
+            }
+            // A window written in the follow-up ("Friday from 6 to 8 PM")
+            // replaces the old one; one that cannot be read goes to the model.
+            if !clock.singles.isEmpty || !clock.ranges.isEmpty {
+                guard let day = dayDate ?? request.day, let window = clockWindow(clock, on: day, in: week) else {
+                    return lenient ? .freeTime(request) : nil
+                }
+                if minutes == nil { request.minimumMinutes = min(request.minimumMinutes, Int(window.duration / 60)) }
+                request.part = nil
+                request.day = day
+                request.after = window.start
+                request.before = window.end
+                request.includesWeekend = true
+                return .freeTime(request)
             }
             if let dayDate, !week.calendar.isDate(dayDate, inSameDayAs: request.day ?? .distantPast) {
                 // A window from the last question moves to the new day.
@@ -72,10 +90,6 @@ public enum WeekQuestionRouter {
                 request.day = dayDate
             }
             return .freeTime(request)
-        }
-        if has(text, #"\b(what's on|what is on|what do i have|my schedule|agenda|how does .* look|what's happening)\b"#) {
-            guard let day = dayDate ?? (week.contains(week.today) ? week.today : nil) else { return nil }
-            return .daySummary(day: day)
         }
         if let name = eventName(text), !WeekFacts.matches(name, in: week).isEmpty {
             return .findEvent(name: name)
