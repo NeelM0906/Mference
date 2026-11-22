@@ -43,6 +43,40 @@ import Testing
                 .environment(noPrompt), name: "04-calendar-todos-no-prompt")
     }
 
+    /// Ask about your week: idle chips, a free-time answer drawn on the
+    /// grid, a busiest-day answer, Month's bar, and an out-of-date answer.
+    @Test func askAboutYourWeek() async throws {
+        let fixedNow = AppleUIFixtures.now
+        let defaults = UserDefaults(suiteName: "mference-snapshots-\(UUID().uuidString)")!
+        let store = PlannerStore(url: nil, initial: .init(todos: AppleUIFixtures.todos, proposals: []))
+        let service = InMemoryCalendarService(events: AppleUIFixtures.events)
+        let model = CalendarWeekModel(service: service, store: store, defaults: defaults, now: { fixedNow },
+                                      syncsAutomatically: false)
+        await model.load()
+        let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: .none))
+        func render(_ name: String, _ scheme: ColorScheme = .light) throws {
+            try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
+                .environment(model).environment(ask), name: name, colorScheme: scheme)
+        }
+        try render("04-calendar-ask-idle")
+        await ask.ask("When am I free for 2 hours?")
+        #expect(!ask.highlightedOpenTimes.isEmpty)
+        for scheme in [ColorScheme.light, .dark] { try render("04-calendar-ask-free", scheme) }
+        await ask.ask("What's my busiest day?")
+        try render("04-calendar-ask-busiest")
+        ask.clear()
+        await model.show(.month)
+        await ask.ask("What's due this week?")
+        try render("04-calendar-ask-month")
+        await model.show(.week)
+        _ = try await service.add(ProposedEvent(title: "Dentist", start: fixedNow.addingTimeInterval(26 * 3_600),
+                                                end: fixedNow.addingTimeInterval(27 * 3_600),
+                                                source: ItemSource(kind: .manual, label: "x")))
+        await ask.calendarChanged()
+        #expect(ask.isStale)
+        try render("04-calendar-ask-stale")
+    }
+
     @Test func shellSlotBuildsWithoutServices() {
         let renderer = ImageRenderer(content: CalendarView().frame(width: 600, height: 600))
         #expect(renderer.nsImage != nil)

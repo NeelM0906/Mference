@@ -3,10 +3,12 @@ import MferenceDesign
 import SwiftUI
 
 /// The to-do panel: a mini month to pick the day, that day's date on top,
-/// the to-dos grouped by date, the Reminders sync state, and the box that
-/// adds a to-do dated to the selected day.
+/// the Reminders sync state, the box that adds a to-do dated to the
+/// selected day, the to-dos grouped by date, and Ask about your week.
 struct TodoList: View {
     var model: CalendarWeekModel
+    var weekAsk: WeekAskModel?
+    var continueInChat: (() -> Void)?
     @State private var newTitle = ""
     /// The date chip once the person changed it; nil follows the selected day.
     @State private var dueChoice: DueChoice?
@@ -35,8 +37,11 @@ struct TodoList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s) {
-            miniMonth
-            Rectangle().fill(MFColor.hairline).frame(height: 1).padding(.vertical, MFSpacing.xs)
+            // An open answer needs the room; the grid shows the week anyway.
+            if !asking {
+                miniMonth
+                Rectangle().fill(MFColor.hairline).frame(height: 1).padding(.vertical, MFSpacing.xs)
+            }
             HStack(alignment: .center, spacing: MFSpacing.s) {
                 Text("To-dos")
                     .font(MFFont.headline)
@@ -56,6 +61,19 @@ struct TodoList: View {
                 }
             }
             syncLine
+            // Add a to-do sits under the heading, apart from Ask, so a
+            // question is never filed as a to-do by mistake.
+            addBox
+            if let weekAsk, looksLikeQuestion {
+                Button("Ask this about your week instead") {
+                    weekAsk.draft = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                    newTitle = ""
+                    Task { await weekAsk.ask() }
+                }
+                .buttonStyle(.plain)
+                .font(MFFont.caption.weight(.semibold))
+                .foregroundStyle(MFColor.accent)
+            }
             MFScroll {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(model.todoSections) { section in
@@ -63,9 +81,22 @@ struct TodoList: View {
                     }
                 }
             }
-            addBox
+            if let weekAsk {
+                Rectangle().fill(MFColor.hairline).frame(height: 1).padding(.vertical, MFSpacing.xs)
+                WeekAskPanel(ask: weekAsk, calendar: model, continueInChat: continueInChat)
+                    .layoutPriority(1)
+            }
         }
         .padding(MFSpacing.l)
+    }
+
+    private var asking: Bool {
+        guard let weekAsk else { return false }
+        return !weekAsk.answers.isEmpty || weekAsk.pending != nil
+    }
+
+    private var looksLikeQuestion: Bool {
+        newTitle.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
     }
 
     // MARK: Mini month

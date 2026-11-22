@@ -60,8 +60,11 @@ public final class WeekAskModel {
     /// The week a question asks about now.
     public var scope: DateInterval { calendar.askWeek }
 
+    /// Days and times written the way the answers write them.
+    public var text: WeekText { WeekText(calendar: calendar.calendar, now: calendar.currentTime) }
+
     /// "Sep 14 to 20".
-    public var scopeLabel: String { WeekText(calendar: calendar.calendar, now: calendar.currentTime).weekRange(scope) }
+    public var scopeLabel: String { text.weekRange(scope) }
 
     public var isFull: Bool { answers.count >= Self.maximumQuestions }
 
@@ -247,7 +250,6 @@ public final class WeekAskModel {
         ownEventIDs.insert(event.id)
         blocked[openTime] = event
         lastBlock = openTime
-        let text = WeekText(calendar: calendar.calendar, now: calendar.currentTime)
         notice = WeekAskNotice(text: "Added \(Self.blockTitle) to Calendar, \(text.shortWeekday(interval.start)) "
             + "\(text.range(interval.start, interval.end)).", canUndo: true)
     }
