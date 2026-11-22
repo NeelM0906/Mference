@@ -292,6 +292,7 @@ import Testing
                                          before: CalendarFixtures.date(18, 20), day: CalendarFixtures.date(18, 0),
                                          includesWeekend: true)))
         #expect(WeekQuestionRouter.fastPath("and friday at 3 pm?", in: week, previous: window) == nil)
+        #expect(WeekQuestionRouter.fastPath("What about Friday before noon?", in: week, previous: window) == nil)
     }
 
     @Test func compoundLengthsAddUp() {

@@ -55,6 +55,9 @@ public enum WeekQuestionRouter {
         // "and for 3 hours?".
         if case .freeTime(var request) = previous, minutes != nil || part != nil || dayDate != nil,
            !has(text, #"\bwhen (is|does|'s)\b"#) {
+            // "before noon", "after lunch": limits the fast path cannot read
+            // go to the model rather than keep contradictory bounds.
+            if limited && clock.ranges.isEmpty && !lenient { return nil }
             if let minutes { request.minimumMinutes = max(15, minutes) }
             if let part {
                 // "Only mornings" replaces a written window from before.
