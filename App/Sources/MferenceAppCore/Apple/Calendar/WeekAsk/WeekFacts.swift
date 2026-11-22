@@ -302,7 +302,7 @@ public enum WeekFacts {
             if let only = request.day, !calendar.isDate(day, inSameDayAs: only) { continue }
             if request.day == nil, !request.includesWeekend, calendar.isDateInWeekend(day) { continue }
             let lower: Date, upper: Date
-            if request.day != nil, let after = request.after, let before = request.before {
+            if request.day != nil, request.part == nil, let after = request.after, let before = request.before {
                 // A window written out ("6 to 8 PM") is the search, even
                 // outside the workday.
                 lower = max(after, from)

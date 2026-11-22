@@ -262,6 +262,26 @@ import Testing
         #expect(WeekFacts.answer(friday, in: empty).openTimes.count == 1)
     }
 
+    @Test func anEventNamedWithAFreeTimeWordIsFound() {
+        var events = CalendarFixtures.events
+        events.append(CalendarEvent(id: "house", title: "Open House", start: CalendarFixtures.date(17, 15),
+                                    end: CalendarFixtures.date(17, 16)))
+        let week = WeekFactsTests.week(events: events)
+        #expect(WeekQuestionRouter.fastPath("When is the Open House?", in: week) == .findEvent(name: "open house"))
+        #expect(WeekQuestionRouter.fastPath("When am I free for 2 hours?", in: week)
+            == .freeTime(FreeTimeRequest(minimumMinutes: 120)))
+    }
+
+    @Test func onlyMorningsReplacesAnInheritedWindow() throws {
+        let week = Self.week()
+        let window = try #require(WeekQuestionRouter.fastPath("Am I free Wednesday from 2 PM to 4 PM?", in: week))
+        let mornings = try #require(WeekQuestionRouter.fastPath("only mornings", in: week, previous: window))
+        guard case .freeTime(let request) = mornings else { Issue.record("not free time"); return }
+        #expect(request.part == .morning && request.after == nil && request.before == nil)
+        let answer = WeekFacts.answer(mornings, in: WeekFactsTests.week(events: [], todos: []))
+        #expect(answer.openTimes.allSatisfy { CalendarFixtures.calendar.component(.hour, from: $0.end) <= 12 })
+    }
+
     @Test func appleModelGetsTheToolSchemaAsText() async throws {
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: #"{"type":"overlaps"}"#)
         let query = try await WeekQuestionRouter.route("do any meetings collide?", in: Self.week(), previous: nil,

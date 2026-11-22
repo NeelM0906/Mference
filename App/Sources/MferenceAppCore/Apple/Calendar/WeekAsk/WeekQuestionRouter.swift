@@ -21,6 +21,11 @@ public enum WeekQuestionRouter {
         let day = mentionedDay(text, in: week)
         if day == .outside { return .outsideWeek }
         let dayDate: Date? = if case .inside(let date) = day { date } else { nil }
+        // An event named outright comes first: "When is the Open House?"
+        // is about that event, not about open time.
+        if let name = eventName(text), !WeekFacts.matches(name, in: week).isEmpty {
+            return .findEvent(name: name)
+        }
         if has(text, #"\b(overlap\w*|clash\w*|conflict\w*|double[- ]?book\w*)\b"#) { return .overlaps }
         if has(text, #"\b(due|to-?dos?|tasks?|reminders?)\b"#) { return .todosDue }
         if has(text, #"\b(busiest|heaviest|most (meetings|booked)|packed|busy day)\b"#) { return .compareDays }
@@ -47,7 +52,12 @@ public enum WeekQuestionRouter {
         if case .freeTime(var request) = previous, minutes != nil || part != nil || dayDate != nil,
            !has(text, #"\bwhen (is|does|'s)\b"#) {
             if let minutes { request.minimumMinutes = max(15, minutes) }
-            if let part { request.part = part }
+            if let part {
+                // "Only mornings" replaces a written window from before.
+                request.part = part
+                request.after = nil
+                request.before = nil
+            }
             if let dayDate, !week.calendar.isDate(dayDate, inSameDayAs: request.day ?? .distantPast) {
                 // A window from the last question moves to the new day.
                 if let old = request.day {
@@ -156,7 +166,9 @@ public enum WeekQuestionRouter {
         guard let parts = firstMatch(text, #"\b(?:when|what time)(?:'s| is| does| do)? (?:is |does |do )?(?:the |my |our )?(.+?)(?: start| begin| happen| end)?\s*\??\s*$"#)
         else { return nil }
         let name = parts[1].trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
-        return name.isEmpty || has(" \(name) ", #"\b(i|free|open)\b"#) ? nil : name
+        // Only a name some event matches is used (callers check), so "am i
+        // free" never becomes one.
+        return name.isEmpty ? nil : name
     }
 
     // MARK: With a model

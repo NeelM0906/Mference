@@ -184,6 +184,9 @@ public final class WeekAskModel {
                 draft = question
             }
         }
+        // Stop, Clear or a newer question may have taken over during the
+        // last wait: their state is not this question's to clear.
+        guard mine == generation else { return }
         pending = nil
         pendingWeek = nil
         self.task = nil
