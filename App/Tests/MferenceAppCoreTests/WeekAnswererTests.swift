@@ -186,6 +186,34 @@ import Testing
         #expect(other.query == .other)
     }
 
+    @Test func todayIsOutsideAWeekThatDoesNotHoldIt() {
+        let next = WeekFactsTests.week(now: CalendarFixtures.now)
+        var later = next
+        later.interval = DateInterval(start: CalendarFixtures.date(21, 0), end: CalendarFixtures.date(28, 0))
+        #expect(WeekQuestionRouter.fastPath("what's on today?", in: later) == .outsideWeek)
+        #expect(WeekQuestionRouter.fastPath("what's my agenda?", in: later) == nil)
+    }
+
+    @Test func aFailedModelStillGetsTheFixedAnswer() async throws {
+        let engine = Self.engine(replies: [.init(content: "", error: .generationFailed("boom"))])
+        let answer = try await Self.answerer(engine).answer("What's my busiest day?", in: Self.week())
+        #expect(answer.sentence == "Friday is your busiest day left, with 2 h 30 min booked.")
+        #expect(answer.source == .fixed(.modelFailed(label: "Deep 27B")))
+        let routed = Self.engine(replies: [.init(content: "", error: .busy)])
+        let fallback = try await Self.answerer(routed).answer("am I free for an hour before noon?", in: Self.week())
+        #expect(fallback.source == .fixed(.modelFailed(label: "Deep 27B")))
+        #expect(!fallback.facts.openTimes.isEmpty)
+    }
+
+    @Test func aContrastingNotIsNotANo() {
+        let week = Self.week()
+        let facts = WeekFacts.answer(.compareDays, in: week)
+        #expect(WeekSentenceChecker.check("Friday, not Monday, is your busiest day left with 2 h 30 min booked. [D5]",
+                                          against: facts, question: "busiest?", calendar: week.calendar) != nil)
+        #expect(WeekSentenceChecker.negative("You aren't free for 6 hours."))
+        #expect(WeekSentenceChecker.negative("There's no gap."))
+    }
+
     @Test func anotherWeekRunsNoModel() async throws {
         let engine = Self.engine()
         let answer = try await Self.answerer(engine).answer("what about next week?", in: Self.week())

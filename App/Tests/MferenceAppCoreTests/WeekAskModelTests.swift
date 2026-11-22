@@ -113,14 +113,40 @@ import Testing
         #expect(ask.draft == "When am I free for 2 hours?")
     }
 
-    @Test @MainActor func aFailedAnswerSaysWhyAndKeepsTheQuestion() async {
+    @Test @MainActor func leavingTheWeekDropsTheAnswerBeingWorkedOut() async throws {
+        let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident, replies: [
+            .init(content: "Today, 10 AM to 12 PM is first, and there are eight. [F1]", chunk: 2, delay: .milliseconds(50)),
+        ])
+        let (calendar, ask) = await Self.setUp(engine: engine)
+        let running = Task { await ask.ask("When am I free for 2 hours?") }
+        for _ in 0..<200 where ask.pending == nil { try await Task.sleep(for: .milliseconds(10)) }
+        await calendar.step(1)
+        ask.scopeChanged()
+        await running.value
+        #expect(ask.pending == nil)
+        #expect(ask.answers.isEmpty)
+        #expect(ask.scopeLabel == "Sep 21 to 27")
+    }
+
+    @Test @MainActor func aToDoOutsideTheWeekDoesNotMakeAnswersStale() async {
+        let (calendar, ask) = await Self.setUp()
+        await ask.ask("When am I free for 2 hours?")
+        calendar.addTodo(text: "Renew the lease", due: CalendarFixtures.date(28, 0), dueChosen: true)
+        await ask.calendarChanged()
+        #expect(!ask.isStale)
+        calendar.addTodo(text: "Call the bank", due: CalendarFixtures.date(16, 0), dueChosen: true)
+        await ask.calendarChanged()
+        #expect(ask.isStale)
+    }
+
+    @Test @MainActor func aFailedModelStillAnswersFromTheCalendar() async {
         let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident,
                                            replies: [.init(content: "", error: .busy)])
         let (_, ask) = await Self.setUp(engine: engine)
         await ask.ask("When am I free for 2 hours?")
-        #expect(ask.answers.isEmpty)
-        #expect(ask.notice?.text == EngineServiceError.busy.userMessage)
-        #expect(ask.draft == "When am I free for 2 hours?")
+        #expect(ask.answers.last?.source == .fixed(.modelFailed(label: "Deep 27B")))
+        #expect(ask.highlightedOpenTimes.count == 8)
+        #expect(ask.notice == nil)
     }
 
     @Test @MainActor func withoutCalendarAccessNothingIsAsked() async {

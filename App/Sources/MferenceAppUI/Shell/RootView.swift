@@ -149,7 +149,10 @@ struct SectionContent: View {
     /// Calendar's "Continue in Chat": a Private chat holding the week's
     /// questions and answers.
     private func continueWeekInChat(_ ask: WeekAskModel) {
-        chat?.continueChat(title: ask.chatTitle, context: ask.chatContext, turns: ask.chatTurns)
+        guard chat?.continueChat(title: ask.chatTitle, context: ask.chatContext, turns: ask.chatTurns) == true else {
+            ask.chatUnavailable()
+            return
+        }
         shell?.show(.chat)
     }
 

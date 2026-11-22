@@ -42,7 +42,8 @@ public enum WeekQuestionRouter {
             return .freeTime(request)
         }
         if has(text, #"\b(what's on|what is on|what do i have|my schedule|agenda|how does .* look|what's happening)\b"#) {
-            return .daySummary(day: dayDate ?? week.today)
+            guard let day = dayDate ?? (week.contains(week.today) ? week.today : nil) else { return nil }
+            return .daySummary(day: day)
         }
         if let name = eventName(text), !WeekFacts.matches(name, in: week).isEmpty {
             return .findEvent(name: name)
@@ -75,7 +76,7 @@ public enum WeekQuestionRouter {
     /// "today", "tomorrow", or a weekday of this week.
     static func mentionedDay(_ text: String, in week: WeekSnapshot) -> MentionedDay {
         let calendar = week.calendar
-        if has(text, #"\b(today|tonight)\b"#) { return .inside(week.today) }
+        if has(text, #"\b(today|tonight)\b"#) { return week.contains(week.today) ? .inside(week.today) : .outside }
         if has(text, #"\btomorrow\b"#) {
             guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: week.today) else { return .none }
             return week.contains(tomorrow) ? .inside(tomorrow) : .outside
@@ -264,7 +265,11 @@ public enum WeekQuestionRouter {
         case "compare_days": return .success(.compareDays)
         case "day_summary":
             switch date("day", withTime: false) {
-            case .success(let day): return .success(.daySummary(day: week.calendar.startOfDay(for: day ?? week.today)))
+            case .success(let day):
+                guard let day = day ?? (week.contains(week.today) ? week.today : nil) else {
+                    return .failure(Rejection(reason: "day_summary needs day."))
+                }
+                return .success(.daySummary(day: week.calendar.startOfDay(for: day)))
             case .failure(let rejection):
                 return rejection.reason.contains("outside") ? .success(.outsideWeek) : .failure(rejection)
             }

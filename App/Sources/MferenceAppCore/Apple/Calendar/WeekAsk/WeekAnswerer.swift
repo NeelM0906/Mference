@@ -36,10 +36,12 @@ public enum WeekSentenceChecker {
     }
 
     /// Whether a sentence says there is nothing ("No open block", "Nothing
-    /// is due", "isn't free").
+    /// is due", "isn't free"). A "not" counts only when it denies time, an
+    /// event or a to-do ("Friday, not Monday, is busiest" is not a no).
     static func negative(_ text: String) -> Bool {
         let lowered = " " + text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'") + " "
-        return lowered.range(of: #"\b(no|none|nothing|not|never|can't|cannot|isn't|aren't|don't|doesn't)\b"#,
+        if lowered.range(of: #"\b(no|none|nothing)\b"#, options: .regularExpression) != nil { return true }
+        return lowered.range(of: #"\b(not|never|can't|cannot|isn't|aren't|don't|doesn't|won't)\b(?:\s+\w+){0,3}?\s+(free|open|available|any|booked|due|overlap\w*|clash\w*|time|gap\w*|block\w*|event\w*|scheduled)\b"#,
                              options: .regularExpression) != nil
     }
 }
@@ -59,6 +61,8 @@ public enum WeekAnswerSource: Sendable, Hashable {
         case noModel
         /// The model's sentence named something the facts do not hold.
         case failedCheck(label: String)
+        /// The model could not run or answer (busy, failed, unsupported).
+        case modelFailed(label: String)
     }
 
     /// The small line under the answer.
@@ -68,6 +72,7 @@ public enum WeekAnswerSource: Sendable, Hashable {
         case .fixed(.noModelNeeded): "Answered by Mference · no model run"
         case .fixed(.noModel): "Answered by Mference · no model available"
         case .fixed(.failedCheck): "Answered by Mference · the model's wording did not match your calendar"
+        case .fixed(.modelFailed): "Answered by Mference · the model could not answer"
         }
     }
 }
@@ -154,12 +159,21 @@ public struct WeekAnswerer: Sendable {
         var model: (any WeekLanguageModel)?
         if query != .outsideWeek && query != .other { model = await picker.pick() }
         try Task.checkCancellation()
-        if query == nil {
-            if let model {
-                query = try await WeekQuestionRouter.route(question, in: week, previous: previous, model: model)
-            } else {
-                query = WeekQuestionRouter.fastPath(question, in: week, previous: previous, lenient: true) ?? .other
+        var failedModel: String?
+        if query == nil, let routing = model {
+            do {
+                query = try await WeekQuestionRouter.route(question, in: week, previous: previous, model: routing)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // The model could not run: answer as if there were none.
+                try Task.checkCancellation()
+                failedModel = routing.label
+                model = nil
             }
+        }
+        if query == nil {
+            query = WeekQuestionRouter.fastPath(question, in: week, previous: previous, lenient: true) ?? .other
         }
         let resolved = query ?? .other
         await progress(.working(resolved))
@@ -168,11 +182,21 @@ public struct WeekAnswerer: Sendable {
             return WeekAnswer(question: question, facts: facts, sentence: facts.sentence, source: .fixed(.noModelNeeded))
         }
         guard let model else {
-            return WeekAnswer(question: question, facts: facts, sentence: facts.sentence, source: .fixed(.noModel))
+            return WeekAnswer(question: question, facts: facts, sentence: facts.sentence,
+                              source: .fixed(failedModel.map { .modelFailed(label: $0) } ?? .noModel))
         }
         await progress(.wording)
-        let reply = try await model.respond(instructions: Self.phraseInstructions,
+        let reply: WeekModelReply
+        do {
+            reply = try await model.respond(instructions: Self.phraseInstructions,
                                             prompt: Self.phrasePrompt(question, facts), tools: [], maximumTokens: 96)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return WeekAnswer(question: question, facts: facts, sentence: facts.sentence,
+                              source: .fixed(.modelFailed(label: model.label)))
+        }
         try Task.checkCancellation()
         if !reply.wasCut, let sentence = WeekSentenceChecker.check(reply.content, against: facts, question: question,
                                                                    calendar: week.calendar) {

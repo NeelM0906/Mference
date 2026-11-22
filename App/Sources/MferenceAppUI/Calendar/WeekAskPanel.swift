@@ -38,6 +38,8 @@ struct WeekAskPanel: View {
             composer
         }
         .onChange(of: calendar.askWeek) { ask.scopeChanged() }
+        // The week may have changed while no panel was shown (Year view).
+        .onAppear { ask.scopeChanged() }
     }
 
     private var header: some View {
@@ -313,6 +315,8 @@ struct WeekAnswerView: View {
             lines.append("\(label)'s sentence named something your calendar doesn't hold, so Mference wrote this one.")
         case .fixed(.noModel):
             lines.append("No model could run, so Mference wrote the sentence.")
+        case .fixed(.modelFailed(let label)):
+            lines.append("\(label) could not answer, so Mference wrote the sentence.")
         case .fixed(.noModelNeeded):
             lines.append("No model was run for this.")
         }

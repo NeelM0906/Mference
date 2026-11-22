@@ -46,6 +46,8 @@ public final class WeekAskModel {
     @ObservationIgnored private var task: Task<WeekAnswer, any Error>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var lastBlock: DateInterval?
+    /// The week the question being answered is about.
+    @ObservationIgnored private var pendingWeek: DateInterval?
 
     private let calendar: CalendarWeekModel
     private let answerer: WeekAnswerer
@@ -94,6 +96,7 @@ public final class WeekAskModel {
     /// The person moved to another week (or picked a day in another week):
     /// answers about the old week go.
     public func scopeChanged() {
+        if let pendingWeek, pendingWeek != scope { stop() }
         guard let week, week != scope else { return }
         clear()
     }
@@ -133,6 +136,7 @@ public final class WeekAskModel {
         generation += 1
         let mine = generation
         pending = WeekAskPending(question: question, step: .readingQuestion)
+        pendingWeek = interval
         let previous = isStale ? nil : answers.last?.query
         let answerer = answerer
         let report: @Sendable (WeekAskStep) async -> Void = { [weak self] step in
@@ -143,6 +147,13 @@ public final class WeekAskModel {
         do {
             let answer = try await task.value
             guard mine == generation else { return }
+            // The person left the week while it was worked out.
+            guard interval == scope else {
+                pending = nil
+                pendingWeek = nil
+                self.task = nil
+                return
+            }
             if week != interval || isStale {
                 answers = []
                 isStale = false
@@ -158,6 +169,7 @@ public final class WeekAskModel {
             }
         }
         pending = nil
+        pendingWeek = nil
         self.task = nil
     }
 
@@ -182,6 +194,7 @@ public final class WeekAskModel {
         generation += 1
         draft = pending.question
         self.pending = nil
+        pendingWeek = nil
     }
 
     /// Clear (the x on the card): every answer for this week goes.
@@ -196,6 +209,11 @@ public final class WeekAskModel {
     }
 
     public func dismissNotice() { notice = nil }
+
+    /// Continue in Chat could not start a chat now.
+    public func chatUnavailable() {
+        notice = WeekAskNotice(text: "Chat is still answering. Try again when it's done.", canUndo: false)
+    }
 
     // MARK: Continue in Chat
 
@@ -242,7 +260,9 @@ public final class WeekAskModel {
             hasher.combine(event.end)
             hasher.combine(event.isAllDay)
         }
-        for todo in week.todos.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+        // Only to-dos an answer can mention: due before the week ends, or undated.
+        let relevant = week.todos.filter { $0.due.map { $0 < week.interval.end } ?? true }
+        for todo in relevant.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
             hasher.combine(todo.id)
             hasher.combine(todo.title)
             hasher.combine(todo.isDone)

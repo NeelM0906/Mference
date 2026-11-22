@@ -346,8 +346,10 @@ public final class ChatViewModel {
     /// are stored as its history, titled `title`, then opened with the box
     /// empty. Stored now because the person asked for it; Private keeps it
     /// out of Memory.
-    public func continueChat(title: String, context: String, turns: [(question: String, answer: String)]) {
-        guard !isGenerating, !turns.isEmpty else { return }
+    /// Returns false, changing nothing, while a chat answer is running.
+    @discardableResult
+    public func continueChat(title: String, context: String, turns: [(question: String, answer: String)]) -> Bool {
+        guard !isGenerating, !turns.isEmpty else { return false }
         newChat(isPrivate: true)
         do {
             let conversation = try store.createConversation(model: model, isPrivate: true, now: now())
@@ -362,6 +364,7 @@ public final class ChatViewModel {
         } catch {
             errorMessage = "Mference could not start this chat. \(error.localizedDescription)"
         }
+        return true
     }
 
     /// "Turn on" in the web consent prompt.
