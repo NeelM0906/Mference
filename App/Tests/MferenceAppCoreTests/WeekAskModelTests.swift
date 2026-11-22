@@ -144,6 +144,21 @@ import Testing
         #expect(ask.highlightedOpenTimes.isEmpty)
     }
 
+    @Test @MainActor func movingABlockedEventMakesAnswersStale() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let (_, ask) = await Self.setUp(service: service)
+        await ask.ask("When am I free for 2 hours?")
+        let slot = try #require(ask.highlightedOpenTimes.first)
+        await ask.block(slot)
+        await ask.calendarChanged()
+        #expect(!ask.isStale)
+        let added = try #require(ask.blocked[slot])
+        _ = try await service.update(added.reference, title: added.title, start: CalendarFixtures.date(17, 13),
+                                     end: CalendarFixtures.date(17, 15))
+        await ask.calendarChanged()
+        #expect(ask.isStale)
+    }
+
     @Test @MainActor func twoQuickBlockClicksAddOneEvent() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
         let (_, ask) = await Self.setUp(service: service)

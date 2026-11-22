@@ -123,6 +123,12 @@ struct CalendarContent: View {
             }
         }
         .onChange(of: model.todos) { Task { await weekAsk?.calendarChanged() } }
+        // Calendar changes made while another section was showing reached no
+        // one: check the answers kept from before.
+        .task {
+            weekAsk?.scopeChanged()
+            await weekAsk?.calendarChanged()
+        }
         .shellToolbar(id: "calendar.new-event") { NewEventToolbarButton(model: model) }
     }
 

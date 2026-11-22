@@ -74,10 +74,33 @@ public struct AssistantWeekLanguageModel: WeekLanguageModel {
 
     public func respond(instructions: String, prompt: String, tools: [ToolDefinition], maximumTokens: Int)
         async throws -> WeekModelReply {
-        let suffix = tools.isEmpty ? "" : "\n\nReply with only the JSON object of the \(tools[0].name) arguments."
+        // A text-only model gets the tool's whole contract in the prompt.
+        let suffix = tools.first.map { tool in
+            "\n\nThe call \(tool.name): \(tool.description)\nIts arguments, as JSON Schema: "
+                + Self.json(tool.parameters)
+                + "\nReply with only the JSON object of the \(tool.name) arguments."
+        } ?? ""
         let text = try await model.complete(AssistantRequest(instructions: instructions, prompt: prompt + suffix,
                                                              maximumTokens: maximumTokens, temperature: 0))
         return WeekModelReply(content: text)
+    }
+
+    /// `value` as compact JSON with sorted keys.
+    static func json(_ value: ToolJSON) -> String {
+        func plain(_ value: ToolJSON) -> Any {
+            switch value {
+            case .null: NSNull()
+            case .bool(let flag): flag
+            case .integer(let number): number
+            case .number(let number): number
+            case .string(let text): text
+            case .array(let items): items.map(plain)
+            case .object(let fields): fields.mapValues(plain)
+            }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: plain(value), options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
     }
 }
 

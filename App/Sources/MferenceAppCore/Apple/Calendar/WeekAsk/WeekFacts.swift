@@ -395,7 +395,11 @@ public enum WeekFacts {
         let text = week.text
         if let day = request.day {
             let word = text.dayWord(day)
-            return word == text.weekday(day) ? "on \(word)" : word
+            let base = word == text.weekday(day) ? "on \(word)" : word
+            if let after = request.after, let before = request.before {
+                return "\(base) from \(text.range(after, before))"
+            }
+            return base
         }
         var phrase = week.interval.contains(week.now) ? "for the rest of the week" : "this week"
         if let part = request.part { phrase = "in the \(part.rawValue)s" }

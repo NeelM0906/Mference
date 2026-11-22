@@ -27,8 +27,16 @@ public enum WeekQuestionRouter {
         let limited = has(text, #"\b(before|after|until|till|by)\b"#)
         let minutes = durationMinutes(text)
         let part = dayPart(text)
+        let clock = WeekSentenceChecker.clockTimes(in: text)
         if has(text, #"\b(free|open|available|gaps?|squeeze|fit in|time for)\b"#) || (minutes != nil && has(text, #"\bwhen\b"#)) {
-            if limited && !lenient { return nil }
+            // "free Wednesday from 2 to 4 PM": that window, the whole of it.
+            if let dayDate, let window = clockWindow(clock, on: dayDate, in: week) {
+                let span = Int(window.duration / 60)
+                return .freeTime(FreeTimeRequest(minimumMinutes: min(minutes ?? span, span), after: window.start,
+                                                 before: window.end, day: dayDate, includesWeekend: true))
+            }
+            // Other times and limits ("before noon", "at 3") go to the model.
+            if (limited || !clock.singles.isEmpty || !clock.ranges.isEmpty) && !lenient { return nil }
             return .freeTime(FreeTimeRequest(minimumMinutes: minutes ?? 60, part: part, day: dayDate,
                                              includesWeekend: has(text, #"\b(weekend|saturday|sunday|sat|sun)\b"#)))
         }
@@ -49,6 +57,17 @@ public enum WeekQuestionRouter {
             return .findEvent(name: name)
         }
         return nil
+    }
+
+    /// The first written "from to" range, on `day`, start before end.
+    static func clockWindow(_ clock: (singles: [Set<Int>], ranges: [(Set<Int>, Set<Int>)]), on day: Date,
+                            in week: WeekSnapshot) -> DateInterval? {
+        guard let (starts, ends) = clock.ranges.first, let end = ends.max() else { return nil }
+        guard let start = starts.filter({ $0 < end }).max() else { return nil }
+        let midnight = week.calendar.startOfDay(for: day)
+        guard let from = week.calendar.date(byAdding: .minute, value: start, to: midnight),
+              let to = week.calendar.date(byAdding: .minute, value: end, to: midnight) else { return nil }
+        return DateInterval(start: from, end: to)
     }
 
     static func has(_ text: String, _ pattern: String) -> Bool {

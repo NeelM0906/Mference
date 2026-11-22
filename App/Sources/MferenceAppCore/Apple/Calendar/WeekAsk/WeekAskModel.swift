@@ -44,7 +44,7 @@ public final class WeekAskModel {
     @ObservationIgnored private var week: DateInterval?
     @ObservationIgnored private var fingerprint: Int?
     /// Events Block added: they do not make an answer out of date.
-    @ObservationIgnored private var ownEventIDs: Set<String> = []
+    @ObservationIgnored private var ownEvents: [String: CalendarEvent] = [:]
     @ObservationIgnored private var task: Task<WeekAnswer, any Error>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var lastBlock: DateInterval?
@@ -161,7 +161,7 @@ public final class WeekAskModel {
                 isStale = false
             }
             week = interval
-            fingerprint = Self.fingerprint(snapshot, ignoring: ownEventIDs)
+            fingerprint = Self.fingerprint(snapshot, ignoring: ownEvents)
             answers.append(answer)
             // The calendar may have changed while the answer was worked
             // out (no change notice reaches an answer not yet shown).
@@ -184,7 +184,7 @@ public final class WeekAskModel {
         guard let events = try? await calendar.events(in: snapshot.interval), generation == self.generation else { return }
         let now = WeekSnapshot(interval: snapshot.interval, now: calendar.currentTime, calendar: calendar.calendar,
                                events: events, todos: calendar.todos)
-        if Self.fingerprint(now, ignoring: ownEventIDs) != Self.fingerprint(snapshot, ignoring: ownEventIDs) {
+        if Self.fingerprint(now, ignoring: ownEvents) != Self.fingerprint(snapshot, ignoring: ownEvents) {
             isStale = true
         }
     }
@@ -219,6 +219,7 @@ public final class WeekAskModel {
         answers = []
         week = nil
         fingerprint = nil
+        ownEvents = [:]
         isStale = false
         blocked = [:]
         notice = nil
@@ -263,13 +264,15 @@ public final class WeekAskModel {
         guard let events = try? await calendar.events(in: week) else { return }
         let now = WeekSnapshot(interval: week, now: calendar.currentTime, calendar: calendar.calendar,
                                events: events, todos: calendar.todos)
-        if Self.fingerprint(now, ignoring: ownEventIDs) != fingerprint { isStale = true }
+        if Self.fingerprint(now, ignoring: ownEvents) != fingerprint { isStale = true }
     }
 
     /// What an answer read, minus the events Block added.
-    static func fingerprint(_ week: WeekSnapshot, ignoring ids: Set<String>) -> Int {
+    /// `own` are the events Block added, skipped only while unchanged: a
+    /// Focus block moved or retitled afterwards counts like any change.
+    static func fingerprint(_ week: WeekSnapshot, ignoring own: [String: CalendarEvent]) -> Int {
         var hasher = Hasher()
-        for event in week.events where !ids.contains(event.id) {
+        for event in week.events where !Self.isUnchanged(event, own) {
             hasher.combine(event.id)
             hasher.combine(event.title)
             hasher.combine(event.start)
@@ -285,6 +288,12 @@ public final class WeekAskModel {
             hasher.combine(todo.due)
         }
         return hasher.finalize()
+    }
+
+    static func isUnchanged(_ event: CalendarEvent, _ own: [String: CalendarEvent]) -> Bool {
+        guard let added = own[event.id] else { return false }
+        return added.title == event.title && added.start == event.start && added.end == event.end
+            && added.isAllDay == event.isAllDay
     }
 
     // MARK: Block
@@ -308,7 +317,7 @@ public final class WeekAskModel {
             notice = WeekAskNotice(text: calendar.errorMessage ?? "The event could not be added.", canUndo: false)
             return
         }
-        ownEventIDs.insert(event.id)
+        ownEvents[event.id] = event
         blocked[openTime] = event
         lastBlock = openTime
         notice = WeekAskNotice(text: "Added \(Self.blockTitle) to Calendar, \(text.shortWeekday(interval.start)) "

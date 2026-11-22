@@ -220,6 +220,36 @@ import Testing
         #expect(check("Tomorrow is open all 8 hours, 9 to 5 PM. [F1]") != nil)
     }
 
+    @Test func anExplicitWindowIsAnsweredAsThatWindow() {
+        let week = Self.week()
+        let wednesday = CalendarFixtures.date(16, 0)
+        let query = WeekQuestionRouter.fastPath("Am I free Wednesday from 2 PM to 4 PM?", in: week)
+        #expect(query == .freeTime(FreeTimeRequest(minimumMinutes: 120, after: CalendarFixtures.date(16, 14),
+                                                   before: CalendarFixtures.date(16, 16), day: wednesday,
+                                                   includesWeekend: true)))
+        #expect(WeekQuestionRouter.fastPath("am I free wednesday 2 to 4 pm", in: week) == query)
+        var events = CalendarFixtures.events
+        events.append(CalendarEvent(id: "busy", title: "Review", start: CalendarFixtures.date(16, 14),
+                                    end: CalendarFixtures.date(16, 16)))
+        let answer = WeekFacts.answer(try! #require(query), in: WeekFactsTests.week(events: events))
+        #expect(answer.sentence == "Nothing is open tomorrow from 2 to 4 PM.")
+        #expect(answer.foundNothing)
+        // A single time or a time without a day goes to the model.
+        #expect(WeekQuestionRouter.fastPath("am I free at 3 pm thursday?", in: week) == nil)
+        #expect(WeekQuestionRouter.fastPath("am I free from 2 to 4 pm?", in: week) == nil)
+    }
+
+    @Test func appleModelGetsTheToolSchemaAsText() async throws {
+        let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: #"{"type":"overlaps"}"#)
+        let query = try await WeekQuestionRouter.route("do any meetings collide?", in: Self.week(), previous: nil,
+                                                       model: AssistantWeekLanguageModel(model: apple))
+        #expect(query == .overlaps)
+        let prompt = apple.requests.first?.prompt ?? ""
+        #expect(prompt.contains(#""enum":["free_time","find_event","#))
+        #expect(prompt.contains("YYYY-MM-DDTHH:MM"))
+        #expect(prompt.hasSuffix("Reply with only the JSON object of the week_query arguments."))
+    }
+
     @Test func aContrastingNotIsNotANo() {
         let week = Self.week()
         let facts = WeekFacts.answer(.compareDays, in: week)
