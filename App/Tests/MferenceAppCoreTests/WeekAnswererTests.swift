@@ -205,6 +205,21 @@ import Testing
         #expect(!fallback.facts.openTimes.isEmpty)
     }
 
+    @Test func timesMustMatchWithTheirHalfOfTheDay() {
+        let week = WeekFactsTests.week(events: [], todos: [])
+        let facts = WeekFacts.answer(.freeTime(FreeTimeRequest(minimumMinutes: 60, day: CalendarFixtures.date(16, 0))),
+                                     in: week)
+        func check(_ sentence: String) -> String? {
+            WeekSentenceChecker.check(sentence, against: facts, question: "free wednesday?", calendar: week.calendar)
+        }
+        #expect(check("You are free tomorrow from 9 AM to 5 PM. [F1]") != nil)
+        #expect(check("You are free tomorrow from 9:00 to 17:00. [F1]") != nil)
+        #expect(check("You are free tomorrow from 9 PM to 5 PM. [F1]") == nil)
+        #expect(check("You are free tomorrow from 9 AM to 12 PM. [F1]") == nil)
+        #expect(check("You're free tomorrow after 5 AM. [F1]") == nil)
+        #expect(check("Tomorrow is open all 8 hours, 9 to 5 PM. [F1]") != nil)
+    }
+
     @Test func aContrastingNotIsNotANo() {
         let week = Self.week()
         let facts = WeekFacts.answer(.compareDays, in: week)

@@ -128,6 +128,35 @@ import Testing
         #expect(ask.scopeLabel == "Sep 21 to 27")
     }
 
+    @Test @MainActor func aChangeWhileAnsweringMarksTheNewAnswerOutOfDate() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident, replies: [
+            .init(content: "Today, 10 AM to 12 PM is first, and there are eight. [F1]", chunk: 2, delay: .milliseconds(30)),
+        ])
+        let (_, ask) = await Self.setUp(engine: engine, service: service)
+        let running = Task { await ask.ask("When am I free for 2 hours?") }
+        for _ in 0..<200 where ask.pending?.step != .wording { try await Task.sleep(for: .milliseconds(10)) }
+        _ = try await service.add(ProposedEvent(title: "Dentist", start: CalendarFixtures.date(16, 15),
+                                                end: CalendarFixtures.date(16, 16), source: ItemSource(kind: .manual, label: "x")))
+        await running.value
+        #expect(ask.answers.count == 1)
+        #expect(ask.isStale)
+        #expect(ask.highlightedOpenTimes.isEmpty)
+    }
+
+    @Test @MainActor func twoQuickBlockClicksAddOneEvent() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let (_, ask) = await Self.setUp(service: service)
+        await ask.ask("When am I free for 2 hours?")
+        let slot = try #require(ask.highlightedOpenTimes.first)
+        async let first: Void = ask.block(slot)
+        async let second: Void = ask.block(slot)
+        _ = await (first, second)
+        let events = try await service.events(from: CalendarFixtures.date(14, 0), to: CalendarFixtures.date(21, 0))
+        #expect(events.filter { $0.title == WeekAskModel.blockTitle }.count == 1)
+        #expect(ask.blocking.isEmpty)
+    }
+
     @Test @MainActor func aToDoOutsideTheWeekDoesNotMakeAnswersStale() async {
         let (calendar, ask) = await Self.setUp()
         await ask.ask("When am I free for 2 hours?")

@@ -366,6 +366,7 @@ struct WeekFactRow: View {
                         .foregroundStyle(MFColor.accent)
                         .accessibilityLabel("Block \(text.duration(minutes: Int(block.duration / 60)))")
                         .accessibilityHint("Adds a Focus block event to Calendar, \(text.range(block.start, block.end))")
+                        .disabled(ask.blocking.contains(interval))
                 }
             }
             .foregroundStyle(MFColor.ink)

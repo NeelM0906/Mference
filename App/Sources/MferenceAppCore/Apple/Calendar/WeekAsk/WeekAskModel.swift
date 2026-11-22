@@ -35,6 +35,8 @@ public final class WeekAskModel {
     public private(set) var notice: WeekAskNotice?
     /// Open blocks Block turned into events, with the event added.
     public private(set) var blocked: [DateInterval: CalendarEvent] = [:]
+    /// Open blocks whose Block is being written: one click, one event.
+    public private(set) var blocking: Set<DateInterval> = []
     /// The text in the box.
     public var draft = ""
 
@@ -161,6 +163,9 @@ public final class WeekAskModel {
             week = interval
             fingerprint = Self.fingerprint(snapshot, ignoring: ownEventIDs)
             answers.append(answer)
+            // The calendar may have changed while the answer was worked
+            // out (no change notice reaches an answer not yet shown).
+            await revalidate(snapshot: snapshot, generation: mine)
         } catch {
             guard mine == generation else { return }
             if !(error is CancellationError) {
@@ -171,6 +176,17 @@ public final class WeekAskModel {
         pending = nil
         pendingWeek = nil
         self.task = nil
+    }
+
+    /// Marks the answers out of date when Calendar no longer matches what
+    /// `snapshot` read.
+    private func revalidate(snapshot: WeekSnapshot, generation: Int) async {
+        guard let events = try? await calendar.events(in: snapshot.interval), generation == self.generation else { return }
+        let now = WeekSnapshot(interval: snapshot.interval, now: calendar.currentTime, calendar: calendar.calendar,
+                               events: events, todos: calendar.todos)
+        if Self.fingerprint(now, ignoring: ownEventIDs) != Self.fingerprint(snapshot, ignoring: ownEventIDs) {
+            isStale = true
+        }
     }
 
     private func setStep(_ step: WeekAskStep, generation: Int) {
@@ -284,7 +300,9 @@ public final class WeekAskModel {
     /// Adds a Focus block event for an open time (a real Calendar write, so
     /// only on the person's click), with Undo.
     public func block(_ openTime: DateInterval) async {
-        guard blocked[openTime] == nil else { return }
+        guard blocked[openTime] == nil, !blocking.contains(openTime) else { return }
+        blocking.insert(openTime)
+        defer { blocking.remove(openTime) }
         let interval = blockInterval(for: openTime)
         guard let event = await calendar.addEvent(title: Self.blockTitle, start: interval.start, end: interval.end) else {
             notice = WeekAskNotice(text: calendar.errorMessage ?? "The event could not be added.", canUndo: false)

@@ -28,11 +28,121 @@ public enum WeekSentenceChecker {
         let allowed = answer.terms.union(WeekTerms.found(in: question, calendar: calendar))
         let said = WeekTerms.found(in: cleaned, calendar: calendar, checkedOnly: true)
         guard said.numbers.isSubset(of: allowed.numbers), said.dayWords.isSubset(of: allowed.dayWords) else { return nil }
+        // Numbers alone are not enough: "9 PM" is made of allowed numbers
+        // when the facts say 9 AM. Every time and every "from to" range
+        // must be one the facts (or the question) hold, AM/PM included.
+        guard clockTimesMatch(cleaned, answer: answer, question: question, calendar: calendar) else { return nil }
         // The headline must agree: "none" when nothing was found, and not
         // a "no" in the first sentence when something was.
         let firstSentence = cleaned.components(separatedBy: ". ").first ?? cleaned
         guard answer.foundNothing ? negative(cleaned) : !negative(firstSentence) else { return nil }
         return cleaned
+    }
+
+    // MARK: Times
+
+    /// A time written in text, as minutes after midnight; a bare "1:30"
+    /// could be either half of the day.
+    typealias Candidates = Set<Int>
+
+    static let meridiem = #"(a\.?\s?m\.?|p\.?\s?m\.?)"#
+    static let clock = #"(\d{1,2})(?::(\d{2}))?"#
+
+    /// The single times and the ranges ("1 to 5 PM", "12:00 to 17:00")
+    /// written in `text`. A number counts as a time only with AM/PM or a
+    /// colon (in a range, on either end), so "8 blocks" and "2 h" are not.
+    static func clockTimes(in text: String) -> (singles: [Candidates], ranges: [(Candidates, Candidates)]) {
+        let lowered = text.lowercased()
+        var rest = lowered
+        var ranges: [(Candidates, Candidates)] = []
+        let rangePattern = #"\b"# + clock + #"\s*"# + meridiem + #"?\s*(?:to|until|till|through|\u2013|-)\s*"#
+            + clock + #"\s*"# + meridiem + #"?"#
+        if let regex = try? NSRegularExpression(pattern: rangePattern) {
+            for match in regex.matches(in: lowered, range: NSRange(lowered.startIndex..., in: lowered)).reversed() {
+                let group = { (index: Int) -> String? in
+                    Range(match.range(at: index), in: lowered).map { String(lowered[$0]) }
+                }
+                let startMeridiem = group(3), endMeridiem = group(6)
+                guard startMeridiem != nil || endMeridiem != nil || group(2) != nil || group(5) != nil else { continue }
+                let end = candidates(hour: group(4), minute: group(5), meridiem: endMeridiem)
+                // "1 to 5 PM": the start shares the end's half of the day,
+                // unless it says otherwise ("11 AM to 1 PM").
+                let start = candidates(hour: group(1), minute: group(2), meridiem: startMeridiem ?? endMeridiem,
+                                       eitherHalf: startMeridiem == nil && endMeridiem != nil)
+                ranges.append((start, end))
+                if let range = Range(match.range, in: rest) { rest.replaceSubrange(range, with: " ") }
+            }
+        }
+        var singles: [Candidates] = []
+        let singlePattern = #"\b"# + clock + #"\s*"# + meridiem + #"|\b(\d{1,2}):(\d{2})\b"#
+        if let regex = try? NSRegularExpression(pattern: singlePattern) {
+            for match in regex.matches(in: rest, range: NSRange(rest.startIndex..., in: rest)) {
+                let group = { (index: Int) -> String? in Range(match.range(at: index), in: rest).map { String(rest[$0]) } }
+                if group(3) != nil {
+                    singles.append(candidates(hour: group(1), minute: group(2), meridiem: group(3)))
+                } else {
+                    singles.append(candidates(hour: group(4), minute: group(5), meridiem: nil))
+                }
+            }
+        }
+        return (singles, ranges)
+    }
+
+    static func candidates(hour: String?, minute: String?, meridiem: String?, eitherHalf: Bool = false) -> Candidates {
+        guard let hour = hour.flatMap(Int.init) else { return [] }
+        let minutes = minute.flatMap(Int.init) ?? 0
+        guard let meridiem, hour >= 1, hour <= 12 else {
+            // No AM/PM: 24-hour when it can only be, else either half.
+            if hour >= 13 || hour == 0 { return [hour * 60 + minutes] }
+            return [hour * 60 + minutes, (hour + 12) % 24 * 60 + minutes]
+        }
+        let pm = meridiem.hasPrefix("p")
+        let base = (hour % 12) * 60 + minutes
+        let value = pm ? base + 12 * 60 : base
+        return eitherHalf ? [base, base + 12 * 60] : [value]
+    }
+
+    /// The times and ranges the facts state, as minutes after midnight.
+    static func factClock(_ answer: WeekAnswerFacts, calendar: Calendar) -> (times: Set<Int>, ranges: Set<[Int]>) {
+        func minutes(_ date: Date) -> Int {
+            calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
+        }
+        var times = Set<Int>(), ranges = Set<[Int]>()
+        func add(_ start: Date, _ end: Date) {
+            times.formUnion([minutes(start), minutes(end)])
+            ranges.insert([minutes(start), minutes(end)])
+        }
+        for fact in answer.facts {
+            switch fact.kind {
+            case .openTime(let interval): add(interval.start, interval.end)
+            case .event(let event) where !event.isAllDay: add(event.start, event.end)
+            case .overlap(let first, let second, let shared):
+                add(first.start, first.end)
+                add(second.start, second.end)
+                add(shared.start, shared.end)
+            default: break
+            }
+        }
+        return (times, ranges)
+    }
+
+    static func clockTimesMatch(_ sentence: String, answer: WeekAnswerFacts, question: String,
+                                calendar: Calendar) -> Bool {
+        let said = clockTimes(in: sentence)
+        guard !said.singles.isEmpty || !said.ranges.isEmpty else { return true }
+        var (times, ranges) = factClock(answer, calendar: calendar)
+        let asked = clockTimes(in: question)
+        for single in asked.singles { times.formUnion(single) }
+        for (start, end) in asked.ranges {
+            times.formUnion(start.union(end))
+            for from in start { for to in end { ranges.insert([from, to]) } }
+        }
+        for single in said.singles where single.isDisjoint(with: times) { return false }
+        for (start, end) in said.ranges {
+            let matched = start.contains { from in end.contains { to in ranges.contains([from, to]) } }
+            if !matched { return false }
+        }
+        return true
     }
 
     /// Whether a sentence says there is nothing ("No open block", "Nothing
