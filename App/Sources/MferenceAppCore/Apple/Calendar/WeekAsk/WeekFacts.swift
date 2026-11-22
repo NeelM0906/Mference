@@ -301,10 +301,18 @@ public enum WeekFacts {
         for day in week.days {
             if let only = request.day, !calendar.isDate(day, inSameDayAs: only) { continue }
             if request.day == nil, !request.includesWeekend, calendar.isDateInWeekend(day) { continue }
-            let hours = request.part?.hours(workday: week.workdayHours) ?? week.workdayHours
-            guard !hours.isEmpty else { continue }
-            let lower = [week.time(hours.lowerBound, on: day), from, request.after ?? .distantPast].max()!
-            let upper = min(week.time(hours.upperBound, on: day), request.before ?? .distantFuture)
+            let lower: Date, upper: Date
+            if request.day != nil, let after = request.after, let before = request.before {
+                // A window written out ("6 to 8 PM") is the search, even
+                // outside the workday.
+                lower = max(after, from)
+                upper = before
+            } else {
+                let hours = request.part?.hours(workday: week.workdayHours) ?? week.workdayHours
+                guard !hours.isEmpty else { continue }
+                lower = [week.time(hours.lowerBound, on: day), from, request.after ?? .distantPast].max()!
+                upper = min(week.time(hours.upperBound, on: day), request.before ?? .distantFuture)
+            }
             guard upper > lower else { continue }
             var cursor = lower
             for busy in merged(week.timedEvents, within: DateInterval(start: lower, end: upper)) {

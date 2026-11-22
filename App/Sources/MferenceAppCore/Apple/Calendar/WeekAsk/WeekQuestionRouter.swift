@@ -31,8 +31,10 @@ public enum WeekQuestionRouter {
         if has(text, #"\b(free|open|available|gaps?|squeeze|fit in|time for)\b"#) || (minutes != nil && has(text, #"\bwhen\b"#)) {
             // "free Wednesday from 2 to 4 PM": that window, the whole of it.
             if let dayDate, let window = clockWindow(clock, on: dayDate, in: week) {
+                // A length asked for stays, even when the window is shorter
+                // ("3 hours from 2 to 4 PM" is answered "no").
                 let span = Int(window.duration / 60)
-                return .freeTime(FreeTimeRequest(minimumMinutes: min(minutes ?? span, span), after: window.start,
+                return .freeTime(FreeTimeRequest(minimumMinutes: minutes ?? span, after: window.start,
                                                  before: window.end, day: dayDate, includesWeekend: true))
             }
             // Other times and limits ("before noon", "at 3") go to the model.
@@ -46,7 +48,19 @@ public enum WeekQuestionRouter {
            !has(text, #"\bwhen (is|does|'s)\b"#) {
             if let minutes { request.minimumMinutes = max(15, minutes) }
             if let part { request.part = part }
-            if let dayDate { request.day = dayDate }
+            if let dayDate, !week.calendar.isDate(dayDate, inSameDayAs: request.day ?? .distantPast) {
+                // A window from the last question moves to the new day.
+                if let old = request.day {
+                    let shift = week.calendar.dateComponents([.day], from: week.calendar.startOfDay(for: old),
+                                                             to: week.calendar.startOfDay(for: dayDate)).day ?? 0
+                    request.after = request.after.flatMap { week.calendar.date(byAdding: .day, value: shift, to: $0) }
+                    request.before = request.before.flatMap { week.calendar.date(byAdding: .day, value: shift, to: $0) }
+                } else {
+                    request.after = nil
+                    request.before = nil
+                }
+                request.day = dayDate
+            }
             return .freeTime(request)
         }
         if has(text, #"\b(what's on|what is on|what do i have|my schedule|agenda|how does .* look|what's happening)\b"#) {
@@ -62,7 +76,9 @@ public enum WeekQuestionRouter {
     /// The first written "from to" range, on `day`, start before end.
     static func clockWindow(_ clock: (singles: [Set<Int>], ranges: [(Set<Int>, Set<Int>)]), on day: Date,
                             in week: WeekSnapshot) -> DateInterval? {
-        guard let (starts, ends) = clock.ranges.first, let end = ends.max() else { return nil }
+        // An end that could be either half of the day ("9:00 to 11:00")
+        // is not guessed: the model reads it.
+        guard let (starts, ends) = clock.ranges.first, ends.count == 1, let end = ends.first else { return nil }
         guard let start = starts.filter({ $0 < end }).max() else { return nil }
         let midnight = week.calendar.startOfDay(for: day)
         guard let from = week.calendar.date(byAdding: .minute, value: start, to: midnight),

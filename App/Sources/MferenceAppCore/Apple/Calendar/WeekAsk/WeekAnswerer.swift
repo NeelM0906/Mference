@@ -64,11 +64,20 @@ public enum WeekSentenceChecker {
                 }
                 let startMeridiem = group(3), endMeridiem = group(6)
                 guard startMeridiem != nil || endMeridiem != nil || group(2) != nil || group(5) != nil else { continue }
-                let end = candidates(hour: group(4), minute: group(5), meridiem: endMeridiem)
+                var end = candidates(hour: group(4), minute: group(5), meridiem: endMeridiem)
                 // "1 to 5 PM": the start shares the end's half of the day,
                 // unless it says otherwise ("11 AM to 1 PM").
-                let start = candidates(hour: group(1), minute: group(2), meridiem: startMeridiem ?? endMeridiem,
+                var start = candidates(hour: group(1), minute: group(2), meridiem: startMeridiem ?? endMeridiem,
                                        eitherHalf: startMeridiem == nil && endMeridiem != nil)
+                // "09:00 to 11:00", "9:00 to 13:00": one clearly 24-hour end
+                // makes the range 24-hour.
+                if startMeridiem == nil, endMeridiem == nil, start.count == 1 || end.count == 1 {
+                    func literal(_ hour: String?, _ minute: String?) -> Int {
+                        (Int(hour ?? "") ?? 0) * 60 + (Int(minute ?? "") ?? 0)
+                    }
+                    start = [literal(group(1), group(2))]
+                    end = [literal(group(4), group(5))]
+                }
                 ranges.append((start, end))
                 if let range = Range(match.range, in: rest) { rest.replaceSubrange(range, with: " ") }
             }
@@ -89,11 +98,14 @@ public enum WeekSentenceChecker {
     }
 
     static func candidates(hour: String?, minute: String?, meridiem: String?, eitherHalf: Bool = false) -> Candidates {
-        guard let hour = hour.flatMap(Int.init) else { return [] }
+        guard let written = hour, let hour = Int(written) else { return [] }
         let minutes = minute.flatMap(Int.init) ?? 0
         guard let meridiem, hour >= 1, hour <= 12 else {
-            // No AM/PM: 24-hour when it can only be, else either half.
-            if hour >= 13 || hour == 0 { return [hour * 60 + minutes] }
+            // No AM/PM: 24-hour when it can only be ("13", "09" with its
+            // leading zero), else either half.
+            if hour >= 13 || hour == 0 || (written.count == 2 && written.hasPrefix("0")) {
+                return [hour * 60 + minutes]
+            }
             return [hour * 60 + minutes, (hour + 12) % 24 * 60 + minutes]
         }
         let pm = meridiem.hasPrefix("p")

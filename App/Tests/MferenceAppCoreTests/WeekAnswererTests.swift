@@ -239,6 +239,29 @@ import Testing
         #expect(WeekQuestionRouter.fastPath("am I free from 2 to 4 pm?", in: week) == nil)
     }
 
+    @Test func windowsKeepTheirHalfLengthDayAndHours() throws {
+        let week = Self.week()
+        let empty = WeekFactsTests.week(events: [], todos: [])
+        // "09:00" is 24-hour; "9:00 to 11:00" could be either and goes to the model.
+        let morning = try #require(WeekQuestionRouter.fastPath("free wednesday from 09:00 to 11:00?", in: week))
+        #expect(WeekFacts.answer(morning, in: empty).sentence.hasSuffix("tomorrow from 9 to 11 AM: tomorrow, 9 to 11 AM."))
+        #expect(WeekQuestionRouter.fastPath("free wednesday from 9:00 to 11:00?", in: week) == nil)
+        // A window after work hours is searched as written.
+        let evening = try #require(WeekQuestionRouter.fastPath("Am I free Wednesday from 6 PM to 8 PM?", in: week))
+        #expect(WeekFacts.answer(evening, in: empty).openTimes.count == 1)
+        // A length asked for is kept even when the window is shorter.
+        let long = try #require(WeekQuestionRouter.fastPath("Am I free for 3 hours Wednesday from 2 PM to 4 PM?", in: week))
+        let answer = WeekFacts.answer(long, in: empty)
+        #expect(answer.foundNothing)
+        #expect(answer.sentence.hasPrefix("No open block of 3 h"))
+        // "What about Friday?" moves the window to Friday.
+        let friday = try #require(WeekQuestionRouter.fastPath("what about friday?", in: week, previous: evening))
+        #expect(friday == .freeTime(FreeTimeRequest(minimumMinutes: 120, after: CalendarFixtures.date(18, 18),
+                                                    before: CalendarFixtures.date(18, 20),
+                                                    day: CalendarFixtures.date(18, 0), includesWeekend: true)))
+        #expect(WeekFacts.answer(friday, in: empty).openTimes.count == 1)
+    }
+
     @Test func appleModelGetsTheToolSchemaAsText() async throws {
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: #"{"type":"overlaps"}"#)
         let query = try await WeekQuestionRouter.route("do any meetings collide?", in: Self.week(), previous: nil,
