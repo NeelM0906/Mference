@@ -12,12 +12,15 @@ public struct CalendarView: View {
     private let injected: CalendarWeekModel?
     private let injectedWeekAsk: WeekAskModel?
     private let loadsOnAppear: Bool
+    /// Continue in Chat; nil hides the button.
+    private let continueInChat: ((WeekAskModel) -> Void)?
 
     /// The shell's slot: the models come from the environment.
-    public init() {
+    public init(continueInChat: ((WeekAskModel) -> Void)? = nil) {
         injected = nil
         injectedWeekAsk = nil
         loadsOnAppear = true
+        self.continueInChat = continueInChat
     }
 
     /// Snapshots and previews; `loadsOnAppear` false keeps fixture state.
@@ -25,11 +28,19 @@ public struct CalendarView: View {
         injected = model
         injectedWeekAsk = weekAsk
         self.loadsOnAppear = loadsOnAppear
+        continueInChat = nil
+    }
+
+    private var weekAsk: WeekAskModel? { injectedWeekAsk ?? environmentWeekAsk }
+
+    private var openChat: (() -> Void)? {
+        guard let weekAsk, let continueInChat else { return nil }
+        return { continueInChat(weekAsk) }
     }
 
     public var body: some View {
         if let model = injected ?? environmentModel {
-            CalendarContent(model: model, weekAsk: injectedWeekAsk ?? environmentWeekAsk)
+            CalendarContent(model: model, weekAsk: weekAsk, continueInChat: openChat)
                 .task { if loadsOnAppear { await model.load() } }
         } else {
             AppleEmptyState(systemImage: "calendar", title: "Calendar",

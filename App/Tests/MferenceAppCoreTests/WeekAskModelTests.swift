@@ -130,6 +130,34 @@ import Testing
         #expect(ask.notice?.text == "Allow Calendar access to ask about your week.")
     }
 
+    @Test @MainActor func continueInChatStartsAPrivateChatWithTheAnswers() async throws {
+        let (_, ask) = await Self.setUp()
+        await ask.ask("When is the contract call?")
+        await ask.ask("What's my busiest day?")
+        #expect(ask.chatTitle == "Week of Sep 14 to 20")
+        #expect(ask.chatContext.hasPrefix("About my calendar for Sep 14 to 20, as Mference worked it out:\n"
+            + "- Contract call, Friday Sep 18, 1 to 1:30 PM\n"))
+        #expect(!ask.chatContext.contains("E1:"))
+
+        let container = try AppModelContainer.inMemory()
+        let store = ConversationStore(container: container)
+        let chat = ChatViewModel(service: ScriptedEngineService(), store: store)
+        chat.continueChat(title: ask.chatTitle, context: ask.chatContext, turns: ask.chatTurns)
+        let conversation = try #require(try store.conversations().first)
+        #expect(conversation.isPrivate)
+        #expect(conversation.title == "Week of Sep 14 to 20")
+        let stored = conversation.orderedMessages
+        #expect(stored.map(\.role) == [.user, .assistant, .user, .assistant])
+        #expect(stored[0].content.hasPrefix("About my calendar"))
+        #expect(stored[0].content.hasSuffix("When is the contract call?"))
+        #expect(stored[1].content == "Contract call is Friday, 1 to 1:30 PM.")
+        #expect(chat.isPrivate)
+        #expect(chat.messages.count == 4)
+        #expect(chat.draft.isEmpty)
+        // The answers stay in Calendar too: nothing there was moved.
+        #expect(ask.answers.count == 2)
+    }
+
     @Test @MainActor func clearEmptiesEverything() async {
         let (_, ask) = await Self.setUp()
         await ask.ask("When am I free for 2 hours?")

@@ -197,6 +197,29 @@ public final class WeekAskModel {
 
     public func dismissNotice() { notice = nil }
 
+    // MARK: Continue in Chat
+
+    /// The chat's title ("Week of Sep 14 to 20").
+    public var chatTitle: String { "Week of \(scopeLabel)" }
+
+    /// What the chat starts from: the week and every fact the answers used,
+    /// so the chat model reads the same calendar the answers did.
+    public var chatContext: String {
+        var lines = ["About my calendar for \(text.weekRange(week ?? scope)), as Mference worked it out:"]
+        for answer in answers {
+            for fact in answer.facts.facts {
+                let line = "- " + fact.line.dropFirst(fact.id.count + 2)
+                if !lines.contains(line) { lines.append(line) }
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The questions and answers, oldest first.
+    public var chatTurns: [(question: String, answer: String)] {
+        answers.map { ($0.question, $0.sentence) }
+    }
+
     // MARK: Calendar changes
 
     /// EventKit or the to-dos changed: an answer worked out before is

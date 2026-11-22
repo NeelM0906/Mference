@@ -341,6 +341,29 @@ public final class ChatViewModel {
         draft = question
     }
 
+    /// Continues questions answered elsewhere (Calendar's Ask about your
+    /// week) as a new Private chat: `context` and each question and answer
+    /// are stored as its history, titled `title`, then opened with the box
+    /// empty. Stored now because the person asked for it; Private keeps it
+    /// out of Memory.
+    public func continueChat(title: String, context: String, turns: [(question: String, answer: String)]) {
+        guard !isGenerating, !turns.isEmpty else { return }
+        newChat(isPrivate: true)
+        do {
+            let conversation = try store.createConversation(model: model, isPrivate: true, now: now())
+            for (index, turn) in turns.enumerated() {
+                let question = index == 0 ? context + "\n\n" + turn.question : turn.question
+                try store.append(to: conversation, role: .user, content: question, now: now())
+                try store.append(to: conversation, role: .assistant, content: turn.answer, now: now())
+            }
+            try store.update(conversation) { $0.title = title }
+            reloadConversations()
+            select(conversation.id)
+        } catch {
+            errorMessage = "Mference could not start this chat. \(error.localizedDescription)"
+        }
+    }
+
     /// "Turn on" in the web consent prompt.
     public func confirmWebConsent() {
         webConsentRequested = false
