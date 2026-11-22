@@ -223,6 +223,9 @@ public struct WeekAnswerFacts: Sendable, Hashable {
     public var sentence: String
     /// What a sentence about these facts may say.
     public var terms: WeekTerms
+    /// The answer is "none": no open block long enough, no such event,
+    /// nothing due, nothing booked. A worded answer must say so too.
+    public var foundNothing = false
 
     /// The open blocks among the facts.
     public var openTimes: [DateInterval] {
@@ -271,7 +274,18 @@ public enum WeekFacts {
                                      terms: WeekTerms())
         }
         answer.terms = terms(for: answer, in: week)
+        answer.foundNothing = foundNothing(answer)
         return answer
+    }
+
+    static func foundNothing(_ answer: WeekAnswerFacts) -> Bool {
+        switch answer.query {
+        case .freeTime: answer.notes.first?.hasSuffix(": 0") ?? true
+        case .findEvent, .daySummary, .overlaps: answer.facts.isEmpty
+        case .todosDue: answer.notes.first == "due this week: 0"
+        case .compareDays: !answer.notes.contains { $0.hasPrefix("busiest days left: D") }
+        case .outsideWeek, .other: false
+        }
     }
 
     // MARK: Free time
@@ -571,7 +585,12 @@ public enum WeekFacts {
     /// still passes.
     static func terms(for answer: WeekAnswerFacts, in week: WeekSnapshot) -> WeekTerms {
         let calendar = week.calendar
-        let written = ([answer.sentence] + answer.facts.map(\.line) + answer.notes).joined(separator: "\n")
+        // Fact IDs ("F6") are labels, not numbers a sentence may use.
+        let lines = answer.facts.map { String($0.line.dropFirst($0.id.count + 1)) }
+        let notes = answer.notes.map {
+            $0.replacingOccurrences(of: #"\b[FEDTO]\d+\b"#, with: "", options: .regularExpression)
+        }
+        let written = ([answer.sentence] + lines + notes).joined(separator: "\n")
         var terms = WeekTerms.found(in: written, calendar: calendar)
         func addTime(_ date: Date) {
             let hour = calendar.component(.hour, from: date)
