@@ -294,6 +294,28 @@ import Testing
         #expect(WeekQuestionRouter.fastPath("and friday at 3 pm?", in: week, previous: window) == nil)
     }
 
+    @Test func compoundLengthsAddUp() {
+        #expect(WeekQuestionRouter.durationMinutes(" when am i free for 1 hour 30 minutes? ") == 90)
+        #expect(WeekQuestionRouter.durationMinutes(" free for 2h 15m ") == 135)
+        #expect(WeekQuestionRouter.durationMinutes(" free for an hour and a half ") == 90)
+        #expect(WeekQuestionRouter.durationMinutes(" free for 45 minutes ") == 45)
+        #expect(WeekQuestionRouter.durationMinutes(" when am i free? ") == nil)
+    }
+
+    @Test func windowsUseWallClockHoursOnAClockChangeDay() throws {
+        var calendar = CalendarFixtures.calendar
+        calendar.firstWeekday = 1
+        let sunday = calendar.date(from: DateComponents(year: 2026, month: 11, day: 1))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 31, hour: 20))!
+        let layout = WeekLayout(calendar: calendar)
+        let week = WeekSnapshot(interval: layout.interval(from: layout.weekStart(containing: sunday)), now: now,
+                                calendar: calendar, events: [], todos: [])
+        let query = try #require(WeekQuestionRouter.fastPath("am I free sunday from 9 AM to 11 AM?", in: week))
+        guard case .freeTime(let request) = query else { Issue.record("not free time"); return }
+        #expect(request.after.map { calendar.component(.hour, from: $0) } == 9)
+        #expect(request.before.map { calendar.component(.hour, from: $0) } == 11)
+    }
+
     @Test func appleModelGetsTheToolSchemaAsText() async throws {
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: #"{"type":"overlaps"}"#)
         let query = try await WeekQuestionRouter.route("do any meetings collide?", in: Self.week(), previous: nil,

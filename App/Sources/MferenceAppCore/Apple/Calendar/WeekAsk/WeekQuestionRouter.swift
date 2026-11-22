@@ -104,9 +104,11 @@ public enum WeekQuestionRouter {
         // is not guessed: the model reads it.
         guard let (starts, ends) = clock.ranges.first, ends.count == 1, let end = ends.first else { return nil }
         guard let start = starts.filter({ $0 < end }).max() else { return nil }
-        let midnight = week.calendar.startOfDay(for: day)
-        guard let from = week.calendar.date(byAdding: .minute, value: start, to: midnight),
-              let to = week.calendar.date(byAdding: .minute, value: end, to: midnight) else { return nil }
+        // Wall-clock hours on that day, right across a clock change.
+        let calendar = week.calendar
+        guard let from = calendar.date(bySettingHour: start / 60, minute: start % 60, second: 0, of: day),
+              let to = calendar.date(bySettingHour: end / 60, minute: end % 60, second: 0, of: day), to > from
+        else { return nil }
         return DateInterval(start: from, end: to)
     }
 
@@ -158,14 +160,25 @@ public enum WeekQuestionRouter {
     static func durationMinutes(_ text: String) -> Int? {
         if has(text, #"\bhalf an? hour\b"#) { return 30 }
         // Digits may touch the unit ("2h"); words need a space ("am" is not
-        // "a minute").
-        guard let parts = firstMatch(text, #"\b(?:(\d+(?:\.\d+)?)\s*|(an?|one|two|three|four|five|six)\s+)(hours?|hrs?|h|minutes?|mins?)\b"#)
+        // "a minute"). Every part counts: "1 hour 30 minutes", "2h 15m",
+        // "an hour and a half".
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\b(?:(\d+(?:\.\d+)?)\s*|(an?|one|two|three|four|five|six)\s+)(hours?|hrs?|h|minutes?|mins?|m)\b"#)
         else { return nil }
         let words: [String: Double] = ["a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6]
-        guard let amount = Double(parts[1]) ?? words[parts[2]] else { return nil }
-        let unit = parts[3]
-        let minutes = unit.hasPrefix("h") ? amount * 60 : amount
-        return minutes > 0 ? Int(minutes.rounded()) : nil
+        var total = 0.0
+        var sawHours = false
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            let group = { (index: Int) -> String? in Range(match.range(at: index), in: text).map { String(text[$0]) } }
+            guard let unit = group(3), let amount = group(1).flatMap(Double.init) ?? group(2).flatMap({ words[$0] })
+            else { continue }
+            // A bare "m" only after digits ("15m"), never "a m".
+            if unit == "m", group(1) == nil { continue }
+            if unit.hasPrefix("h") { sawHours = true }
+            total += unit.hasPrefix("h") ? amount * 60 : amount
+        }
+        if sawHours, has(text, #"\band a half\b"#) { total += 30 }
+        return total > 0 ? Int(total.rounded()) : nil
     }
 
     static func dayPart(_ text: String) -> DayPart? {
