@@ -80,13 +80,21 @@ import MferenceValidationSupport
         return e == 0 ? m * 0.001953125 : Float(sign: .plus, exponent: e - 7, significand: 1 + m / 8)
     }
 
-    /// The probe gives the same answer each time, and one line says which.
-    @Test func probeIsStable() throws {
+    /// The device's cached answer is a fresh probe's; a probe that cannot run
+    /// (no pipeline) selects the table decode and says why.
+    @Test func probeIsCachedAndFallsBackWhenItCannotRun() throws {
         let context = try MetalContext()
-        let first = try Inkling2MoEKernels(context: context).nvfp4Decode
-        let second = try Inkling2MoEKernels(context: context).nvfp4Decode
-        #expect(first == second)
-        print("[ink2-nvfp4-decode] probe on \(context.device.name): \(first) decode")
+        let library = try Inkling2ShaderLibrary.compile(device: context.device, module: Inkling2MoEKernels.module)
+        let function = try #require(library.makeFunction(name: "inkling2_nvfp4_decode_probe"))
+        let pipeline = try context.device.makeComputePipelineState(function: function)
+        let fresh = Inkling2MoEKernels.runNVFP4Probe(device: context.device, pipeline: pipeline)
+        let kernels = try Inkling2MoEKernels(context: context)
+        #expect(kernels.nvfp4Decode == fresh.0)
+        #expect(Inkling2MoEKernels.probedNVFP4Decode(device: context.device) { nil } == fresh.0)
+        #expect((fresh.0 == .pairs) == (fresh.failure == nil))
+        let unrunnable = Inkling2MoEKernels.runNVFP4Probe(device: context.device, pipeline: nil)
+        #expect(unrunnable.0 == .table && unrunnable.failure != nil)
+        print("[ink2-nvfp4-decode] probe on \(context.device.name): \(fresh.0) decode\(fresh.failure.map { " (\($0))" } ?? "")")
     }
 
     /// The probe's check: the exact values pass; a flushed code 1 or 9 (0.5
