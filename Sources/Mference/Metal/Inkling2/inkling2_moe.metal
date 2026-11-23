@@ -836,16 +836,17 @@ static inline float i2_nvfp4_sub_dot(uint lo4, uint hi4, half4 x0, half4 x1, hal
 
 // A UE4M3 scale byte times 2^14 (undoing the codes' 2^-14): `i2_ue4m3`
 // without branches. The byte's low seven bits at FP16 bits 7-13 give the
-// value times 2^-8, subnormals included; bit 7 is ignored and 0x7F is 0.
+// value times 2^-8, subnormals included. As in `i2_ue4m3`, bit 7 is ignored
+// except that only the byte 0x7F itself is 0 (0xFF reads as 480).
 static inline float i2_ue4m3_x2p14(uint byte) {
     const float v = float(as_type<half>(ushort((byte & 0x7Fu) << 7))) * 4194304.0f;
     return byte == 0x7Fu ? 0.0f : v;
 }
 
 // acc plus weights [32 g, 32 g + 32) of an NVFP4 row (half a block) against
-// x, FP32. The two sub-block terms combine as fma(t1, s1, t0 * s0), with no
-// other contraction: the order the compiler gave the table-lookup decode, so
-// the output is the same to the bit.
+// x, FP32. The two sub-block terms combine as fma(t1, s1, t0 * s0), then add
+// to acc, with no other contraction or reassociation: the order the compiler
+// gave the table-lookup decode, so the output is the same to the bit.
 static inline float i2_nvfp4_group_acc(device const uchar* row, uint g, device const half* x, float acc) {
     device const half4* xv = reinterpret_cast<device const half4*>(x + g * 32u);
     device const uchar* block = row + (g / 2u) * 36u;
@@ -857,7 +858,7 @@ static inline float i2_nvfp4_group_acc(device const uchar* row, uint g, device c
     const float t1 = i2_nvfp4_sub_dot(q.z, q.w, x4, x5, x6, x7);
     const float s0 = i2_ue4m3_x2p14(scales & 0xFFu), s1 = i2_ue4m3_x2p14(scales >> 8);
     {
-        #pragma clang fp contract(off)
+        #pragma clang fp contract(off) reassociate(off)
         const float c = fma(t1, s1, t0 * s0);
         return acc + c;
     }
