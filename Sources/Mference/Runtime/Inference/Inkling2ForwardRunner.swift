@@ -283,11 +283,17 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// visit's output, the running block sum (FP32 `[48][rows][d]`), and the
     /// experts each token chose (UInt32 `[48][rows][topK]`) into these
     /// buffers, visits in execution order, a token at row `position`
-    /// (positions `0 ..< rows`). Off on every production path.
+    /// (positions `0 ..< rows`). With `routerLogits` (FP32
+    /// `[48][rows][experts]`) it also writes each token's router logits
+    /// `W x` for the visit's MoE input, recomputed by K3's one-token logits
+    /// kernel (within about 3e-7 of either router's own sums), from which the
+    /// selection margin (8th minus 9th of sigmoid plus bias) follows. Off on
+    /// every production path.
     struct VisitTrace {
         let outputs: MTLBuffer
         let routes: MTLBuffer
         let rows: Int
+        var routerLogits: MTLBuffer? = nil
     }
     var visitTrace: VisitTrace?
 
@@ -419,6 +425,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let ids: MTLBuffer          // UInt32 [T]
         let finalRow: MTLBuffer     // FP32 [2][d]
         let routerLogits: MTLBuffer // FP32 [experts], the one-token router's logits
+        let traceRouteIds: MTLBuffer     // UInt32 [topK], VisitTrace's router logits only
+        let traceRouteWeights: MTLBuffer // FP32 [topK], VisitTrace's router logits only
         let partials: MTLBuffer
         let decodeActivation: MTLBuffer
         let moeScratch: Inkling2MoEPrefillScratch
@@ -453,6 +461,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             ids = idsBuffer
             finalRow = try make(2 * d * 4, "final")
             routerLogits = try make(moeShape.experts * 4, "router-logits")
+            traceRouteIds = try make(moeShape.topK * 4, "trace-route-ids")
+            traceRouteWeights = try make(moeShape.topK * 4, "trace-route-weights")
             partials = try make(Inkling2DecodeAttention.partialsLength(keys: maxContext), "partials")
             decodeActivation = try make(moeShape.topK * moeShape.f * 2, "decode-activation")
             moeScratch = try Inkling2MoEPrefillScratch(device: device, shape: moeShape, maxTokens: tokens)
@@ -655,13 +665,15 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         if let trace = visitTrace {
             precondition(start + t <= trace.rows && trace.outputs.length >= 48 * trace.rows * d * 4
                          && trace.routes.length >= 48 * trace.rows * topK * 4, "visit trace too small")
+            precondition((trace.routerLogits?.length ?? .max) >= 48 * trace.rows * moeShape.experts * 4,
+                         "visit trace router logits too small")
         }
         if let hook = positionLogits {
             precondition(hook.positions.lowerBound >= 0
                          && hook.buffer.length >= hook.positions.count * w.vocabRows * 2, "position logits too small")
         }
         var visitIndex = 0
-        func record(_ output: Int) {
+        func record(_ output: Int, layer: Int) {
             defer { visitIndex += 1 }
             guard let trace = visitTrace, let blit = cb.makeBlitCommandEncoder() else { return }
             let row = visitIndex * trace.rows + start
@@ -670,6 +682,22 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             blit.copy(from: s.moeScratch.ids, sourceOffset: 0, to: trace.routes,
                       destinationOffset: row * topK * 4, size: t * topK * 4)
             blit.endEncoding()
+            if let logits = trace.routerLogits {
+                // Trace only: each token's router logits again, from the
+                // visit's MoE input (still in `moeIn`); ids and weights go to
+                // the trace's own scratch, so the visit's routes stand.
+                let lw = w.layers[layer]
+                let enc = cb.makeComputeCommandEncoder()!
+                for r in 0..<t {
+                    decodeRouter.encode(encoder: enc, x: .init(s.moeIn, offset: r * d * 4), weight: lw.router,
+                                        bias: lw.routerBias,
+                                        logits: .init(logits, offset: (row + r) * moeShape.experts * 4),
+                                        ids: .init(s.traceRouteIds), routeWeights: .init(s.traceRouteWeights),
+                                        experts: moeShape.experts, width: d, topK: moeShape.topK,
+                                        routeScale: w.routeScale)
+                }
+                enc.endEncoding()
+            }
         }
 
         do {
@@ -689,7 +717,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             for layer in 0..<Self.coreStart {
                 cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
                                       cur: cur, blocks: &blocks, bank: nil, slots: &slots, split: split)
-                record(cur)
+                record(cur, layer: layer)
             }
             let preludeCur = cur
             let preludeBlocks = blocks
@@ -715,7 +743,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                     let slot = Inkling2VisitPlan.slot(layer: layer, pass: pass)
                     cur = try encodeVisit(cb, layer: layer, slot: slot, tokens: t, start: start,
                                           cur: cur, blocks: &blocks, bank: bank, slots: &slots, split: split)
-                    record(cur)
+                    record(cur, layer: layer)
                 }
                 // Keep each command buffer to about a third of the visits.
                 try nextBuffer()
@@ -727,7 +755,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             for layer in Self.coreEnd..<24 {
                 cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
                                       cur: cur, blocks: &blocks, bank: nil, slots: &slots, split: split)
-                record(cur)
+                record(cur, layer: layer)
             }
             if prefetchesNextChunk && t > 1 {
                 // Another prefill chunk follows: its first staged read starts
@@ -899,10 +927,23 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         // layout they cannot take (more states, weights in several buffers)
         // falls back to the runner's kernels.
         let eps = Inkling2RunnerKernels.residualNormEps
+        /// Whether step 1 already wrote the FP16 normed input (`h`).
+        var inputNormed = false
         if let queries = lw.attnResQuery {
             let count = lw.isGlobal ? 3 : 1
             let states = blocks + [cur]
-            if t == 1, states.count <= Inkling2DepthMix.maxStates {
+            if t == 1, count == 1, bank == nil, states.count <= Inkling2DepthMix.maxStates {
+                // A window visit outside the loop's later passes: the mix and
+                // its input norm in one dispatch (K3's `encodeNormed`, the same
+                // bytes as the mix followed by the norm).
+                try depthMix.encodeNormed(commandBuffer: cb, states: states.map { (s.arenaRef($0), d) },
+                                          queries: queries, queryCount: 1, output: .init(decodeIO), outputStride: d,
+                                          norms: [.init(weight: lw.attnNorm!, output: .init(s.h))], normedStride: d,
+                                          rows: 1, width: d, eps: eps, normEps: w.rmsEps)
+                let mixed = Inkling2BufferRef(decodeIO)
+                inputs = [mixed, mixed, mixed]
+                inputNormed = true
+            } else if t == 1, states.count <= Inkling2DepthMix.maxStates {
                 try depthMix.encode(commandBuffer: cb, states: states.map { (s.arenaRef($0), d) }, queries: queries,
                                     queryCount: count, output: .init(decodeIO), outputStride: count * d, rows: 1,
                                     width: d, eps: eps)
@@ -964,9 +1005,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let h = (0..<3).map { Inkling2BufferRef(s.h, offset: $0 * plane * 2) }
         // One dispatch for the visit's one or three inputs (K3 `encodeSet`: the same bytes as one
         // `encode` per input; at one row the norm's latency is paid once).
-        inputNorm.encodeSet(commandBuffer: cb, (0..<(distinct ? 3 : 1)).map { j in
-            .init(x: inputs[j], weight: lw.isGlobal ? lw.inputNorms[j] : lw.attnNorm!, output: h[j])
-        }, xStride: d, outputStride: d, rows: t, eps: w.rmsEps)
+        if !inputNormed {
+            inputNorm.encodeSet(commandBuffer: cb, (0..<(distinct ? 3 : 1)).map { j in
+                .init(x: inputs[j], weight: lw.isGlobal ? lw.inputNorms[j] : lw.attnNorm!, output: h[j])
+            }, xStride: d, outputStride: d, rows: t, eps: w.rmsEps)
+        }
         // Projection segments address the FP16 inputs in halves.
         let hq = 0, hk = distinct ? plane : 0, hv = distinct ? 2 * plane : 0
 
@@ -1059,7 +1102,21 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let gatedMoE = bank != nil && lw.loop != nil
         let fastMoE = t == 1 && moeStates.count <= Inkling2DepthMix.maxStates
             && (!gatedMoE || (messagesInIO && Self.decodeGateReady(lw.loop!, controllers: 3..<4, rank: w.gateRank)))
-        if fastMoE {
+        /// Whether step 7 already wrote the normed MoE input (`moeIn`, `moeInHalf`).
+        var moeNormed = false
+        if fastMoE && !gatedMoE {
+            // Outside the loop's later passes: the mix and its norm in one
+            // dispatch, FP16 and FP32 (K3's `encodeNormed`, the same bytes as
+            // the mix followed by `encodeRMSNormDual`).
+            try depthMix.encodeNormed(commandBuffer: cb, states: moeStates.map { (s.arenaRef($0), d) },
+                                      queries: lw.ffnResQuery, queryCount: 1,
+                                      output: .init(decodeIO, offset: 10 * d * 4), outputStride: d,
+                                      norms: [.init(weight: lw.ffnNorm, output: .init(s.moeInHalf),
+                                                    output32: .init(s.moeIn))],
+                                      normedStride: d, normed32Stride: d, rows: 1, width: d, eps: eps,
+                                      normEps: w.rmsEps)
+            moeNormed = true
+        } else if fastMoE {
             try depthMix.encode(commandBuffer: cb, states: moeStates.map { (s.arenaRef($0), d) },
                                 queries: lw.ffnResQuery, queryCount: 1, output: .init(decodeIO, offset: 10 * d * 4),
                                 outputStride: d, rows: 1, width: d, eps: eps)
@@ -1094,10 +1151,12 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                     moeInput = .init(s.ffnMix, offset: plane * 4)
                 }
             }
-            kernels.encodeRMSNormDual(enc, x: moeInput.buffer, xOffset: moeInput.offset, xStride: d,
-                                      weight: lw.ffnNorm.buffer, weightOffset: lw.ffnNorm.offset, eps: w.rmsEps,
-                                      out: s.moeIn, outStride: d, outHalf: s.moeInHalf, halfStride: d,
-                                      d: d, tokens: t)
+            if !moeNormed {
+                kernels.encodeRMSNormDual(enc, x: moeInput.buffer, xOffset: moeInput.offset, xStride: d,
+                                          weight: lw.ffnNorm.buffer, weightOffset: lw.ffnNorm.offset, eps: w.rmsEps,
+                                          out: s.moeIn, outStride: d, outHalf: s.moeInHalf, halfStride: d,
+                                          d: d, tokens: t)
+            }
             // 8. Router and routed experts. One token takes K3's decode
             //    router: the prefill router's selection line for line (ties to
             //    the lower expert), its logits summed in another order, so the

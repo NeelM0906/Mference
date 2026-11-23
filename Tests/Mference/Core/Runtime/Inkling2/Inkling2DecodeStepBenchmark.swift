@@ -7,8 +7,9 @@ import Testing
 /// (`Inkling2RunnerToy`: Mini's hidden width, attention shape and
 /// 128-expert router, experts in fixed resident pools, so no staging): a
 /// 4-token prefill, then 40 decode steps; the median of the last 32 and
-/// the GPU time of each step's command buffers summed. Compares decode-path
-/// kernels in place, without the install. Model-free, but about 1.7 GB of
+/// an FNV-1a checksum of every step's logits (the same checksum means the
+/// same bytes out, so a kernel swap can be shown byte-identical). Compares
+/// decode-path kernels in place, without the install. Model-free, but about 1.7 GB of
 /// buffers and a GPU benchmark, so it runs only with
 /// `MFERENCE_INKLING2_DECODE_BENCH` set, under `lock.sh build`.
 @Suite("Inkling2 decode step benchmark", .serialized)
@@ -26,16 +27,20 @@ struct Inkling2DecodeStepBenchmark {
         _ = try await runner.prefillChunked(tokens: [17, 401, 3, 250][...], startPosition: 0, outputMode: .logits,
                                             config: .production(chunkTokens: 64), into: out, onProgress: { _ in })
         var walls: [Double] = []
+        var checksum: UInt64 = 0xcbf2_9ce4_8422_2325
         var position = 4
         for step in 0..<40 {
             let token = Int32((step * 131 + 7) % c.vocabUnpadded)
             let started = Date()
             try await runner.produce(token: token, position: position, into: out)
             walls.append(Date().timeIntervalSince(started))
+            let bytes = UnsafeRawBufferPointer(start: out.contents(), count: c.vocabUnpadded * 2)
+            for byte in bytes { checksum = (checksum ^ UInt64(byte)) &* 0x100_0000_01b3 }
             position += 1
         }
         let tail = walls.suffix(32).sorted()
         print(String(format: "inkling2 decode bench (toy, resident experts): median %.3f ms, min %.3f ms, max %.3f ms per step",
-                     tail[tail.count / 2] * 1e3, tail.first! * 1e3, tail.last! * 1e3))
+                     tail[tail.count / 2] * 1e3, tail.first! * 1e3, tail.last! * 1e3)
+              + ", logits checksum " + String(checksum, radix: 16))
     }
 }
