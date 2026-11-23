@@ -67,13 +67,23 @@ all 20 rows). With `generate/` that makes 11 log-prob prompts and 2 traces.
 `trace01/` and `trace02/`: `golden.json` and `trace.json` (and, for
 `trace02`, the `logprobs.json` its golden.json names) from the same
 prompts run with `-ngl 0`, no GPU device, no op offload and no CPU weight
-repacking, so every op runs on the CPU backend with the reference's Q8_0
-rounding of the inputs to NVFP4 and Q8_0 products. `trace.json` holds, per
+repacking, so every op runs on the CPU backend (the precision is described
+under "What the CPU-only traces computed" below). `trace.json` holds, per
 layer visit, the routed expert ids and weights (graph tensors
 `ffn_moe_topk-<slot>`, `ffn_moe_weights_scaled-<slot>`). The FP32 hidden
 states after each visit (`l_out-<slot>`, `[48 x n_prompt x 2304]`) are with
 the program's results (`goldens/generate*/cpu/<trace>/hidden_after_visit.f32`),
 as is a third trace of the 300-token tool prompt (2.5 MB of JSON).
+
+`trace01b/`: trace01's prompt ids plus its greedy token 152717 (" Paris") as
+one 6-token ids prompt (`inputs/generate_prompts_4.json`, stage `cpu4`), with
+`logprobs.json` at all 6 positions; its hidden states, `[48 x 6 x 2304]`, are
+at `goldens/generate4/cpu/trace01b/hidden_after_visit.f32`. Positions 0-4
+equal trace01 bit for bit (records and expert sets); position 5 is the
+position a runner reaches with one decode step, here computed inside the
+6-token batch (its "." log-prob is -0.285 here, -0.291 as a decode step in
+`goldens/generate/cpu/g01-capital`; same context, so most likely the CPU
+backend's batch-versus-decode difference, inferred rather than tested).
 
 ## Using the CPU-only trace (G6a)
 
@@ -100,9 +110,36 @@ control also reads the previous pass's bank: the input of its layer-12 visit
 or the embedding, so a per-visit test can be fed entirely from the trace;
 feeding only record `v - 1` is wrong at visits 18 and 30 and leaves out the
 block and bank inputs. Expert ids per visit and
-position are in `trace.json` (compare as sets; weights sum to 8). The CPU-only
-run rounds the inputs of NVFP4 and Q8_0 products to Q8_0. The full
+position are in `trace.json` (compare as sets; weights sum to 8). The full
 definitions are in the program's goldens README ("Trace records").
+
+## What the CPU-only traces computed (the G6a precision)
+
+llama.cpp b12641, `ink-golden --ngl 0`, this repository's build:
+
+1. Attention never uses flash attention, at any length: inkling2 always passes
+   `kq_b` (the relative bias minus the sink logit) to `build_attn`, and
+   `llama-graph.cpp:3134` sets `use_flash_attn = cparams.flash_attn &&
+   kq_b == nullptr` (the log's "Flash Attention enabled" is the context
+   setting only). K and V are cached in F16. KQ is `ggml_vec_dot_f16_f32`: K
+   widened to F32, Q unrounded F32, an F32 dot in 64-value chunks whose sums
+   are added in double. The bias is added in F32, then `soft_max_ext` in F32
+   with the scale 1/sqrt(128) applied to (KQ + bias), the F16 mask added, and
+   a zero sink term (exp(0 - max)) in the denominator.
+   KQV is the same F16-by-F32 dot with F32 probabilities.
+2. Under 32 tokens in a batch everything runs on the CPU backend: inputs to
+   Q8_0 products (dense and routed experts) and to NVFP4 expert products
+   are rounded to Q8_0 (32-value blocks, FP16 scale), inputs to BF16
+   products to BF16; each NVFP4 expert's per-expert `.scale` multiplies its
+   output in F32 after the product.
+3. From 32 tokens up, the Accelerate BLAS backend the build links takes the
+   contiguous dense products with all three dimensions >= 32 and the KQV
+   product, as F32 with unrounded activations; KQ, the routed experts and
+   every decode step stay as in 1 and 2.
+
+`trace01`, `trace01b` and `trace02` (5, 6 and 20 tokens) are under rules 1
+and 2. The 300-token tool-prompt trace kept with the program's results is
+under rules 1 and 3.
 
 ## `noise/`: the reference against itself
 
@@ -112,3 +149,14 @@ definitions are in the program's goldens README ("Trace records").
 with context and on structured text (tool JSON); the G6 tolerances are set
 per prompt from these numbers. `table-logprobs.md` and `table-traces.md` are
 those numbers as tables (`noise_table.py`); p95 is nearest-rank.
+
+Teacher-forced (`make_tf_prompts.py`: each log-prob golden's prompt plus all
+but the last generated id as one ids prompt, run CPU-only and on Metal, so
+every recorded position is compared on the same context):
+`tf-set{1,2}-metal-vs-tfcpu.json` (the Metal goldens vs CPU-only, every
+position), `tf-set{1,2}-metal-vs-tfmetal.json` (the Metal goldens vs Metal
+on the same context in one batch: llama.cpp's batch-versus-decode
+difference, and for `trace02`, whose golden was traced, a traced-versus-untraced
+difference) and `tf-metal-vs-tfcpu.json` (both batched: the backend split
+alone); tables `table-tf-*.md`. Run paths in the JSON are relative to the
+program's goldens directory.

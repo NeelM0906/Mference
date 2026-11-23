@@ -22,6 +22,10 @@
 #   tf-metal/tf-cpu teacher-forced: every log-prob golden's prompt + generated
 #              ids as one prompt (inputs/generate_prompts_tf.json, from
 #              make_tf_prompts.py), so the noise covers every position
+#   cpu4       trace01b CPU-only (inputs/generate_prompts_4.json): trace01's
+#              prompt ids plus its greedy token 152717 (" Paris") as one ids
+#              prompt, traced, log-probs at every position: the G6a record of
+#              position 5, the position a runner reaches by one decode step
 # Set 1 writes generate/<stage>, set 2 generate2/<stage without the 2>.
 # All use n_ctx 4096, n_ubatch 512, 8 threads.
 set -uo pipefail
@@ -37,6 +41,7 @@ case "$STAGE" in
   cpu2) ngl=0; IN=$HERE/inputs/generate_prompts_2.json; OUTD=$G/generate2/cpu ;;
   metal3) ngl=99; IN=$HERE/inputs/generate_prompts_3.json; OUTD=$G/generate3/metal ;;
   cpu3) ngl=0; IN=$HERE/inputs/generate_prompts_3.json; OUTD=$G/generate3/cpu ;;
+  cpu4) ngl=0; IN=$HERE/inputs/generate_prompts_4.json; OUTD=$G/generate4/cpu ;;
   tf-metal) ngl=99; IN=$HERE/inputs/generate_prompts_tf.json; OUTD=$G/generate-tf/metal ;;
   tf-cpu) ngl=0; IN=$HERE/inputs/generate_prompts_tf.json; OUTD=$G/generate-tf/cpu ;;
   *) echo "unknown stage $STAGE" >&2; exit 2 ;;
