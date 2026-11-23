@@ -88,6 +88,16 @@ or redistributing those weights therefore requires separately establishing
 that the necessary rights have been obtained; Mference makes no grant of
 rights to them.
 
+Inkling 2 Mini: revision `45fd08764f2b0bf16b03a5483a80e5c7aaec8772` of
+[`unsloth/Inkling-2-Mini-GGUF`](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF),
+the file `Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf_file` (17,629,760,736
+bytes, SHA-256
+`e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3`), a
+quantization of Thinking Machines' Inkling 2 Mini. The installer copies every
+tensor unchanged. The terms on the pinned repository and on the original
+checkpoint govern those weights; the GGUF's own metadata declares no license,
+and Mference makes no grant of rights to them.
+
 MiniCPM5-2B: revision `cd199ce3ee67549c42ef7372f809f2c63599a3e9` of
 [`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B), the
 vendor's own BF16 upload, quantized to INT4 affine group-64 at install; the

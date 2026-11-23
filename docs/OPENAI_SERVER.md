@@ -195,21 +195,26 @@ to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
 
 Inkling 2 Mini returns a tool call that does not parse as text rather than as
-an error: when its JSON is invalid, it names a tool the request did not offer
-(including any call when no tools were offered or `tool_choice` is `none`),
-its header and body name different tools, or it is still open when
-generation ends. The response has HTTP 200, the call's JSON text as
+an error: when its JSON is invalid or not the `{"name": …, "args": {…}}`
+shape (other keys, `args` not an object, a repeated key), it names a tool the
+request did not offer (including any call when no tools were offered or
+`tool_choice` is `none`), its header and body name different tools, or it is
+still open when generation ends. A call body longer than 65,536 tokens still
+fails the request. Otherwise the response has HTTP 200, the call's JSON text as
 `content`, no `tool_calls`, and `finish_reason` `"stop"` (`"length"` when
 the completion cap ended it). A turn that also produced a valid call ends with
 `"tool_calls"`. Such a turn is not kept for prompt-prefix reuse. For every
 other model, a malformed call fails the request as before.
 
-For Inkling 2 Mini, a call's `arguments` string keeps the model's own key
-order and number spelling, as compact JSON. A history call's arguments render
-from their text the way the vendor's renderers do: nested objects in the
-text's order, `1.0` as `1.0`. So send them back unchanged, and the next turn
-can continue from the call's cached prefix. An integer outside the 64-bit
-range in a history call's arguments gets HTTP 400.
+For Inkling 2 Mini, a call's `arguments` string keeps the model's key order
+and each number's kind (`1.0` stays `1.0`, not `1`), written as compact JSON
+the way the template's `tojson` writes it (`1e3` becomes `1000.0`). A history
+call's arguments render from their text the way the vendor's renderers do:
+nested objects in the text's order, numbers of the text's kind. So send them
+back unchanged, and the next turn can continue from the call's cached prefix.
+As for every model, a history call whose arguments hold a number that neither
+a signed 64-bit integer nor a double represents exactly gets HTTP 400
+(`invalid_tool_arguments`).
 
 ## Library mode
 
@@ -437,7 +442,8 @@ Other values get HTTP 400. Omitted, the template's default level 0.9 applies;
 even `none` does not turn thinking off entirely. `enable_thinking: true` or
 `false` maps to `xhigh` or `none`, and an explicit `reasoning_effort` takes
 precedence. With an effort other than `none` and no explicit completion cap,
-the cap defaults to 32,768 tokens; with none given, to 4,096. Its sampling
+the cap defaults to 32,768 tokens; otherwise (no effort, `none`, or
+`enable_thinking: false`), to 4,096; both subject to available context. Its sampling
 defaults are the vendor's: temperature 1.0, with no top-k, top-p or min-p
 cut.
 

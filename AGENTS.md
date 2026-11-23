@@ -3,7 +3,7 @@
 A private on-device assistant for the Mac (the SwiftUI app in `App/`) on its own
 Swift and Metal inference engine. Native pinned checkpoints: Qwen 3.6
 35B-A3B, Maple Preview, Qwen 3.8 27B, MiniCPM5-2B, and Inkling 2 Mini (the
-Unsloth UD-Q4_K_XL GGUF, installed byte for byte). The shared core and KV
+Unsloth UD-Q4_K_XL GGUF, every tensor copied unchanged). The shared core and KV
 cache stay resident; routed experts stream from SSD per token. Qwen 3.8 27B
 and MiniCPM5-2B are dense and fully resident. Inkling 2 Mini keeps its looped
 core's experts resident and stages the rest on 32 to 47 GB Macs, and holds
