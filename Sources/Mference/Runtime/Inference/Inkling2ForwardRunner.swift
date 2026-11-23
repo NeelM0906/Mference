@@ -219,6 +219,19 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private let shortConv: Inkling2ShortConv
     private let prefillAttention: Inkling2PrefillAttention
     private let decodeAttention: Inkling2DecodeAttention
+    /// Decode (one-row) forms of the depth mix and the message gate (K3's):
+    /// the runner's own kernels run one threadgroup per row (the gate one per
+    /// 16 rows), which at one token costs about 1.1 ms a gate; these split
+    /// the work across threadgroups. Prefill keeps the runner's kernels.
+    private let depthMix: Inkling2DepthMix
+    private let gateDecode: Inkling2MessageGateKernels
+    /// FP32 `[12][d]`, one decoded row's mix and gate rows: 0-2 the attention
+    /// inputs' mix (q, k, v), 3-6 the four messages, 7-9 the gated q, k, v,
+    /// 10 the MoE input's mix, 11 its gated form. K3's decode gate addresses
+    /// all of a call's rows in one buffer.
+    private let decodeIO: MTLBuffer
+    /// The decode gate's `z`: four controllers of rank up to 128, FP32.
+    private let gateZ: MTLBuffer
     private let moe: Inkling2MoEKernels
     private let kernels: Inkling2RunnerKernels
     private let state: Inkling2AttentionState
@@ -287,6 +300,15 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         shortConv = try Inkling2ShortConv(library: library)
         prefillAttention = try Inkling2PrefillAttention(library: library)
         decodeAttention = try Inkling2DecodeAttention(library: library)
+        depthMix = try Inkling2DepthMix(library: library)
+        gateDecode = try Inkling2MessageGateKernels(library: library)
+        guard let io = context.device.makeBuffer(length: 12 * Self.d * 4, options: .storageModePrivate),
+              let z = context.device.makeBuffer(length: 4 * 128 * 4, options: .storageModePrivate) else {
+            throw Inkling2ForwardRunnerError.allocationFailed("Inkling 2 decode mix and gate rows")
+        }
+        io.label = "inkling2.decode-io"
+        decodeIO = io
+        gateZ = z
         moe = try Inkling2MoEKernels(context: context)
         kernels = try Inkling2RunnerKernels(device: context.device)
         state = try Inkling2AttentionState(device: context.device,
@@ -710,22 +732,52 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         // 1. Attention inputs: the depth mix (layer 0 reads the embedding),
         //    then the q/k/v message gates on later passes.
         var inputs: [Inkling2BufferRef]      // FP32 [T][d] each, q k v
+        // Decode rows go through K3's one-row kernels and `decodeIO`; a
+        // layout they cannot take (more states, weights in several buffers)
+        // falls back to the runner's kernels.
+        let eps = Inkling2RunnerKernels.residualNormEps
         if let queries = lw.attnResQuery {
             let count = lw.isGlobal ? 3 : 1
-            encode { enc in
-                kernels.encodeDepthMix(enc, arena: s.arena,
-                                       stateOffsets: (blocks + [cur]).map { s.arenaFloats($0) },
-                                       stateStride: d, queries: queries.buffer, queriesOffset: queries.offset,
-                                       queryCount: count, out: s.mix, outStride: d, outQueryStride: plane,
-                                       d: d, tokens: t)
+            let states = blocks + [cur]
+            if t == 1, states.count <= Inkling2DepthMix.maxStates {
+                try depthMix.encode(commandBuffer: cb, states: states.map { (s.arenaRef($0), d) }, queries: queries,
+                                    queryCount: count, output: .init(decodeIO), outputStride: count * d, rows: 1,
+                                    width: d, eps: eps)
+                let mixed = (0..<count).map { Inkling2BufferRef(decodeIO, offset: $0 * d * 4) }
+                inputs = count == 3 ? mixed : [mixed[0], mixed[0], mixed[0]]
+            } else {
+                encode { enc in
+                    kernels.encodeDepthMix(enc, arena: s.arena,
+                                           stateOffsets: states.map { s.arenaFloats($0) },
+                                           stateStride: d, queries: queries.buffer, queriesOffset: queries.offset,
+                                           queryCount: count, out: s.mix, outStride: d, outQueryStride: plane,
+                                           d: d, tokens: t)
+                }
+                let mixed = (0..<count).map { Inkling2BufferRef(s.mix, offset: $0 * plane * 4) }
+                inputs = count == 3 ? mixed : [mixed[0], mixed[0], mixed[0]]
             }
-            let mixed = (0..<count).map { Inkling2BufferRef(s.mix, offset: $0 * plane * 4) }
-            inputs = count == 3 ? mixed : [mixed[0], mixed[0], mixed[0]]
         } else {
             let x = s.arenaRef(cur)
             inputs = [x, x, x]
         }
-        if let bank, let loop = lw.loop {
+        /// Whether this visit's four messages are in `decodeIO` rows 3-6.
+        var messagesInIO = false
+        if let bank, let loop = lw.loop, t == 1, bank.count <= Inkling2DepthMix.maxStates,
+           inputs.allSatisfy({ $0.buffer === decodeIO }), Self.decodeGateReady(loop, controllers: 0..<3, rank: w.gateRank) {
+            try depthMix.encode(commandBuffer: cb, states: bank.map { (s.arenaRef($0), d) },
+                                queries: loop.messageQueries, queryCount: 4,
+                                output: .init(decodeIO, offset: 3 * d * 4), outputStride: 4 * d, rows: 1,
+                                width: d, eps: eps)
+            messagesInIO = true
+            let controllers = (0..<3).map { j in
+                Inkling2MessageGateKernels.DecodeController(
+                    down: loop.down[j].offset, forget: loop.forget[j].offset, gain: loop.gain[j].offset,
+                    x: inputs[j].offset / 4, message: (3 + j) * d, output: (7 + j) * d)
+            }
+            gateDecode.encodeDecode(commandBuffer: cb, weights: loop.down[0].buffer, activations: decodeIO,
+                                    z: .init(gateZ), controllers: controllers, width: d, rank: w.gateRank, eps: eps)
+            inputs = (0..<3).map { Inkling2BufferRef(decodeIO, offset: (7 + $0) * d * 4) }
+        } else if let bank, let loop = lw.loop {
             encode { enc in
                 kernels.encodeDepthMix(enc, arena: s.arena, stateOffsets: bank.map { s.arenaFloats($0) },
                                        stateStride: d, queries: loop.messageQueries.buffer,
@@ -836,20 +888,44 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
 
         // 7. MoE input: depth mix (+ the MoE message gate), norm to FP32 and FP16.
         var moeInput = Inkling2BufferRef(s.ffnMix)
+        let moeStates = blocks + [sum]
+        let gatedMoE = bank != nil && lw.loop != nil
+        let fastMoE = t == 1 && moeStates.count <= Inkling2DepthMix.maxStates
+            && (!gatedMoE || (messagesInIO && Self.decodeGateReady(lw.loop!, controllers: 3..<4, rank: w.gateRank)))
+        if fastMoE {
+            try depthMix.encode(commandBuffer: cb, states: moeStates.map { (s.arenaRef($0), d) },
+                                queries: lw.ffnResQuery, queryCount: 1, output: .init(decodeIO, offset: 10 * d * 4),
+                                outputStride: d, rows: 1, width: d, eps: eps)
+            moeInput = .init(decodeIO, offset: 10 * d * 4)
+            if gatedMoE, let loop = lw.loop {
+                gateDecode.encodeDecode(
+                    commandBuffer: cb, weights: loop.down[3].buffer, activations: decodeIO, z: .init(gateZ),
+                    controllers: [.init(down: loop.down[3].offset, forget: loop.forget[3].offset,
+                                        gain: loop.gain[3].offset, x: 10 * d, message: 6 * d, output: 11 * d)],
+                    width: d, rank: w.gateRank, eps: eps)
+                moeInput = .init(decodeIO, offset: 11 * d * 4)
+            }
+        }
         encode { enc in
-            kernels.encodeDepthMix(enc, arena: s.arena, stateOffsets: (blocks + [sum]).map { s.arenaFloats($0) },
-                                   stateStride: d, queries: lw.ffnResQuery.buffer,
-                                   queriesOffset: lw.ffnResQuery.offset, queryCount: 1,
-                                   out: s.ffnMix, outStride: d, outQueryStride: plane, d: d, tokens: t)
-            if bank != nil, let loop = lw.loop {
-                kernels.encodeMessageGate(enc, x: s.ffnMix, xStride: d,
-                                          message: s.messages, messageOffset: 3 * plane * 4, messageStride: d,
-                                          down: loop.down[3].buffer, downOffset: loop.down[3].offset,
-                                          gain: loop.gain[3].buffer, gainOffset: loop.gain[3].offset,
-                                          forget: loop.forget[3].buffer, forgetOffset: loop.forget[3].offset,
-                                          rank: w.gateRank, out: s.ffnMix, outOffset: plane * 4,
-                                          outStride: d, d: d, tokens: t)
-                moeInput = .init(s.ffnMix, offset: plane * 4)
+            if !fastMoE {
+                kernels.encodeDepthMix(enc, arena: s.arena, stateOffsets: moeStates.map { s.arenaFloats($0) },
+                                       stateStride: d, queries: lw.ffnResQuery.buffer,
+                                       queriesOffset: lw.ffnResQuery.offset, queryCount: 1,
+                                       out: s.ffnMix, outStride: d, outQueryStride: plane, d: d, tokens: t)
+                if gatedMoE, let loop = lw.loop {
+                    // The messages are in `decodeIO` when the attention side
+                    // took the decode path.
+                    let message = messagesInIO ? Inkling2BufferRef(decodeIO, offset: 6 * d * 4)
+                        : Inkling2BufferRef(s.messages, offset: 3 * plane * 4)
+                    kernels.encodeMessageGate(enc, x: s.ffnMix, xStride: d,
+                                              message: message.buffer, messageOffset: message.offset, messageStride: d,
+                                              down: loop.down[3].buffer, downOffset: loop.down[3].offset,
+                                              gain: loop.gain[3].buffer, gainOffset: loop.gain[3].offset,
+                                              forget: loop.forget[3].buffer, forgetOffset: loop.forget[3].offset,
+                                              rank: w.gateRank, out: s.ffnMix, outOffset: plane * 4,
+                                              outStride: d, d: d, tokens: t)
+                    moeInput = .init(s.ffnMix, offset: plane * 4)
+                }
             }
             kernels.encodeRMSNormDual(enc, x: moeInput.buffer, xOffset: moeInput.offset, xStride: d,
                                       weight: lw.ffnNorm.buffer, weightOffset: lw.ffnNorm.offset, eps: w.rmsEps,
@@ -916,6 +992,15 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                         runs: [.init(xColumn: 0, tailOffset: 0, channels: d)])
         slots.release(sum)
         return next
+    }
+
+    /// Whether K3's decode gate can take `controllers` of `loop`: their
+    /// `down`, `forget` and `gain` in one buffer at 16-byte offsets, and a
+    /// rank it serves.
+    private static func decodeGateReady(_ loop: Inkling2RunnerWeights.Loop, controllers: Range<Int>, rank: Int) -> Bool {
+        guard rank % 8 == 0, rank <= 128, d % 128 == 0 else { return false }
+        let refs = controllers.flatMap { [loop.down[$0], loop.forget[$0], loop.gain[$0]] }
+        return refs.allSatisfy { $0.buffer === refs[0].buffer && $0.offset % 16 == 0 }
     }
 
     private func commandBuffer() throws -> MTLCommandBuffer {
