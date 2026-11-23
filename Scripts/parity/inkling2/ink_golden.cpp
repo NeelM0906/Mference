@@ -125,10 +125,19 @@ static std::string arg(int argc, char ** argv, const char * name, const char * d
     return def;
 }
 
+// ngl 0 means CPU only: no GPU device at all (so no op is offloaded to Metal)
+// and no extra buffer types (CPU_REPACK would copy every Q8_0 weight it can
+// repack into heap memory instead of reading the mapped file).
+static ggml_backend_dev_t g_no_devices[1] = { nullptr };
+
 static llama_model * load_model(const std::string & path, bool vocab_only, int ngl) {
     llama_model_params mp = llama_model_default_params();
     mp.vocab_only   = vocab_only;
     mp.n_gpu_layers = ngl;
+    if (ngl == 0) {
+        mp.devices         = g_no_devices;
+        mp.use_extra_bufts = false;
+    }
     llama_model * model = llama_model_load_from_file(path.c_str(), mp);
     if (!model) { fprintf(stderr, "ink-golden: cannot load %s\n", path.c_str()); exit(1); }
     return model;
@@ -186,9 +195,13 @@ struct trace_state {
 
 static trace_state g_trace;
 
+// exactly "<base>-<digits>" (not the "... (reshaped)" / "... (view)" copies)
 static bool want(const char * name, std::string & base, int & il) {
     const char * dash = strrchr(name, '-');
-    if (!dash) return false;
+    if (!dash || !dash[1]) return false;
+    for (const char * p = dash + 1; *p; ++p) {
+        if (*p < '0' || *p > '9') return false;
+    }
     base.assign(name, (size_t) (dash - name));
     il = atoi(dash + 1);
     return base == "l_out" || base == "ffn_moe_topk" || base == "ffn_moe_weights_scaled";
@@ -294,6 +307,7 @@ static int cmd_generate(int argc, char ** argv) {
     cp.n_threads = threads; cp.n_threads_batch = threads;
     cp.cb_eval = eval_cb; cp.cb_eval_user_data = nullptr;
     cp.no_perf = false;
+    cp.op_offload = ngl != 0; // CPU only: no host-weight op goes to the GPU
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "ink-golden: cannot create context\n"); return 1; }
 
@@ -305,6 +319,7 @@ static int cmd_generate(int argc, char ** argv) {
     index["llama_build"] = llama_print_system_info();
     index["n_gpu_layers"] = ngl; index["threads"] = threads; index["n_ctx"] = n_ctx;
     index["n_batch"] = n_ctx; index["n_ubatch"] = ubatch; index["n_vocab"] = n_vocab;
+    index["cpu_only_devices"] = ngl == 0; index["use_extra_bufts"] = ngl != 0; index["op_offload"] = cp.op_offload;
     index["flash_attn_type"] = (int) cp.flash_attn_type; index["type_k"] = ggml_type_name(cp.type_k);
     index["type_v"] = ggml_type_name(cp.type_v);
     index["prompts"] = njson::array();
@@ -326,6 +341,11 @@ static int cmd_generate(int argc, char ** argv) {
         }
         const int n_prompt = (int) ids.size();
         if (n_prompt + n_gen > n_ctx) { fprintf(stderr, "ink-golden: %s too long\n", id.c_str()); return 1; }
+        // the trace keeps one ubatch's tensors: the whole prompt must be one ubatch
+        if (want_trace && n_prompt > ubatch) {
+            fprintf(stderr, "ink-golden: %s: a trace prompt must fit one ubatch (%d > %d)\n", id.c_str(), n_prompt, ubatch);
+            return 1;
+        }
         fprintf(stderr, "ink-golden: %s: %d prompt tokens, %d to generate%s%s\n", id.c_str(), n_prompt, n_gen,
                 want_lp ? ", logprobs" : "", want_trace ? ", trace" : "");
 
@@ -438,6 +458,8 @@ static int cmd_generate(int argc, char ** argv) {
             tr["hidden_shape"] = njson::array({(int) visits.size(), n_prompt, N_EMBD});
             tr["hidden_tensor"] = "l_out-<slot> (after the layer's MoE residual add)";
             tr["result_norm_file"] = "result_norm.f32";
+            // only the positions that produced logits (all with logprobs, else the last one)
+            tr["result_norm_shape"] = njson::array({(int) (g_trace.result_norm.size() / N_EMBD), N_EMBD});
             tr["visits"] = tv;
             write_file(pdir + "/trace.json", tr.dump());
             rec["trace_file"] = "trace.json";

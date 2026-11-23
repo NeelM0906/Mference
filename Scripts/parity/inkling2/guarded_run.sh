@@ -34,18 +34,46 @@ case "$(basename "$1")" in
   llama-gguf|llama-quantize|llama-gguf-split|llama-gguf-hash|llama-export-lora)
     note "REFUSED: $(basename "$1") reads tensor data into memory (not mmap); not allowed on this host"; exit 71 ;;
 esac
+# Load modes at b12641: `-lm` / `--load-mode auto|none|mmap|mlock|mmap+mlock|dio`
+# (common/arg.cpp, llama-bench); only auto and mmap map the file. Older
+# spellings are refused too, as is the LLAMA_ARG_LOAD_MODE environment variable.
+if [ -n "${LLAMA_ARG_LOAD_MODE:-}" ]; then note "REFUSED: LLAMA_ARG_LOAD_MODE is set ($LLAMA_ARG_LOAD_MODE)"; exit 71; fi
+prev=""
 for a in "$@"; do
   case "$a" in
-    --no-mmap|-nmp|--mlock|--mmap=0|--mmap=false)
-      note "REFUSED: argument $a loads or wires the weights in memory; not allowed on this host"; exit 71 ;;
+    --no-mmap|-nmp|--mlock|--mmap=0|--mmap=false|--load-mode=*)
+      case "$a" in --load-mode=auto|--load-mode=mmap) ;; *)
+        note "REFUSED: argument $a loads or wires the weights in memory; not allowed on this host"; exit 71 ;; esac ;;
   esac
+  if [ "$prev" = "-lm" ] || [ "$prev" = "--load-mode" ]; then
+    # llama-bench also takes a comma-separated list: every entry must map
+    IFS=, read -r -a modes <<< "$a"
+    for m in "${modes[@]}"; do
+      case "$m" in auto|mmap) ;; *) note "REFUSED: load mode '$m' does not map the file; not allowed on this host"; exit 71 ;; esac
+    done
+  fi
+  prev=$a
 done
+
+# Spec section 7: a reference tool never runs outside a machine-lock hold.
+# Require that the lock's recorded holder is one of this script's ancestors.
+holder=$("$LOCK" status 2>/dev/null | sed -n 's/^ *pid=\([0-9][0-9]*\).*/\1/p' | head -1)
+p=$$; inside=0
+while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+  [ "$p" = "${holder:-x}" ] && { inside=1; break; }
+  p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+done
+[ $inside = 1 ] || { note "REFUSED: not inside a lock.sh run hold (lock holder pid ${holder:-none})"; exit 71; }
 
 power=$(pmset -g batt | head -1)
 if [ $TIMING = 1 ] && ! echo "$power" | grep -q "AC Power"; then note "REFUSED: timing run not on AC power ($power)"; exit 71; fi
 [ -f "$GGUF" ] || { note "REFUSED: no GGUF at $GGUF"; exit 71; }
 if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
-others=$(pgrep -lx 'llama-server|llama-cli|llama-bench|llama-completion|llama-eval-callback|ink-golden|mfe-golden|mfe-bench|MferenceServer|MferenceCLI' || true)
+# Match executables by full basename (pgrep -x sees names cut to 16 characters);
+# any llama.cpp tool, the golden tools and the Mference model binaries count.
+others=$(ps -axo pid=,comm= | while read -r pid comm; do
+  case "${comm##*/}" in (llama-*|ink-golden|mfe-*|MferenceServer|MferenceCLI|mlx_lm*) echo "$pid ${comm##*/}" ;; esac
+done)
 [ -z "$others" ] || { note "REFUSED: another model process runs: $others"; exit 71; }
 
 s0=$(swap_mb)
@@ -66,7 +94,17 @@ while kill -0 "$wrapper" 2>/dev/null; do
         target=${child:-$wrapper}
         kill -INT "$target" 2>/dev/null
         for _ in $(seq 1 30); do kill -0 "$target" 2>/dev/null || break; sleep 1; done
-        kill -0 "$target" 2>/dev/null && kill -TERM "$target" 2>/dev/null
+        if kill -0 "$target" 2>/dev/null; then
+            kill -TERM "$target" 2>/dev/null
+            for _ in $(seq 1 30); do kill -0 "$target" 2>/dev/null || break; sleep 1; done
+        fi
+        # bounded: a process that outlives TERM still holds the lock and its memory
+        if kill -0 "$target" 2>/dev/null; then
+            note "SWAP GUARD: $target ignored INT and TERM; sending KILL"
+            kill -KILL "$target" 2>/dev/null
+        fi
+        sleep 2
+        kill -0 "$wrapper" 2>/dev/null && kill -KILL "$wrapper" 2>/dev/null
         tripped=1
         break
     fi

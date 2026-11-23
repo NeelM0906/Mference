@@ -61,9 +61,11 @@ LDFLAGS   := -framework Accelerate -framework Foundation -framework Metal -frame
 
 # ---------------------------------------------------------------- ggml
 BASE_C   := ggml.c ggml-alloc.c ggml-quants.c
-BASE_CXX := ggml.cpp ggml-backend.cpp ggml-backend-meta.cpp ggml-opt.cpp ggml-threading.cpp gguf.cpp \
+BASE_CXX := ggml-backend.cpp ggml-backend-meta.cpp ggml-opt.cpp ggml-threading.cpp gguf.cpp \
             ggml-backend-reg.cpp ggml-backend-dl.cpp
-BASE_OBJ := $(addprefix $(OUT)/ggml/,$(BASE_C:.c=.o) $(BASE_CXX:.cpp=.o))
+# ggml.c and ggml.cpp would both map to ggml.o; ggml.cpp (the uncaught-exception
+# backtrace handler) gets its own object name
+BASE_OBJ := $(addprefix $(OUT)/ggml/,$(BASE_C:.c=.o) $(BASE_CXX:.cpp=.o)) $(OUT)/ggml/ggml-cpp.o
 
 CPU_C_OBJ := $(OUT)/cpu/ggml-cpu-c.o $(OUT)/cpu/quants.o $(OUT)/cpu/arm-quants.o
 CPU_CXX_SRC := $(addprefix $(LL)/ggml/src/ggml-cpu/,ggml-cpu.cpp repack.cpp hbm.cpp traits.cpp amx/amx.cpp amx/mmq.cpp \
@@ -157,6 +159,10 @@ $(OUT)/ggml/%.o: $(LL)/ggml/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(OUT)/ggml/%.o: $(LL)/ggml/src/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OUT)/ggml/ggml-cpp.o: $(LL)/ggml/src/ggml.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

@@ -8,7 +8,9 @@
 # Stages, each its own lock hold:
 #   metal      ink-golden generate, -ngl 99 (the default GPU offload): the goldens
 #   metal-r2   the same again in a fresh process: the reference's run-to-run noise
-#   cpu        the same with -ngl 0 (every op on the CPU backend): backend noise
+#   cpu        the same with -ngl 0: ink-golden then loads no GPU device, turns
+#              op offload and CPU weight repacking off, so every op runs on the
+#              CPU from the mapped file: the backend noise
 # All three use inputs/generate_prompts.json, n_ctx 4096, n_ubatch 512, 8 threads.
 set -uo pipefail
 B=${1:?build dir}; G=${2:?goldens dir}; STAGE=${3:?stage}

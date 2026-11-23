@@ -98,9 +98,12 @@ def trace_metrics(da, db, pid):
         per.append({"visit": v, "layer": ta["visits"][v]["layer"],
                     "rel_l2": math.sqrt(num / den) if den else None,
                     "expert_set_agreement": same / len(ea)})
+    # a visit whose reference state is all zeros has no relative error (None)
+    rels = [p["rel_l2"] for p in per if p["rel_l2"] is not None]
     return {
         "visits": per,
-        "max_rel_l2": max(p["rel_l2"] for p in per),
+        "zero_norm_visits": sum(1 for p in per if p["rel_l2"] is None),
+        "max_rel_l2": max(rels) if rels else None,
         "final_visit_rel_l2": per[-1]["rel_l2"],
         "min_expert_set_agreement": min(p["expert_set_agreement"] for p in per),
         "mean_expert_set_agreement": sum(p["expert_set_agreement"] for p in per) / len(per),
@@ -131,6 +134,10 @@ def main():
         # positions up to the first divergence
         n_prompt = len(ga["prompt_ids"])
         aligned = n_prompt - 1 + k
+        # different prompt tokens: no position has the same context, so nothing else is comparable
+        if not r["prompt_ids_equal"]:
+            result["prompts"].append(r)
+            continue
         if ga.get("logprobs_file") and gb.get("logprobs_file"):
             r["logprobs"] = lp_metrics(load(da, pid, "logprobs.json"), load(db, pid, "logprobs.json"), aligned)
         t = trace_metrics(da, db, pid)
@@ -158,7 +165,8 @@ def main():
             line += f" top1={l['top1_agreement']:.4f} max|dlp|={l['max_abs_dlogprob_top1']:.4g} maxKL~={l['max_kl_top20_approx']:.3g}"
         if p.get("trace"):
             t = p["trace"]
-            line += f" trace max_rel_l2={t['max_rel_l2']:.3g} experts_min={t['min_expert_set_agreement']:.3f}"
+            mr = "n/a" if t["max_rel_l2"] is None else f"{t['max_rel_l2']:.3g}"
+            line += f" trace max_rel_l2={mr} experts_min={t['min_expert_set_agreement']:.3f}"
         print(line)
 
 
