@@ -156,9 +156,16 @@ public enum Inkling2ReferenceOps {
         let z = down.apply(g)
         let gainGate = gain.apply(z).map { Float(Foundation.tanh(Double($0))) }
         let forgetGate = forget.apply(z).map { Float(Foundation.tanh(Double($0))) }
-        return (0..<x.count).map {
-            Float((1.0 - Double(forgetGate[$0])) * Double(x[$0]) + Double(gainGate[$0]) * Double(m[$0]))
+        // Written as separate typed steps: Swift 6.3's type checker gives up
+        // on the single expression. Same operations in the same order.
+        var out = [Float](repeating: 0, count: x.count)
+        for i in 0..<x.count {
+            let keep: Double = 1.0 - Double(forgetGate[i])
+            let carried: Double = keep * Double(x[i])
+            let added: Double = Double(gainGate[i]) * Double(m[i])
+            out[i] = Float(carried + added)
         }
+        return out
     }
 
     // MARK: Short convolution
