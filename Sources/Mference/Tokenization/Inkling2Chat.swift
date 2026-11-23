@@ -143,9 +143,20 @@ extension MFTokenizer {
     /// The messages and tools in the shape the vendor template reads (the
     /// OpenAI / transformers shape): `tool_calls[].function.arguments` as a
     /// parsed object, `reasoning_content` for an assistant's thinking,
-    /// `name` or `tool_call_id` naming a tool result. Swift dictionaries reach
-    /// the template with sorted keys, so nested argument objects render in
-    /// sorted key order (the template itself sorts the top level).
+    /// `name` or `tool_call_id` naming a tool result. A call's arguments come
+    /// from their text when it has one (`inkling2TemplateArguments`).
+    /// A history call's arguments for the template. From their text when the
+    /// call has one that parses (`Inkling2ToolArguments`): nested objects in
+    /// the text's order and numbers of the text's kind, as transformers and
+    /// llama.cpp parse them. Otherwise from `arguments`, whose objects reach
+    /// the template with sorted keys (the template sorts the top level itself).
+    static func inkling2TemplateArguments(_ call: HistoricalToolCall) throws -> any Sendable {
+        if let text = call.argumentsText, let value = Inkling2ToolArguments.templateValue(text) {
+            return value
+        }
+        return try call.arguments.jinjaSendableValue()
+    }
+
     func inkling2TemplateInputs(messages: [Message],
                                 tools: [FunctionDefinition]) throws
         -> (messages: [[String: any Sendable]], tools: [[String: any Sendable]]) {
@@ -165,7 +176,7 @@ extension MFTokenizer {
                         "type": "function",
                         "function": [
                             "name": call.name,
-                            "arguments": try call.arguments.jinjaSendableValue(),
+                            "arguments": try Self.inkling2TemplateArguments(call),
                         ] as [String: any Sendable],
                     ]
                 }

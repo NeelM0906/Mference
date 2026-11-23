@@ -34,6 +34,16 @@ public struct Inkling2ToolCallParser: Sendable {
             throw ToolCallParserError.unknownTool(name)
         }
         let value = JSONValue.object(arguments)
+        // The arguments as the model wrote them, nested order and number
+        // kinds kept, compact (`Inkling2ToolArguments`): returned to the
+        // client and kept for the history, so both re-render to the tokens
+        // the model sampled. The sorted `JSONValue` text only when the text
+        // holds something a template value cannot carry exactly.
+        if let ordered = Inkling2ToolArguments.envelopeArguments(text),
+           let orderedText = try? Inkling2ToolArguments.compactText(ordered) {
+            return ParsedToolCall(id: id, name: name, arguments: value,
+                                  argumentsJSON: orderedText, argumentsText: orderedText)
+        }
         return ParsedToolCall(id: id,
                               name: name,
                               arguments: value,

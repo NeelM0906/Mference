@@ -124,7 +124,8 @@ public struct PromptPrefixCache: Sendable {
             MFTokenizer.HistoricalToolCall(
                 id: $0.id,
                 name: $0.name,
-                arguments: $0.arguments)
+                arguments: $0.arguments,
+                argumentsText: $0.argumentsText)
         }
         let assistant = MFTokenizer.Message(
             role: .assistant,
