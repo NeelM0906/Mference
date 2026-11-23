@@ -239,7 +239,8 @@ extension Model {
     /// The check `openLayerLocked` runs before a streamer reads a layer file,
     /// for the Inkling 2 runner, whose expert store reads the files itself:
     /// the file's SHA-256 under `.fullSha256` and `.trustedReceiptWhenValid`
-    /// (that reads the file once, through the page cache), its size under
+    /// (read once with `F_NOCACHE`, so the pool's 15.8 GB does not pass
+    /// through the file cache), its size under
     /// `.sizeCheckTrustedReceipt`. Done once per layer.
     func inkling2VerifyExpertLayerFile(_ layer: Int) throws {
         if streamersQueue.sync(execute: { streamersBox.layerVerified[layer] }) { return }
@@ -248,7 +249,7 @@ extension Model {
         guard let entry = manifest.files[name] else { throw ModelError.missingFile(name: name) }
         switch integrityPolicy {
         case .fullSha256, .trustedReceiptWhenValid:
-            try Sha256Verifier.verifyFile(at: url, named: name, expectedHex: entry.sha256)
+            try Sha256Verifier.verifyFile(at: url, named: name, expectedHex: entry.sha256, bypassCache: true)
         case .sizeCheckTrustedReceipt:
             let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value
             guard size == entry.size else {
