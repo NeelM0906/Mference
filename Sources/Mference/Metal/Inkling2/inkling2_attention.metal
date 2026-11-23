@@ -17,6 +17,10 @@ using namespace metal;
 // differ in lane bits 0 and 3, so a row reduction is two xor shuffles.
 // ============================================================================
 
+// Loops over arrays of simdgroup fragments must unroll fully, or the arrays
+// are indexed at run time and spill.
+#define INK2_UNROLL _Pragma("clang loop unroll(full)")
+
 static inline short ink2_frag_row(ushort lane) { return ((lane / 4) & 4) + ((lane / 2) % 4); }
 static inline short ink2_frag_col(ushort lane) { return ((lane / 4) & 2) * 2 + (lane % 2) * 2; }
 
@@ -374,6 +378,7 @@ template <short BK>
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     simdgroup_half8x8 qf[D / 8];
+    INK2_UNROLL
     for (short ds = 0; ds < D / 8; ++ds) {
         simdgroup_load(qf[ds], kv + (8 * sgitg) * DP + ds * 8, DP, 0, false);
     }
@@ -387,14 +392,17 @@ template <short BK>
     const float qScale = p.scale * tau;
     float4 relReg[R / 4];
     float m = 0.0f;
+    INK2_UNROLL
     for (short i = 0; i < R / 4; ++i) { relReg[i] = float4(0.0f); }
     if (rowValid) {
         device const float4* rrow = (device const float4*)(rel + ulong(myRow) * p.relStride + h * uint(R));
+        INK2_UNROLL
         for (short i = 0; i < R / 4; ++i) { relReg[i] = rrow[i] * tau; }
         m = sink[ulong(myRow) * p.sinkStride + h];
     }
     float l = 1.0f;
     simdgroup_float8x8 of[D / 8];
+    INK2_UNROLL
     for (short db = 0; db < D / 8; ++db) { of[db] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
 
     const uint keyEnd = pos0 + rowsHere;
@@ -429,8 +437,10 @@ template <short BK>
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         simdgroup_float8x8 sf[NB];
+        INK2_UNROLL
         for (short kb = 0; kb < NB; ++kb) {
             sf[kb] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            INK2_UNROLL
             for (short ds = 0; ds < D / 8; ++ds) {
                 simdgroup_half8x8 kt;
                 simdgroup_load(kt, kTile + kb * 8 * DP + ds * 8, DP, 0, true);
@@ -439,7 +449,9 @@ template <short BK>
         }
 
         float tileMax = -INFINITY;
+        INK2_UNROLL
         for (short kb = 0; kb < NB; ++kb) {
+            INK2_UNROLL
             for (short c = 0; c < 2; ++c) {
                 const uint key = k0 + uint(kb * 8 + fn + c);
                 const bool visible = rowValid && key < keyEnd && key <= myPos
@@ -452,6 +464,7 @@ template <short BK>
                         threadgroup const float4* pr =
                             (threadgroup const float4*)(pTable + (int(dist) - dBase) * R);
                         float b = 0.0f;
+                        INK2_UNROLL
                         for (short i = 0; i < R / 4; ++i) { b += dot(relReg[i], pr[i]); }
                         s += b;
                     }
@@ -465,6 +478,7 @@ template <short BK>
         const float factor = exp(m - mNew);
         float tileSum = 0.0f;
         simdgroup_half8x8 pf[NB];
+        INK2_UNROLL
         for (short kb = 0; kb < NB; ++kb) {
             const float e0 = exp(sf[kb].thread_elements()[0] - mNew);
             const float e1 = exp(sf[kb].thread_elements()[1] - mNew);
@@ -476,12 +490,15 @@ template <short BK>
         l = l * factor + tileSum;
         m = mNew;
         if (factor != 1.0f) {
+            INK2_UNROLL
             for (short db = 0; db < D / 8; ++db) {
                 of[db].thread_elements()[0] *= factor;
                 of[db].thread_elements()[1] *= factor;
             }
         }
+        INK2_UNROLL
         for (short kb = 0; kb < NB; ++kb) {
+            INK2_UNROLL
             for (short db = 0; db < D / 8; ++db) {
                 simdgroup_half8x8 vf;
                 simdgroup_load(vf, vTile + kb * 8 * DP + db * 8, DP, 0, false);
@@ -495,6 +512,7 @@ template <short BK>
         const float inv = 1.0f / l;
         device half* orow = out + ulong(myRow) * p.outStride + h * uint(D);
         device const float* grow = gate + ulong(myRow) * p.gateStride + h * uint(D);
+        INK2_UNROLL
         for (short db = 0; db < D / 8; ++db) {
             const uint col = uint(db * 8 + fn);
             float a = of[db].thread_elements()[0] * inv;
