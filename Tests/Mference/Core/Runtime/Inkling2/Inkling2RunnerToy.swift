@@ -57,11 +57,13 @@ struct Inkling2RunnerToy {
 
     // MARK: Fills (one SplitMix stream per tensor name)
 
+    /// Every block gets its own scale (0.5 to 1.5 times `amplitude / 127`),
+    /// so a block-scale indexing error anywhere in a Q8_0 product shows.
     private static func q8(_ p: UnsafeMutableRawPointer, rows: Int, cols: Int, amplitude: Float, rng: SplitMix64) {
         var rng = rng
-        let scale = Float16(amplitude / 127).bitPattern
         for b in 0..<(rows * cols / 32) {
             let block = p + b * 34
+            let scale = Float16(amplitude / 127 * rng.uniform(0.5, 1.5)).bitPattern
             block.storeBytes(of: scale.littleEndian, as: UInt16.self)
             // Random int8 codes, eight per store (a -128 decodes the same on
             // the GPU and in the CPU reference).

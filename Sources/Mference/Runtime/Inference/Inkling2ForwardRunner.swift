@@ -145,7 +145,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     var visitTrace: VisitTrace?
 
     init(weights: Inkling2RunnerWeights, context: MetalContext, maxContext: Int, maxChunkTokens: Int) throws {
-        precondition(weights.layers.count == 24)
+        try Self.validate(weights)
+        guard maxContext > 0, maxChunkTokens > 0 else {
+            throw Inkling2ForwardRunnerError.invalidInput(
+                "Inkling 2 runner needs a positive context (\(maxContext)) and chunk (\(maxChunkTokens))")
+        }
         self.w = weights
         self.ctx = context
         self.maxContext = maxContext
@@ -166,6 +170,45 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         moeShape = weights.layers[0].experts.shape
         scratch = try Scratch(device: context.device, tokens: maxChunkTokens, maxContext: maxContext,
                               moeShape: moeShape)
+    }
+
+    /// What the schedule and the kernels assume of the weights, checked
+    /// once: the layer kinds the visit plan (and K3's state) use, the
+    /// tensors each kind and the core need, the vocabulary, the gate rank
+    /// the message-gate kernel holds, and one expert shape for every layer.
+    static func validate(_ w: Inkling2RunnerWeights) throws {
+        func invalid(_ detail: String) -> Inkling2ForwardRunnerError { .invalidInput("Inkling 2 weights: " + detail) }
+        guard w.layers.count == Inkling2VisitPlan.storedLayers else {
+            throw invalid("\(w.layers.count) layers, not \(Inkling2VisitPlan.storedLayers)")
+        }
+        guard w.vocab > 0, w.vocabRows >= w.vocab else { throw invalid("vocabulary \(w.vocab) of \(w.vocabRows) rows") }
+        guard (1...Inkling2RunnerKernels.maxGateRank).contains(w.gateRank) else {
+            throw invalid("gate rank \(w.gateRank)")
+        }
+        let shape = w.layers[0].experts.shape
+        guard shape.d == d else { throw invalid("expert width \(shape.d), hidden \(d)") }
+        for (layer, lw) in w.layers.enumerated() {
+            guard lw.isGlobal == Inkling2VisitPlan.isGlobal(layer: layer) else {
+                throw invalid("layer \(layer) is \(lw.isGlobal ? "global" : "sliding"), the visit plan says otherwise")
+            }
+            if lw.isGlobal {
+                guard lw.inputNorms.count == 3, lw.kConvProj != nil, lw.vConvProj != nil else {
+                    throw invalid("global layer \(layer) needs q, k, v input norms and both tap projections")
+                }
+            } else {
+                guard lw.attnNorm != nil else { throw invalid("sliding layer \(layer) has no attn_norm") }
+            }
+            guard (lw.attnResQuery == nil) == (layer == 0) else {
+                throw invalid("layer \(layer): attn_res_query is absent exactly on layer 0")
+            }
+            guard (lw.loop != nil) == Inkling2VisitPlan.isLoopLayer(layer) else {
+                throw invalid("layer \(layer): loop gates are present exactly on the core layers")
+            }
+            if let loop = lw.loop, loop.down.count != 4 || loop.gain.count != 4 || loop.forget.count != 4 {
+                throw invalid("core layer \(layer) needs four message gates")
+            }
+            guard lw.experts.shape == shape else { throw invalid("layer \(layer) expert shape differs") }
+        }
     }
 
     // MARK: Scratch
@@ -292,6 +335,17 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
+        // Check the whole range before the first span commits anything.
+        guard startPosition + tokens.count <= maxContext else {
+            throw Inkling2ForwardRunnerError.invalidInput(
+                "Inkling 2 prompt of \(tokens.count) at \(startPosition) exceeds the context \(maxContext)")
+        }
+        guard tokens.allSatisfy({ $0 >= 0 && Int($0) < w.vocab }) else {
+            throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 token outside the vocabulary")
+        }
+        guard logits.length >= w.vocabRows * 2 else {
+            throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 logits buffer is too small")
+        }
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count, startPosition: startPosition,
                                               chunkTokens: min(config.chunkTokens, maxChunkTokens))
         for (i, span) in spans.enumerated() {
@@ -311,7 +365,9 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
 
     /// Runs `tokens` at `start ..< start + count` through all 48 visits and,
     /// when `logits` is given, writes the last token's FP16 logits (the
-    /// padded rows past `vocab` get a large negative value).
+    /// padded rows past `vocab` get a large negative value). The chunk goes
+    /// out as several command buffers; the state advances only when every
+    /// one completed, and a failure leaves the chunk state dirty (`reset`).
     private func run(tokens: [Int32], start: Int, logits: MTLBuffer?) throws {
         let t = tokens.count
         guard t > 0, t <= maxChunkTokens, start + t <= maxContext else {
@@ -335,6 +391,19 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
 
         var slots = Slots()
         var cb = try commandBuffer()
+        var committed: [MTLCommandBuffer] = []
+        /// Commits the buffer being encoded and starts the next; if that
+        /// fails, the committed ones finish before the error leaves.
+        func nextBuffer() throws {
+            cb.commit()
+            committed.append(cb)
+            do {
+                cb = try commandBuffer()
+            } catch {
+                committed.forEach { $0.waitUntilCompleted() }
+                throw error
+            }
+        }
         func encode(_ body: (MTLComputeCommandEncoder) -> Void) {
             let enc = cb.makeComputeCommandEncoder()!
             body(enc)
@@ -402,8 +471,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 record(cur)
             }
             // Keep each command buffer to about a third of the visits.
-            cb.commit()
-            cb = try commandBuffer()
+            try nextBuffer()
         }
         if let old = bank { slots.release(old) }
         slots.release(preludeCur)
@@ -438,10 +506,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             }
         }
         cb.commit()
-        cb.waitUntilCompleted()
-        guard cb.status == .completed else {
+        committed.append(cb)
+        committed.forEach { $0.waitUntilCompleted() }
+        if let failed = committed.first(where: { $0.status != .completed }) {
             throw Inkling2ForwardRunnerError.commandFailed(
-                cb.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
+                failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
         }
         state.advance(by: t)
         chunkState.markCommitted()

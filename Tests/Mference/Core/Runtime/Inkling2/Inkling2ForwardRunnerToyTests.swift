@@ -27,17 +27,27 @@ import MferenceValidationSupport
 struct Inkling2ForwardRunnerToyTests {
 
     /// Prefill, a second prefill, then one decode step per token.
-    static let steps: [(tokens: [Int32], decode: Bool)] = [
+    static let shortSteps: [(tokens: [Int32], decode: Bool)] = [
         ([17, 401, 3], false), ([250, 99], false), ([7], true), ([333], true),
     ]
-    static let traceRows = 8
-    /// Largest difference of one visit's output relative to its largest
-    /// magnitude, and of the logits. Measured 2026-11-23 (M1 Max): at most
-    /// 8.6e-4 per visit and 3.0e-4 for the logits over both chunk sizes.
+    /// A 37-row prefill (the tiled projection path past 8 rows, the grouped
+    /// experts with up to 296 routed pairs), a second prefill, a decode step.
+    static let longSteps: [(tokens: [Int32], decode: Bool)] = [
+        ((0..<37).map { Int32(($0 * 131 + 17) % 500) }, false), ([250, 99], false), ([7], true),
+    ]
+    static let traceRows = 64
+    /// Largest difference of one visit's output, and of its own increment
+    /// (the output minus the running sum it continued, the whole output at a
+    /// block start), relative to the reference's largest magnitude; and of
+    /// the logits. Measured 2026-11-23 (M1 Max, simdgroup projections): at
+    /// most 2.0e-3 for a visit and for its increment (the 37-row chunk; 8.2e-4
+    /// in chunks of up to 4), 3.6e-4 for the logits.
     static let tolerance: Float = 0.005
+    static let incrementTolerance: Float = 0.005
     static let logitTolerance: Float = 0.002
     /// Selection-score shortfall of a forced expert (scores are a sigmoid
-    /// plus a bias of at most 0.1). Measured: no route differed.
+    /// plus a bias of at most 0.1). Measured: two near-ties in 2,592 routed
+    /// token-visits, both at most 3e-5 below the cutoff.
     static let tieMargin: Float = 0.005
 
     private func logits(_ buffer: MTLBuffer, count: Int) -> [Float] {
@@ -52,9 +62,12 @@ struct Inkling2ForwardRunnerToyTests {
         zip(got, want).map { abs($0 - $1) }.max()! / max(want.map(abs).max()!, 1e-6)
     }
 
-    /// Chunks of 2 split the 3-token prefill into 2 + 1 (a one-row span
-    /// through the prefill path); chunks of 4 take it whole.
-    @Test(.fullTier, arguments: [2, 4])
+    /// Chunks of 2 split the 3-token prefill into 2 + 1 (the 1-row span runs
+    /// the decode kernels); chunks of 4 take it whole; chunks of 40 take the
+    /// 37-row prefill whole. Positions stay below 45: the window, the ring
+    /// wrap, the log-scaled global queries and the relative-bias extent
+    /// (all from 1,024 or 8,192 tokens) are K3's own tests' and G6's.
+    @Test(.fullTier, arguments: [2, 4, 40])
     func runnerMatchesTheReference(maxChunkTokens: Int) async throws {
         let context = try MetalContext()
         let toy = try Inkling2RunnerToy(device: context.device)
@@ -71,16 +84,18 @@ struct Inkling2ForwardRunnerToyTests {
         let routes = try #require(device.makeBuffer(length: 48 * rows * topK * 4, options: .storageModeShared))
         runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows)
         let ids = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * topK)
+        let schedule = c.schedule
+        let steps = maxChunkTokens >= 37 ? Self.longSteps : Self.shortSteps
 
         var position = 0
-        for (step, (chunk, decode)) in Self.steps.enumerated() {
+        for (step, (chunk, decode)) in steps.enumerated() {
             let n = chunk.count
             if decode {
                 try await runner.produce(token: chunk[0], position: position, into: out)
             } else {
                 let result = try await runner.prefillChunked(tokens: chunk[...], startPosition: position,
                                                              outputMode: .logits,
-                                                             config: .production(chunkTokens: 32),
+                                                             config: .production(chunkTokens: 64),
                                                              into: out, onProgress: { _ in })
                 #expect(result.newPosition == position + n)
             }
@@ -96,30 +111,41 @@ struct Inkling2ForwardRunnerToyTests {
             let want = reference.forward(tokens: chunk, logits: .last)[0]
             let trace = try #require(reference.lastTrace)
 
-            var visitErrors: [Float] = []
+            var visitErrors: [Float] = [], incrementErrors: [Float] = []
             var flips = 0
             var shortfall: Float = 0
             for visit in 0..<48 {
-                var err: Float = 0
+                // A block-start visit's output is its own branches alone; any
+                // other adds them to the running sum it continued.
+                let blockStart = schedule[visit].layer % c.attnResBlockSize == 0
+                var err: Float = 0, incrementErr: Float = 0
                 for t in 0..<n {
-                    err = max(err, relative(gpuOutputs[visit][t], trace.visitOutputs[visit][t]))
+                    let got = gpuOutputs[visit][t], want = trace.visitOutputs[visit][t]
+                    err = max(err, relative(got, want))
+                    let input = blockStart ? [Float](repeating: 0, count: d) : gpuOutputs[visit - 1][t]
+                    incrementErr = max(incrementErr, relative(zip(got, input).map { $0 - $1 },
+                                                              zip(want, input).map { $0 - $1 }))
                     let s = trace.routeShortfalls[visit][t]
                     if s > 0 { flips += 1 }
                     shortfall = max(shortfall, s)
                 }
                 visitErrors.append(err)
+                incrementErrors.append(incrementErr)
             }
             let all = logits(out, count: c.vocabPadded)
             let real = Array(all[..<c.vocabUnpadded])
             let logitError = relative(real, want)
-            let worst = visitErrors.max()!
-            print("inkling2 toy chunk \(maxChunkTokens) step \(step) (\(n) at \(position)): visit error \(worst) "
-                  + "(last \(visitErrors[47])), logit error \(logitError), argmax \(argmax(real)) vs "
+            let worst = visitErrors.max()!, worstIncrement = incrementErrors.max()!
+            print("inkling2 toy chunk \(maxChunkTokens) step \(step) (\(n) at \(position)): visit error \(worst), "
+                  + "increment error \(worstIncrement), logit error \(logitError), argmax \(argmax(real)) vs "
                   + "\(argmax(want)), \(flips) near-tie route flips, largest shortfall \(shortfall)")
-            if worst >= Self.tolerance {
+            if worst >= Self.tolerance || worstIncrement >= Self.incrementTolerance {
                 print("inkling2 toy per-visit errors: \(visitErrors.map { String(format: "%.4f", $0) })")
+                print("inkling2 toy per-visit increment errors: "
+                      + "\(incrementErrors.map { String(format: "%.4f", $0) })")
             }
             #expect(worst < Self.tolerance, "step \(step)")
+            #expect(worstIncrement < Self.incrementTolerance, "step \(step)")
             #expect(logitError < Self.logitTolerance, "step \(step)")
             #expect(shortfall <= Self.tieMargin, "step \(step)")
             // The runner's top logit is the reference's or within the error of it.
@@ -130,5 +156,41 @@ struct Inkling2ForwardRunnerToyTests {
             position += n
         }
         #expect(runner.continuationPosition == position)
+    }
+
+    /// Weights that break the schedule's assumptions are refused at init,
+    /// and a prefill that cannot finish is refused before its first span
+    /// commits: the cursor stays put and the next prefill runs.
+    @Test(.fullTier)
+    func weightsAndRangesAreCheckedUpFront() async throws {
+        let context = try MetalContext()
+        let toy = try Inkling2RunnerToy(device: context.device)
+        let c = Inkling2RunnerToy.config
+        func refused(_ change: (inout Inkling2RunnerWeights) -> Void) -> Bool {
+            var w = toy.runnerWeights
+            change(&w)
+            return (try? Inkling2ForwardRunner(weights: w, context: context, maxContext: 16, maxChunkTokens: 2)) == nil
+        }
+        #expect(refused { $0.layers[7].loop = nil })
+        #expect(refused { $0.layers[5].isGlobal = false })
+        #expect(refused { $0.layers[0].attnResQuery = $0.layers[1].attnResQuery })
+        #expect(refused { $0.gateRank = Inkling2RunnerKernels.maxGateRank + 1 })
+        #expect(refused { $0.vocab = $0.vocabRows + 1 })
+        #expect(refused { $0.layers.removeLast() })
+
+        let runner = try Inkling2ForwardRunner(weights: toy.runnerWeights, context: context,
+                                               maxContext: 8, maxChunkTokens: 2)
+        let out = try #require(context.device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
+        func prefill(_ tokens: [Int32]) async throws {
+            _ = try await runner.prefillChunked(tokens: tokens[...], startPosition: 0, outputMode: .logits,
+                                                config: .production(chunkTokens: 32), into: out,
+                                                onProgress: { _ in })
+        }
+        // Past the context, and a bad token in the second span.
+        await #expect(throws: Inkling2ForwardRunnerError.self) { try await prefill([1, 2, 3, 4, 5, 6, 7, 8, 9]) }
+        await #expect(throws: Inkling2ForwardRunnerError.self) { try await prefill([1, 2, Int32(c.vocabUnpadded)]) }
+        #expect(runner.continuationPosition == 0)
+        try await prefill([1, 2, 3])
+        #expect(runner.continuationPosition == 3)
     }
 }
