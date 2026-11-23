@@ -40,7 +40,8 @@ public struct MapleToolCallParser: Sendable {
     }
 }
 
-private struct JSONDuplicateKeyScanner {
+/// Shared with `Inkling2ToolCallParser`.
+struct JSONDuplicateKeyScanner {
     private let characters: [Character]
     private var index = 0
 

@@ -61,6 +61,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "swift-jinja"),
             ],
             path: "Sources/Mference",
             resources: [
