@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import Testing
 @testable import Mference
 
@@ -84,7 +85,6 @@ import Testing
         #expect(layout.layers.allSatisfy { $0.expertStride == nil && $0.format == nil })
         #expect(layout.expertStride(layer: 7) == layout.expertStride)
         #expect(layout.storedExpertStride(layer: 7) == layout.storedExpertStride)
-        #expect(layout.expertStride(layer: 99) == layout.expertStride)
     }
 
     @Test func malformedPerLayerStridesAreRefused() throws {
@@ -105,8 +105,77 @@ import Testing
         refuses("top-level stride not the largest") { _, root in root["expertStride"] = UInt64(4_489_216) }
         refuses("zero stride") { layers, _ in layers[0]["expertStride"] = 0 }
         refuses("non-string format") { layers, _ in layers[0]["format"] = 4 }
-        refuses("stride and expertStorage together") { _, root in
-            root["expertStorage"] = ["format": ExpertStorage.impliedNeg8ScaleBiasesFormat]
+        // Per-layer strides and expertStorage exclude each other; checked
+        // directly, since a storage block valid for these layers cannot exist.
+        let layers = try Self.load(Self.productionLayout()).layers
+        let storage = ExpertStorage(storedExpertStride: 16_384, segments: [], impliedBiases: [])
+        #expect(throws: ModelError.self) {
+            try PackedExpertsLayoutReader.validatePerLayerStrides(layers: layers, expertStride: 8_470_528,
+                                                                  storage: storage)
+        }
+        try PackedExpertsLayoutReader.validatePerLayerStrides(layers: layers, expertStride: 8_470_528,
+                                                              storage: nil)
+        // A stride that would overflow expert * stride is refused, not trapped on.
+        refuses("overflowing stride") { layers, root in
+            var entry = Self.layerEntry(0, format: .nvfp4, experts: 128)
+            let huge = UInt64(1) << 62
+            entry["expertStride"] = huge
+            // Experts 0 to 3 sit at expert * stride; expert 4's place overflows.
+            entry["experts"] = (entry["experts"] as! [[String: Any]]).enumerated().map { index, expert in
+                var expert = expert
+                expert["size"] = huge
+                expert["offset"] = index < 4 ? UInt64(index) * huge : 0
+                return expert
+            }
+            layers[0] = entry
+            root["expertStride"] = huge
+        }
+        refuses("fractional stride") { layers, _ in layers[0]["expertStride"] = 4_489_216.5 }
+        refuses("boolean stride") { layers, _ in layers[0]["expertStride"] = true }
+    }
+
+    /// The pre-load pool size counts each layer at its own stride.
+    @Test func poolSizeUsesPerLayerStrides() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inkling2-pool-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("packed_experts"),
+                                                withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: Self.productionLayout())
+            .write(to: dir.appendingPathComponent("packed_experts/layout.json"))
+        #expect(try ExpertPoolInspector.poolByteSize(directoryURL: dir) == 15_829_303_296)
+    }
+
+    /// Per-layer strides are this family's format: another family's install
+    /// that carries them is refused at load.
+    @Test func otherFamilyRefusesPerLayerStrides() throws {
+        let dir = try ModelLoaderTests.writeToySynthetic()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let layoutURL = dir.appendingPathComponent("packed_experts/layout.json")
+        var root = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: layoutURL))
+            as? [String: Any])
+        let stride = try #require(root["expertStride"] as? UInt64)
+        root["layers"] = (root["layers"] as! [[String: Any]]).map { layer in
+            var layer = layer
+            if !(layer["experts"] as! [Any]).isEmpty { layer["expertStride"] = stride }
+            return layer
+        }
+        try JSONSerialization.data(withJSONObject: root).write(to: layoutURL)
+        // Keep the manifest's checksum true, so the refusal is the stride's.
+        let manifestURL = dir.appendingPathComponent("manifest.json")
+        var manifest = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL))
+            as? [String: Any])
+        var files = try #require(manifest["files"] as? [String: [String: Any]])
+        files["packed_experts/layout.json"] = [
+            "size": try FileManager.default.attributesOfItem(atPath: layoutURL.path)[.size] as! UInt64,
+            "sha256": try Sha256Verifier.hashFile(at: layoutURL),
+        ]
+        manifest["files"] = files
+        try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        #expect(throws: ModelError.indexCorrupt(
+            detail: "layout.json: per-layer expert strides are not a qwen36 format")) {
+            _ = try Model.load(directoryURL: dir, device: device, expecting: .defaultsToy())
         }
     }
 

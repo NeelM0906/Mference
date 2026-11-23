@@ -223,6 +223,17 @@ public enum VerifiedInstallTool {
         guard layout.layers.count == layout.numLayers else {
             throw RepackError.configurationInvalid(detail: "packed expert layout layer count mismatch")
         }
+        // Per-layer strides, as the runtime reader accepts them: on every
+        // routed layer or none, the largest equal to the top-level stride.
+        let routedLayers = layout.layers.filter { !$0.experts.isEmpty }
+        let perLayer = routedLayers.compactMap(\.expertStride)
+        if !perLayer.isEmpty {
+            guard perLayer.count == routedLayers.count, perLayer.max() == layout.expertStride else {
+                throw RepackError.configurationInvalid(
+                    detail: "per-layer expert strides must cover every routed layer, the largest "
+                        + "equal to expertStride \(layout.expertStride)")
+            }
+        }
         for layer in layout.layers {
             let layerStride = layer.expertStride ?? layout.expertStride
             // Only a per-layer stride needs its own check: the single stride
@@ -293,6 +304,13 @@ public enum VerifiedInstallTool {
                 guard expert.offset % pageSize == 0 else {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) expert \(expertID) offset is not page-aligned")
+                }
+                if layer.expertStride != nil {
+                    let (place, overflow) = UInt64(expertID).multipliedReportingOverflow(by: layerStride)
+                    guard !overflow, expert.offset == place else {
+                        throw RepackError.configurationInvalid(
+                            detail: "\(relativePath) expert \(expertID) is not at expert * stride")
+                    }
                 }
                 guard expert.offset <= actualSize,
                       expert.size <= actualSize - expert.offset else {

@@ -10,8 +10,10 @@ public enum ExpertPoolInspector {
     /// routed experts contribute nothing.
     public static func poolByteSize(directoryURL: URL) throws -> UInt64 {
         let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
+        // A layer's own stride when the layout gives one; otherwise the
+        // single stride, as before.
         return layout.layers.reduce(UInt64(0)) { total, layer in
-            total + UInt64(layer.experts.count) * layout.expertStride
+            total + UInt64(layer.experts.count) * (layer.expertStride ?? layout.expertStride)
         }
     }
 

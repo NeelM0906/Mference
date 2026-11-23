@@ -92,16 +92,14 @@ struct PackedExpertsLayout: Sendable {
     /// Bytes of one expert of `layer` as the kernels address it: the layer's
     /// own stride when the layout gives one, else `expertStride`.
     func expertStride(layer: Int) -> UInt64 {
-        guard layers.indices.contains(layer), let own = layers[layer].expertStride else { return expertStride }
-        return own
+        layers[layer].expertStride ?? expertStride
     }
 
     /// Bytes of one expert of `layer` in its file. A per-layer stride is both
     /// the addressed and the stored stride (such layouts carry no
     /// `expertStorage`); otherwise `storedExpertStride`.
     func storedExpertStride(layer: Int) -> UInt64 {
-        guard layers.indices.contains(layer) else { return storedExpertStride }
-        return storedExpertStride(of: layers[layer])
+        storedExpertStride(of: layers[layer])
     }
 
     /// `storedExpertStride(layer:)` for a layer entry in hand.
@@ -161,10 +159,10 @@ enum PackedExpertsLayoutReader {
             }
             var layerStride: UInt64?
             if let value = layerObj["expertStride"] {
-                guard let number = value as? NSNumber, number.int64Value > 0 else {
+                guard let stride = Self.positiveInteger(value) else {
                     throw ModelError.indexCorrupt(detail: "layout.json: malformed layer expertStride")
                 }
-                layerStride = number.uint64Value
+                layerStride = stride
             }
             var layerFormat: String?
             if let value = layerObj["format"] {
@@ -248,6 +246,16 @@ enum PackedExpertsLayoutReader {
                                    storage: storage)
     }
 
+    /// A JSON number that is a positive whole integer (not a Boolean, not a
+    /// fraction), or nil.
+    static func positiveInteger(_ value: Any) -> UInt64? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number),
+              number.int64Value > 0 else { return nil }
+        return number.uint64Value
+    }
+
     /// A layout whose layers carry their own strides must give one to every
     /// routed layer, place each expert at `expert * stride` with `size ==
     /// stride`, keep the top-level `expertStride` as the largest of them, and
@@ -266,8 +274,8 @@ enum PackedExpertsLayoutReader {
                 throw invalid("missing on layer \(layer.layer)")
             }
             for expert in layer.experts {
-                guard expert.size == stride,
-                      expert.offset == UInt64(expert.expert) * stride else {
+                let (place, overflow) = UInt64(expert.expert).multipliedReportingOverflow(by: stride)
+                guard !overflow, expert.size == stride, expert.offset == place else {
                     throw invalid("layer \(layer.layer) expert \(expert.expert) is not at expert * stride")
                 }
                 for (role, tensor) in expert.subTensors {

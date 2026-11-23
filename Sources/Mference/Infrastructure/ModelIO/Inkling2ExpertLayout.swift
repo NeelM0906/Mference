@@ -112,8 +112,10 @@ public struct Inkling2ExpertLayout: Sendable, Equatable {
 
 extension Model {
     /// The routed-expert layout of an `inkling2Loop` install, validated
-    /// against the baseline (`Model.load` checks it once for this family).
+    /// against the baseline once at load; validated now for a model built
+    /// another way.
     public func inkling2ExpertLayout() throws -> Inkling2ExpertLayout {
-        try Inkling2ExpertLayout.validated(layout: packedExpertsLayout, config: config)
+        if let validatedInkling2Experts { return validatedInkling2Experts }
+        return try Inkling2ExpertLayout.validated(layout: packedExpertsLayout, config: config)
     }
 }
