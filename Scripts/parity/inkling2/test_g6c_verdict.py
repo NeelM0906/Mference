@@ -265,6 +265,42 @@ class RebasedTests(unittest.TestCase):
         self.assertEqual(gv.rebased_state(rb)[0], "fail")
 
 
+    def test_runner_without_next_logprob_fails_d(self):
+        w = World(self.tmp)
+        for pid in (World.MID, World.LONG):
+            path = os.path.join(w.cand, pid, "logprobs.json")
+            with open(path) as f:
+                rows = json.load(f)
+            for r in rows:
+                r.pop("next_logprob", None)
+            dump(rows, path)
+        rb = w.run()
+        self.assertEqual(rb["d"]["measure"], "top20")
+        self.assertFalse(rb["d"]["pass"])
+        self.assertTrue(any("runner gives next_logprob" in x for x in rb["d"]["incomplete_positions"]))
+
+    def test_truncated_fp32_fails_a(self):
+        w = World(self.tmp)
+        path = os.path.join(w.root, World.MID, "fp32", "tf", World.MID, "logprobs.json")
+        with open(path) as f:
+            rows = json.load(f)
+        dump(rows[:10], path)
+        rb = w.run()
+        self.assertIn("reference_positions", rb["a"]["prompts"][World.MID]["fails"])
+        self.assertIn("fp32_positions", rb["c2"]["prompts"][World.MID]["fails"])
+
+    def test_trace_without_shape_fails_without_crashing(self):
+        w = World(self.tmp)
+        for d in (os.path.join(w.root, World.SHORT, "fp32", "traces"), w.tdir):
+            path = os.path.join(d, World.SHORT, "trace.json")
+            with open(path) as f:
+                t = json.load(f)
+            del t["hidden_shape"]
+            dump(t, path)
+        rb = w.run()
+        self.assertIn("trace_shape", rb["a"]["prompts"][World.SHORT]["fails"])
+
+
 class VerdictTests(unittest.TestCase):
     def test_exit_codes(self):
         self.assertEqual(gv.verdict(False, "incomplete", ["a"], True)[1], 1)  # a failure wins

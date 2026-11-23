@@ -271,7 +271,8 @@ def expert_rule(root, pid, tdir):
     ta, tb = cg.load(ref, pid, "trace.json"), cg.load(tdir, pid, "trace.json")
     if not ta or not tb:
         return None
-    shape_ok = (ta.get("hidden_shape") == tb.get("hidden_shape") and len(ta["visits"]) == len(tb["visits"])
+    shape_ok = (ta.get("hidden_shape") is not None and ta.get("hidden_shape") == tb.get("hidden_shape")
+                and len(ta["visits"]) == len(tb["visits"])
                 and all(len(x["experts"]) == len(y["experts"]) for x, y in zip(ta["visits"], tb["visits"])))
     hb = os.path.join(tdir, pid, tb.get("hidden_file", ""))
     if not shape_ok or not os.path.isfile(hb) or os.path.getsize(hb) != 4 * math.prod(ta["hidden_shape"]):
@@ -324,6 +325,8 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
                            "max_dlp": l["max_abs_dlogprob_top1"]}
                     fails = {k: f"{fmt4(got[k])} > {b}" for k, b in EXACT_BOUNDS.items() if not within(got[k], b)}
                     fails.update(position_fail(l))
+                    if l["positions"] != meas_g[pid]["top1"][1]:
+                        fails["reference_positions"] = f"{l['positions']} compared, the tf goldens have {meas_g[pid]['top1'][1]}"
                     for k in worst:
                         worst[k] = max(worst[k], got[k]) if finite(got[k]) else float("nan")
                     m02 = l["top1_at_margin"]["0.2"]
@@ -363,8 +366,8 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
             else:
                 ge = metrics(le)
                 fails = dict(position_fail(l))
-                if le["missing_positions"]:
-                    fails["fp32_positions"] = f"{le['missing_positions']} tf CPU positions not in fp32"
+                if le["missing_positions"] or le["positions"] != meas_g[pid]["top1"][1]:
+                    fails["fp32_positions"] = f"fp32 has {le['positions']} of the {meas_g[pid]['top1'][1]} tf positions"
                 for k in got:
                     floor = addendum_bound(k, 0.0, meas_g[pid][k][1])[1]
                     bound = max(1.1 * ge[k][0], floor) if finite(ge[k][0]) else float("nan")
@@ -399,7 +402,12 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
                                         if not finite(v) or v > EXACT_BOUNDS[k]]
     # (d) quality: the true next token's log-probability, runner against both llama.cpp runs
     import next_token_quality as ntq
-    rows, used, missing = ntq.collect([cand, metal, cpu], goldens, ntq.DEFAULT)
+    try:
+        rows, used, missing = ntq.collect([cand, metal, cpu], goldens, ntq.DEFAULT)
+    except SystemExit as e:  # ids differ between the runs, or a free-running golden is missing
+        out["d"] = {"measure": None, "positions": 0, "prompts": [], "missing": [f"next_token_quality: {e}"],
+                    "pairs": {}, "per_prompt": {}, "incomplete_positions": [], "pass": False}
+        return out
     measure = "exact" if rows["exact"] else "top20"
     rs = rows[measure]
     d = {"measure": measure, "positions": len(rs), "prompts": used, "missing": missing, "pairs": {},
@@ -408,9 +416,16 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
         n0 = ntq.original_prompt_length(goldens, pid)
         natural = sum(1 for r in (cg.load(metal, pid, "logprobs.json") or []) if r["pos"] + 1 < n0)
         got = sum(1 for r in rs if r[0] == pid)
-        d["per_prompt"][pid] = {"natural": natural, "judged": got}
+        # the runner must give the true next token's full-vocabulary log-probability at every
+        # natural position; the top-20 fallback is for a reference run that lacks it, never the runner
+        cand_rows = {r["pos"]: r for r in (cg.load(cand, pid, "logprobs.json") or [])}
+        cand_exact = sum(1 for r in (cg.load(metal, pid, "logprobs.json") or []) if r["pos"] + 1 < n0
+                         and cand_rows.get(r["pos"], {}).get("next_logprob") is not None)
+        d["per_prompt"][pid] = {"natural": natural, "judged": got, "runner_exact": cand_exact}
         if measure == "exact" and got != natural:
             d["incomplete_positions"].append(f"{pid}: {got} of {natural} natural positions")
+        if cand_exact != natural:
+            d["incomplete_positions"].append(f"{pid}: the runner gives next_logprob at {cand_exact} of {natural}")
     if rs:
         rng = random.Random(20261123)
         mc = [r[3] - r[4] for r in rs]  # llama.cpp against itself on the same positions: the yardstick
