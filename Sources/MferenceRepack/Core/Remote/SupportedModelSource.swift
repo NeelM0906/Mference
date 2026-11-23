@@ -15,6 +15,10 @@ public struct SupportedModelSource: Sendable, Equatable {
         /// affine group-64 in flight (Workstream 2). Pinning and SHA discipline
         /// are identical — only the byte transform differs.
         case originalRepoQuantize
+        /// A GGUF quant, pinned by `ggufPin` (commit, size and SHA-256 of the
+        /// file). Nothing is quantized or converted at install: every tensor
+        /// keeps its GGUF bytes (`Inkling2GGUFPlanner`).
+        case gguf
     }
 
     /// CLI selector value (`--model <name>`).
@@ -32,6 +36,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     public let approximateDownloadBytes: UInt64
     public let installedBytes: UInt64
     public let reserveBytes: UInt64
+    /// The file pin of a `.gguf` source; nil for safetensors sources.
+    public let ggufPin: GGUFSourcePin?
 
     public init(name: String,
                 displayName: String,
@@ -42,7 +48,8 @@ public struct SupportedModelSource: Sendable, Equatable {
                 approximateDownloadBytes: UInt64,
                 installedBytes: UInt64,
                 reserveBytes: UInt64,
-                kind: Kind = .preQuantized) {
+                kind: Kind = .preQuantized,
+                ggufPin: GGUFSourcePin? = nil) {
         self.name = name
         self.displayName = displayName
         self.repoID = repoID
@@ -53,6 +60,7 @@ public struct SupportedModelSource: Sendable, Equatable {
         self.approximateDownloadBytes = approximateDownloadBytes
         self.installedBytes = installedBytes
         self.reserveBytes = reserveBytes
+        self.ggufPin = ggufPin
     }
 
     /// Both pins recorded; unpinned sources install trust-on-first-use.
@@ -66,7 +74,7 @@ public struct SupportedModelSource: Sendable, Equatable {
                                dryRunSpaceCheck: Bool = false,
                                sidecarPolicy: SidecarPolicy = .default)
         -> RemoteStreamingRepackOptions {
-        let options: RemoteStreamingRepackOptions
+        var options: RemoteStreamingRepackOptions
         if let baseURL {
             options = RemoteStreamingRepackOptions(
                 repoID: repoID,
@@ -93,6 +101,7 @@ public struct SupportedModelSource: Sendable, Equatable {
             dryRunSpaceCheck: dryRunSpaceCheck,
             sidecarPolicy: sidecarPolicy)
         }
+        options.ggufPin = ggufPin
         return options
     }
 
@@ -219,11 +228,45 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 1_430_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// Thinking Machines Inkling 2 Mini as Unsloth's UD-Q4_K_XL GGUF, the
+    /// quant Mference ships: the vendor's own NVFP4 experts in layers 0-19,
+    /// Q8_0 for the other experts and the dense weights, F32 for the router,
+    /// norms and loop control. Every tensor is copied unchanged
+    /// (`Inkling2GGUFPlanner`); nothing is re-quantized. One file, pinned by
+    /// commit, size, SHA-256 and the Hub's Xet hash (recorded by the Inkling
+    /// program's reference team, 2026-11-23). `sourceIndexSHA256` is the pin
+    /// fingerprint (`GGUFSourcePin.fingerprint`), not an index hash.
+    ///
+    /// Installed bytes: 15,829,303,296 of expert blobs (per-layer strides)
+    /// plus about 1.82 GB resident, tokenizer sidecars and metadata.
+    /// `ManifestReader.familiesWithoutRunner` refuses the install at load
+    /// until `Inkling2ForwardRunner` lands.
+    public static let inkling2Mini = SupportedModelSource(
+        name: "inkling2mini",
+        displayName: "Inkling 2 Mini, Unsloth UD-Q4_K_XL GGUF",
+        repoID: "unsloth/Inkling-2-Mini-GGUF",
+        revision: "45fd08764f2b0bf16b03a5483a80e5c7aaec8772",
+        sourceIndexSHA256:
+            "56a8321bd768637d7c9e60f339257c0f3ef6ab9905b1e0c0d053074dd843ceed",
+        modelID: "inkling-2-mini-ud-q4_k_xl",
+        approximateDownloadBytes: 17_629_760_736,
+        installedBytes: 17_700_000_000,
+        reserveBytes: 2_147_483_648,
+        kind: .gguf,
+        ggufPin: GGUFSourcePin(
+            commit: "45fd08764f2b0bf16b03a5483a80e5c7aaec8772",
+            shards: [
+                .init(path: "Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf_file",
+                      sha256: "e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3",
+                      size: 17_629_760_736,
+                      xetHash: "e82f48cc28156bb17cb0df929238c5a76700400714ef6b84e9813f2d333cee90"),
+            ]))
+
     /// Default source when no `--model` selector is given.
     public static let `default` = qwen36
 
     public static let all: [SupportedModelSource] = [
-        qwen36, qwen36Original, qwen38, maple, minicpm5, minicpm5MLX,
+        qwen36, qwen36Original, qwen38, maple, minicpm5, minicpm5MLX, inkling2Mini,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

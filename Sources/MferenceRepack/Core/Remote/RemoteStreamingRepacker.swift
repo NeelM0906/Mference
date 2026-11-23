@@ -19,6 +19,12 @@ public struct RemoteStreamingRepackOptions: Sendable {
     /// Optional tensor groups the install carries (spec W2.4). Only families
     /// that actually ship such a group consult it.
     public let sidecarPolicy: SidecarPolicy
+    /// A pinned GGUF upload. When set, the install takes the GGUF path
+    /// (`runPreparedGGUF`) instead of the safetensors path.
+    public var ggufPin: GGUFSourcePin? = nil
+    /// A local copy of the pinned GGUF file to read instead of the Hub. It is
+    /// checked against the pin (size and SHA-256) before anything is planned.
+    public var localGGUFPath: String? = nil
 
     public init(repoID: String,
                 revision: String,
@@ -195,6 +201,9 @@ public final class RemoteStreamingRepacker {
     private func runPrepared(paths: RemoteInstallPaths,
                              progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> RemoteStreamingRepackResult {
+        if let pin = options.ggufPin {
+            return try await runPreparedGGUF(paths: paths, pin: pin, progress: progress)
+        }
         try Task.checkCancellation()
         let saved = options.resume
             ? try RemoteInstallCheckpoint.load(from: paths.checkpointFile)
@@ -425,6 +434,9 @@ public final class RemoteStreamingRepacker {
     }
 
     private func validateOptions() throws {
+        guard options.localGGUFPath == nil || options.ggufPin != nil else {
+            throw RepackError.configurationInvalid(detail: "a local GGUF source needs a pinned GGUF model")
+        }
         guard options.rangeChunkBytes > 0,
               options.rangeChunkBytes <= RemoteChunkPolicy.maxBytes else {
             throw RepackError.configurationInvalid(detail: "bad range chunk bytes \(options.rangeChunkBytes)")

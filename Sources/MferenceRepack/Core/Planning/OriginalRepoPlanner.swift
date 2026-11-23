@@ -656,6 +656,10 @@ enum OriginalRepoPlanner {
         case .fp32: 3
         case .i64: 4
         case .i32: 5
+        // Only Inkling2GGUFPlanner creates GGUF block tensors; reaching here
+        // is a planner bug, reported rather than crashed on.
+        case .ggmlBlocks:
+            throw RepackError.dtypeMismatch(name: "", detail: "GGUF block bytes reached a safetensors planner")
         }
     }
 
