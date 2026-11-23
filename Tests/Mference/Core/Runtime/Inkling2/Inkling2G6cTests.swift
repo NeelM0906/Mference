@@ -24,7 +24,6 @@ struct Inkling2LogProbRow {
     func logprob(_ id: Int) -> Double { logits[id] - logSumExp }
 
     init(halves: UnsafePointer<Float16>, count n: Int, softcap: Double, k: Int = 20) {
-        precondition(n > k && k > 0)
         var floats = [Float](repeating: 0, count: n)
         floats.withUnsafeMutableBytes { dst in
             var source = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: halves), height: 1,
@@ -32,9 +31,15 @@ struct Inkling2LogProbRow {
             var target = vImage_Buffer(data: dst.baseAddress, height: 1, width: vImagePixelCount(n), rowBytes: n * 4)
             _ = vImageConvert_Planar16FtoPlanarF(&source, &target, vImage_Flags(kvImageNoFlags))
         }
+        self.init(floats: floats, count: n, softcap: softcap, k: k)
+    }
+
+    /// The same from F32 logits (the first `count` of `floats`).
+    init(floats: [Float], count n: Int, softcap: Double, k: Int = 20) {
+        precondition(n > k && k > 0 && floats.count >= n)
         var x = [Double](repeating: 0, count: n)
         vDSP_vspdp(floats, 1, &x, 1, vDSP_Length(n))
-        // A sum of finite FP16 values is finite: one check before the cap
+        // A sum of finite FP16 or F32 logits is finite: one check before the cap
         // (which would turn an infinity into the cap).
         var rawSum = 0.0
         vDSP_sveD(x, 1, &rawSum, vDSP_Length(n))
@@ -318,7 +323,10 @@ struct Inkling2G6cTests {
         let context = try MetalContext()
         let device = context.device
         // `.pread`: the Model never opens an expert file; the runner's store does.
-        let model = try Model.load(directoryURL: installURL, device: device, expecting: .inkling2Mini)
+        // The CLI and server default: the receipt's size checks, not a SHA-256
+        // pass over 15.8 GB of layer files through the file cache.
+        let model = try Model.load(directoryURL: installURL, device: device, expecting: .inkling2Mini,
+                                   integrityPolicy: .trustedReceiptWhenValid)
         let c = model.config
         let d = c.hiddenSize, topK = c.topKExperts
         let vocab = c.unpaddedVocabSize, vocabRows = c.vocabSize

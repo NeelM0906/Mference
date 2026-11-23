@@ -233,4 +233,33 @@ struct Inkling2ReferenceModelTests {
         }
         #expect(worst > 0 && worst < 0.05, "worst per-visit change \(worst)")
     }
+
+    /// `.metalRunner` with every FP16 site switched off is `.fp32` bit for
+    /// bit, with all of them (the default) it rounds, and each site alone
+    /// changes the result; the trace's router margins are the gap between
+    /// the chosen 8th and the best expert left out.
+    @Test func metalRunnerSitesSwitchOneByOne() throws {
+        let tokens = Inkling2ToyCheckpoint.tokens(count: 4)
+        func run(_ precision: Inkling2ReferenceModel.Precision,
+                 _ sites: Inkling2ReferenceModel.MetalRunnerSites = .all) throws -> Inkling2ReferenceTrace {
+            let model = try toyModel()
+            model.captureTrace = true
+            model.precision = precision
+            model.metalRunnerSites = sites
+            _ = model.forward(tokens: tokens, logits: .none)
+            return try #require(model.lastTrace)
+        }
+        let exact = try run(.fp32)
+        #expect(try run(.metalRunner, []).visitOutputs == exact.visitOutputs)
+        #expect(try run(.metalRunner).visitOutputs != exact.visitOutputs)
+        let sites: [Inkling2ReferenceModel.MetalRunnerSites] = [.projectionInputs, .bf16Inputs, .queries, .cache,
+                                                                .attentionOutput, .expertInput, .expertActivation]
+        for site in sites {
+            #expect(try run(.metalRunner, site).visitOutputs != exact.visitOutputs, "site \(site.rawValue)")
+        }
+        let c = Inkling2ReferenceConfig.toy
+        let margins = exact.routeMargins.flatMap { $0 }
+        #expect(margins.count == c.numVisits * tokens.count && margins.allSatisfy { $0 >= 0 })
+        #expect(margins.contains { $0 > 0 })
+    }
 }

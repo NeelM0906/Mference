@@ -45,6 +45,30 @@ public final class Inkling2ReferenceModel {
     /// products with dequantized weights and unrounded inputs.
     public enum Precision: Sendable { case fp32, metalRunner, llamaCPU }
     public var precision: Precision = .fp32
+    /// The FP16 rounding sites of `.metalRunner`, so an experiment can put
+    /// one back to FP32 (all by default; the other precisions ignore it).
+    public struct MetalRunnerSites: OptionSet, Sendable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+        /// The normalized attention inputs of the Q8_0 projections (Q, K, V,
+        /// relative state, output gate).
+        public static let projectionInputs = MetalRunnerSites(rawValue: 1 << 0)
+        /// The inputs of the BF16 products (sink, dynamic convolution taps).
+        public static let bf16Inputs = MetalRunnerSites(rawValue: 1 << 1)
+        /// The clipped queries.
+        public static let queries = MetalRunnerSites(rawValue: 1 << 2)
+        /// The cached keys and values.
+        public static let cache = MetalRunnerSites(rawValue: 1 << 3)
+        /// The gated attention output (the output projection's input).
+        public static let attentionOutput = MetalRunnerSites(rawValue: 1 << 4)
+        /// The experts' input (the normalized MoE input; the router reads it in FP32).
+        public static let expertInput = MetalRunnerSites(rawValue: 1 << 5)
+        /// The experts' activation (the down projection's input).
+        public static let expertActivation = MetalRunnerSites(rawValue: 1 << 6)
+        public static let all: MetalRunnerSites = [.projectionInputs, .bf16Inputs, .queries, .cache,
+                                                   .attentionOutput, .expertInput, .expertActivation]
+    }
+    public var metalRunnerSites: MetalRunnerSites = .all
     /// The trace of the most recent `forward` with `captureTrace` set.
     public private(set) var lastTrace: Inkling2ReferenceTrace?
     /// Expert choices for the next `forward`, `[visit order][token]`, as
@@ -132,9 +156,9 @@ public final class Inkling2ReferenceModel {
 
         func run(_ visit: Inkling2ReferenceVisit, messages: [[[Float]]]?) {
             var routes: [Inkling2Route] = [], ownRoutes: [Inkling2Route] = []
-            var shortfalls: [Float] = []
+            var shortfalls: [Float] = [], margins: [Float] = []
             for t in 0..<n {
-                let (out, route, shortfall, own) = layerStep(visit: visit, token: t, chunkStart: start,
+                let (out, route, shortfall, own, margin) = layerStep(visit: visit, token: t, chunkStart: start,
                                                              cur: cur[t], blocks: &blocks[t],
                                                              messages: messages?[t],
                                                              forcedExperts: forced?[visit.order][t])
@@ -142,11 +166,13 @@ public final class Inkling2ReferenceModel {
                 routes.append(route)
                 ownRoutes.append(own)
                 shortfalls.append(shortfall)
+                margins.append(margin)
             }
             trace?.visitOutputs.append(cur)
             trace?.routes.append(routes)
             trace?.ownRoutes.append(ownRoutes)
             trace?.routeShortfalls.append(shortfalls)
+            trace?.routeMargins.append(margins)
             if let forcedOutputs { cur = forcedOutputs[visit.order] }
         }
 
@@ -226,7 +252,7 @@ public final class Inkling2ReferenceModel {
     private func layerStep(visit: Inkling2ReferenceVisit, token t: Int, chunkStart: Int,
                            cur: [Float], blocks: inout [[Float]],
                            messages: [[Float]]?, forcedExperts: [Int]?)
-        -> ([Float], Inkling2Route, Float, Inkling2Route) {
+        -> ([Float], Inkling2Route, Float, Inkling2Route, Float) {
         typealias Op = Inkling2ReferenceOps
         let c = config
         let il = visit.layer
@@ -237,12 +263,13 @@ public final class Inkling2ReferenceModel {
         var slot = state.slots[visit.cacheSlot]
         let loop = messages == nil ? nil : weights.loopLayers[il - c.coreStart]
         let precision = self.precision
+        let sites = metalRunnerSites
         func toHalf(_ v: [Float]) -> [Float] { v.map { Float(Float16($0)) } }
-        /// The input of a Q8_0 or NVFP4 product.
-        func q8In(_ v: [Float]) -> [Float] {
+        /// The input of a Q8_0 or NVFP4 product, rounded at `site` under `.metalRunner`.
+        func q8In(_ v: [Float], _ site: MetalRunnerSites) -> [Float] {
             switch precision {
             case .fp32: return v
-            case .metalRunner: return toHalf(v)
+            case .metalRunner: return sites.contains(site) ? toHalf(v) : v
             case .llamaCPU: return Op.q8_0ActivationRound(v)
             }
         }
@@ -250,17 +277,26 @@ public final class Inkling2ReferenceModel {
         func bf16In(_ v: [Float]) -> [Float] {
             switch precision {
             case .fp32: return v
-            case .metalRunner: return toHalf(v)
+            case .metalRunner: return sites.contains(.bf16Inputs) ? toHalf(v) : v
             case .llamaCPU: return v.map(Op.bf16Round)
             }
         }
         /// A cached key or value row, and a query.
-        func cached(_ v: [Float]) -> [Float] { precision == .fp32 ? v : toHalf(v) }
-        func queryIn(_ v: [Float]) -> [Float] { precision == .metalRunner ? toHalf(v) : v }
+        func cached(_ v: [Float]) -> [Float] {
+            switch precision {
+            case .fp32: return v
+            case .metalRunner: return sites.contains(.cache) ? toHalf(v) : v
+            case .llamaCPU: return toHalf(v)
+            }
+        }
+        func queryIn(_ v: [Float]) -> [Float] {
+            precision == .metalRunner && sites.contains(.queries) ? toHalf(v) : v
+        }
         let roundActivation: (([Float]) -> [Float])? = {
             switch precision {
             case .fp32: return nil
-            case .metalRunner: return { $0.map { Float(Float16($0)) } }
+            case .metalRunner:
+                return sites.contains(.expertActivation) ? { $0.map { Float(Float16($0)) } } : nil
             case .llamaCPU: return { Op.q8_0ActivationRound($0) }
             }
         }()
@@ -288,7 +324,8 @@ public final class Inkling2ReferenceModel {
                       Op.rmsNorm(inputs[1], weight: lw.kInputNorm!, eps: c.rmsEps),
                       Op.rmsNorm(inputs[2], weight: lw.vInputNorm!, eps: c.rmsEps)]
         }
-        let (xq, xk, xv) = (q8In(inputs[0]), q8In(inputs[1]), q8In(inputs[2]))
+        let (xq, xk, xv) = (q8In(inputs[0], .projectionInputs), q8In(inputs[1], .projectionInputs),
+                            q8In(inputs[2], .projectionInputs))
         let (bq, bk, bv) = (bf16In(inputs[0]), bf16In(inputs[1]), bf16In(inputs[2]))
 
         // Projections. K and V pass through their short convolutions (with
@@ -354,7 +391,7 @@ public final class Inkling2ReferenceModel {
         }
         let gate = lw.outputGate.apply(xq).map(Op.sigmoid)
         let gated = (0..<attn.count).map { attn[$0] * gate[$0] }
-        let projected = lw.wo.apply(q8In(gated))
+        let projected = lw.wo.apply(q8In(gated, .attentionOutput))
         let attnOut = Op.shortConv(projected, tail: slot.tails[2], weights: lw.attnPostConv)
         slot.tails[2] = Op.advance(tail: slot.tails[2], with: projected)
 
@@ -379,6 +416,7 @@ public final class Inkling2ReferenceModel {
         }
         m = Op.rmsNorm(m, weight: lw.ffnNorm, eps: c.rmsEps)
         let own = Op.route(m, router: lw.router, bias: lw.routerBias, topK: c.topK, routeScale: c.routeScale)
+        let margin = Op.selectionMargin(m, router: lw.router, bias: lw.routerBias, topK: c.topK)
         var route = own
         let unbiased = Op.route(m, router: lw.router, bias: [Float](repeating: 0, count: c.numExperts),
                                 topK: c.topK, routeScale: c.routeScale)
@@ -391,7 +429,7 @@ public final class Inkling2ReferenceModel {
                                           routeScale: c.routeScale)
         }
         let ff = c.expertFF
-        let moe = Op.moe(q8In(m), route: route, gateUp: lw.expertGateUp, down: lw.expertDown,
+        let moe = Op.moe(q8In(m, .expertInput), route: route, gateUp: lw.expertGateUp, down: lw.expertDown,
                          gateSoftcap: c.gateSoftcap, upSoftcap: c.upSoftcap,
                          roundActivation: roundActivation) { gu in
             for i in 0..<ff {
@@ -404,7 +442,7 @@ public final class Inkling2ReferenceModel {
         sum = Op.add(ffnInp, ffnOut)
 
         state.slots[visit.cacheSlot] = slot
-        return (sum, route, shortfall, own)
+        return (sum, route, shortfall, own, margin)
     }
 }
 
@@ -450,6 +488,9 @@ public struct Inkling2ReferenceTrace: Sendable {
     /// `[visit order][token]`: each forced route's shortfall below the
     /// reference's own top-k cutoff (0 without `forcedRoutes`).
     public var routeShortfalls: [[Float]] = []
+    /// `[visit order][token]`: the reference's own router's gap between its
+    /// k-th and (k+1)-th selection scores, how far its top-k is from a tie.
+    public var routeMargins: [[Float]] = []
     /// `[token][hidden]`: the normalized state the head reads.
     public var finalHidden: [[Float]] = []
 

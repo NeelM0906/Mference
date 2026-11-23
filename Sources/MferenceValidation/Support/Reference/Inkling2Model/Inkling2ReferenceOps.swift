@@ -257,6 +257,15 @@ public enum Inkling2ReferenceOps {
         return Inkling2Route(experts: Array(chosen), weights: weights)
     }
 
+    /// The gap between the `topK`-th and the next selection score (sigmoid
+    /// score plus bias): how far the router's top-k is from a tie.
+    public static func selectionMargin(_ x: [Float], router: any Inkling2ReferenceMatrix,
+                                       bias: [Float], topK: Int) -> Float {
+        let scores = router.apply(x).map(sigmoid)
+        let selection = (0..<scores.count).map { scores[$0] + bias[$0] }.sorted(by: >)
+        return selection[topK - 1] - selection[topK]
+    }
+
     /// `route` with the experts given (another implementation's choice, in
     /// its order) instead of the top-k: the weights are those experts' own
     /// scores, normalized, times `routeScale`. `shortfall` is how far the
