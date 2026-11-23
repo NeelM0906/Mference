@@ -304,7 +304,7 @@ public final class Inkling2AttentionState {
         header.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, region.base, Self.headerBytes) }
         guard header[0] == Self.magic, header[1] == Self.version, header[2] == UInt64(snapshot.position),
               header[3] == UInt64(configuration.window), header[4] == (snapshot.includesGlobalRows ? 1 : 0),
-              header[6] == UInt64(snapshot.byteCount) else {
+              header[5] == snapshot.sequence, header[6] == UInt64(snapshot.byteCount) else {
             throw PrefixSnapshotError.unsupported("region does not hold this snapshot")
         }
         let target = snapshot.position
@@ -330,7 +330,9 @@ public final class Inkling2AttentionState {
                 }
             }
         }
-        noteRewind(to: target)
+        // Global rows restored from a snapshot come from another timeline as
+        // far as later light snapshots know: every global row was rewritten.
+        noteRewind(to: snapshot.includesGlobalRows ? 0 : target)
         position = target
     }
 }

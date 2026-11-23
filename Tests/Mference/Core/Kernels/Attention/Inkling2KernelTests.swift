@@ -135,6 +135,8 @@ enum Inkling2TestSupport {
         let c = Self.cases[index]
         let ctx = try MetalContext()
         let attention = try Inkling2PrefillAttention(library: Inkling2KernelLibrary(context: ctx))
+        // GPUs without tensor support (CI runners) build only the simdgroup variants.
+        if !attention.supports(variant) { return }
         let hq = 24, hkv = 8, d = 128, r = 16
         var rng = SeedTree(0x3b00 + UInt64(index)).key("ink2-attn")
         let positions = c.start + c.rows

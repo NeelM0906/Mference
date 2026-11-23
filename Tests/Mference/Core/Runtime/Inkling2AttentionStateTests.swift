@@ -157,6 +157,40 @@ import Metal
         #expect(state.canRestore(atTen))
     }
 
+    /// A full snapshot restores global rows from another timeline: it must
+    /// invalidate light snapshots taken since, at any position.
+    @Test func fullRestoreInvalidatesLaterLightSnapshots() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let state = try Inkling2AttentionState(device: device, configuration: Self.config)
+        try Self.run(state, tokens: 30, salt: 1)                      // conversation X
+        let fullRegion = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: true))
+        let full = try state.takeSnapshot(into: fullRegion, includeGlobalRows: true)
+        state.reset()
+        try Self.run(state, tokens: 20, salt: 2)                      // conversation Y
+        let lightRegion = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: false))
+        let light = try state.takeSnapshot(into: lightRegion, includeGlobalRows: false)
+        #expect(state.canRestore(light))
+        try state.restoreSnapshot(full, from: fullRegion)             // back to X at 30
+        #expect(!state.canRestore(light))
+        #expect(throws: PrefixSnapshotError.self) { try state.restoreSnapshot(light, from: lightRegion) }
+        #expect(state.position == 30)
+    }
+
+    /// A snapshot record paired with a region holding a different snapshot is refused.
+    @Test func restoreRefusesARegionHoldingAnotherSnapshot() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let state = try Inkling2AttentionState(device: device, configuration: Self.config)
+        try Self.run(state, tokens: 12, salt: 3)
+        let region = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: true))
+        let first = try state.takeSnapshot(into: region, includeGlobalRows: true)
+        state.reset()
+        try Self.run(state, tokens: 12, salt: 4)
+        let second = try state.takeSnapshot(into: region, includeGlobalRows: true)   // overwrites the region
+        #expect(first.position == second.position && first.byteCount == second.byteCount)
+        #expect(throws: PrefixSnapshotError.self) { try state.restoreSnapshot(first, from: region) }
+        try state.restoreSnapshot(second, from: region)
+    }
+
     @Test func memoryEstimateAtProductionShape() {
         let config = Inkling2AttentionState.Configuration(maxContext: 32_768, maxChunkTokens: 2048)
         // 40 rings x (K, V) x 3072 slots x 2 KiB + 48 x 78 KiB of tails + 8 x (K, V) x 32K x 2 KiB.

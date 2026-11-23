@@ -87,6 +87,10 @@ public final class Inkling2QKVEpilogue {
     public func encode(commandBuffer: MTLCommandBuffer, _ a: Arguments) {
         precondition(a.rows > 0)
         precondition((a.columns.keyTaps == nil) == (a.columns.valueTaps == nil))
+        // float4 reads of the projection rows and half4 stores.
+        precondition(a.projectionStride % 4 == 0 && a.projections.offset % 16 == 0)
+        precondition([a.columns.queries, a.columns.keys, a.columns.values].allSatisfy { $0 % 4 == 0 })
+        precondition(a.queryStride % 4 == 0 && a.cache.slotStride % 4 == 0)
         let dynamic = a.columns.keyTaps != nil
         var params = Inkling2QKVParams(
             tokens: UInt32(a.rows), startPosition: UInt32(a.startPosition),
@@ -301,6 +305,7 @@ public final class Inkling2DecodeAttention {
             precondition(a.cache.ringCapacity == 0 || a.cache.ringCapacity >= window)
         }
         precondition(a.partials.buffer.length - a.partials.offset >= Self.partialsLength(keys: count))
+        precondition(a.queries.offset % 8 == 0 && a.cache.slotStride % 4 == 0)   // half4 loads
         let blocks = Self.blocks(keys: count)
         var params = Inkling2DecodeParams(
             position: UInt32(a.position), keyBegin: UInt32(begin), keyCount: UInt32(count),

@@ -141,8 +141,15 @@ public final class Inkling2PrefillAttention {
             precondition(a.cache.ringCapacity == 0 || a.cache.ringCapacity >= window - 1 + a.rows)
         }
         let variant = forced ?? self.variant
+        guard let pipeline = pipelines[variant] else {
+            preconditionFailure("variant \(variant) did not build on this GPU")
+        }
+        // float4 and half4 accesses.
+        precondition(a.queryStride % 4 == 0 && a.queries.offset % 8 == 0)
+        precondition(a.relativeStride % 4 == 0 && a.relative.offset % 16 == 0)
+        precondition(a.cache.slotStride % 4 == 0 && a.outputStride % 2 == 0)
         let encoder = commandBuffer.makeComputeCommandEncoder()!
-        encoder.setComputePipelineState(pipelines[variant]!)
+        encoder.setComputePipelineState(pipeline)
         var params = Self.params(a)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2AttnParams>.stride, index: 0)
         encoder.setBuffer(a.queries.buffer, offset: a.queries.offset, index: 1)

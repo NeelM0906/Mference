@@ -26,7 +26,8 @@ import MferenceValidationSupport
         let tails = try Inkling2ConvTail(library: library)
         var rng = SeedTree(0x3c00 + UInt64(rows) + (dynamic ? 100 : 0)).key("ink2-qkv")
         let (cols, stride) = Self.columns(dynamic: dynamic)
-        let y = S.random(rows * stride, &rng, -3, 3)
+        // Wide enough that most key heads exceed the clip after the convolution.
+        let y = S.random(rows * stride, &rng, -8, 8)
         let qScale = S.random(24 * 128, &rng, 0.5, 4)
         let relScale = S.random(24 * 16, &rng, 0.5, 6)
         let kConv = S.random(1024 * 4, &rng, -0.6, 0.6)
@@ -79,6 +80,12 @@ import MferenceValidationSupport
         }
         let kRef = Inkling2NormRef.l2Clip(kConvRef.output, rows: rows, heads: 8, width: 128, scale: nil,
                                           threshold: Inkling2RefShape.qkClip)
+        var clipped = 0
+        for v in 0..<(rows * 8) {
+            let norm = (0..<128).reduce(Float(0)) { $0 + kConvRef.output[v * 128 + $1] * kConvRef.output[v * 128 + $1] }
+            if norm.squareRoot() > Inkling2RefShape.qkClip { clipped += 1 }
+        }
+        #expect(clipped > rows * 4, "the key clip must be exercised")
         let vRef = Inkling2NormRef.unweightedRMS(vConvRef.output, rows: rows, heads: 8, width: 128)
 
         #expect(RelError.compute(actual: S.readHalves(qOut, count: rows * 3072), reference: qRef) < 2e-3)

@@ -25,6 +25,8 @@ import MferenceValidationSupport
             configuration: .init(maxContext: 64, maxChunkTokens: 9, window: window, globalGrowthStep: 16))
         let global = Inkling2VisitPlan.bySlot[slot].isGlobal
         #expect(state.mask(slot: slot) == (global ? .globalDefault : .window(window)))
+        // A small log floor so tau moves off 1 inside this short sequence.
+        let mask: Inkling2AttentionMask = global ? .global(logFloor: 8, logAlpha: 0.3) : .window(window)
 
         var rng = SeedTree(0x4a00 + UInt64(slot)).key("ink2-pipeline")
         let chunks = [7, 9, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1]
@@ -73,13 +75,13 @@ import MferenceValidationSupport
                         queries: .init(qBuffer), cache: kv, relative: .init(relBuffer), table: .init(tableBuffer),
                         sink: .init(yBuffer, offset: sinkColumn * 4), gate: .init(yBuffer, offset: gateColumn * 4),
                         output: .init(outBuffer), partials: .init(partials), position: position,
-                        mask: state.mask(slot: slot)))
+                        mask: mask))
                 } else {
                     prefill.encode(commandBuffer: cb, .init(
                         queries: .init(qBuffer), cache: kv, relative: .init(relBuffer), table: .init(tableBuffer),
                         sink: .init(yBuffer, offset: sinkColumn * 4), sinkStride: stride,
                         gate: .init(yBuffer, offset: gateColumn * 4), gateStride: stride,
-                        output: .init(outBuffer), rows: rows, startPosition: position, mask: state.mask(slot: slot)))
+                        output: .init(outBuffer), rows: rows, startPosition: position, mask: mask))
                 }
             }
             got += S.readHalves(outBuffer, count: rows * 3072)
@@ -112,7 +114,7 @@ import MferenceValidationSupport
         var reference = Inkling2AttentionRef.attend(
             q: q, k: k, v: v, rel: rel, table: table, sink: slice(sinkColumn, 24),
             queryCount: total, startPosition: 0, window: global ? nil : window,
-            logScale: global ? .init() : nil)
+            logScale: global ? .init(floor: 8, alpha: 0.3) : nil)
         reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: slice(gateColumn, 3072))
         #expect(RelError.compute(actual: got, reference: reference) < Tolerance.fp16ChainedReduction)
         #expect(state.position == total)
