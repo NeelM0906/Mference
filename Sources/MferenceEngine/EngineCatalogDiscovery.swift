@@ -27,6 +27,7 @@ public enum EngineCatalogDiscovery {
         case .qwen36: "qwen36"
         case .minicpm5: "minicpm5"
         case .maple: "maple"
+        case .inkling2Mini: "inkling2mini"
         case .quick, .deep: nil
         }
     }
@@ -133,11 +134,17 @@ public enum EngineCatalogDiscovery {
     ///
     /// `explicitModel` (a `--model` passed with `--library`) is considered
     /// first, ahead of every root.
+    ///
+    /// A native product model with a memory floor
+    /// (`EngineProductSlot.minimumPhysicalMemory`) is skipped, in either
+    /// scope, on a Mac with less `physicalMemory`, with the slot's reason
+    /// under its identifier.
     public static func discover(roots: [URL],
                                 ggufDirectories: [URL],
                                 scope: EngineCatalogScope = .product,
                                 explicitModel: URL? = nil,
-                                fileSystem: FileSystem = .live) -> EngineCatalog {
+                                fileSystem: FileSystem = .live,
+                                physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> EngineCatalog {
         var models: [EngineModelDescriptor] = []
         var skipped: [EngineCatalogSkip] = []
         let explicitIsGGUF = explicitModel?.pathExtension.lowercased() == "gguf"
@@ -177,6 +184,19 @@ public enum EngineCatalogDiscovery {
                     identifier: EngineNativeModelID.modelID(for: family, checkpointID: checkpoint)))
             }
         }
+
+        // Below a slot's memory floor, that is the reason a request gets, so
+        // it goes ahead of any other skip under the same identifier.
+        var floorSkips: [EngineCatalogSkip] = []
+        for slot in EngineProductSlot.allCases where slot.engine == .mference {
+            guard let reason = slot.memoryFloorReason(physicalMemory: physicalMemory) else { continue }
+            for install in found where install.identifier == slot.modelID {
+                floorSkips.append(EngineCatalogSkip(location: install.directory, reason: reason,
+                                                    modelID: slot.modelID))
+            }
+            found.removeAll { $0.identifier == slot.modelID }
+        }
+        skipped = floorSkips + skipped
 
         var winners: [String: NativeInstall] = [:]
         for slot in EngineProductSlot.allCases where slot.engine == .mference {
@@ -227,9 +247,13 @@ public enum EngineCatalogDiscovery {
                 files.append((file.standardizedFileURL, rank))
             }
         }
-        // Product identifiers are reserved even before their file is seen, so
-        // an unrelated GGUF named like a product model can never displace it.
-        var usedIDs = Set(models.map(\.id)).union(productGGUFFiles.values.map(\.modelID))
+        // Product identifiers, native ones included, are reserved even before
+        // their file or install is seen (or when it is skipped), so an
+        // unrelated GGUF named like a product model can never take its
+        // identifier: `Inkling-2-Mini-UD-Q4_K_XL.gguf` is the native slot's
+        // source file, which llama.cpp does not run.
+        let productIDs = Set(EngineProductSlot.allCases.map(\.modelID))
+        var usedIDs = Set(models.map(\.id)).union(productIDs)
         var ggufWinners: [EngineProductSlot: URL] = [:]
         for (file, _) in files {
             let name = file.lastPathComponent
@@ -239,7 +263,7 @@ public enum EngineCatalogDiscovery {
                 // Keep the identifier, so a request for it gets this reason
                 // rather than "unknown model", unless it would shadow a
                 // product model's own identifier.
-                let reserved = productGGUFFiles.values.contains { $0.modelID == id }
+                let reserved = productIDs.contains(id)
                 skipped.append(EngineCatalogSkip(
                     location: file,
                     reason: "\(name) is not in the product model list; the developer catalog scope lists it",
@@ -297,10 +321,12 @@ public enum EngineCatalogDiscovery {
 
     /// Discovery over the default roots and GGUF directories.
     public static func discoverDefault(scope: EngineCatalogScope = .product,
-                                       explicitModel: URL? = nil) -> EngineCatalog {
+                                       explicitModel: URL? = nil,
+                                       physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory)
+        -> EngineCatalog {
         let roots = defaultRoots()
         return discover(roots: roots, ggufDirectories: defaultGGUFDirectories(roots: roots),
-                        scope: scope, explicitModel: explicitModel)
+                        scope: scope, explicitModel: explicitModel, physicalMemory: physicalMemory)
     }
 
     // MARK: Helpers

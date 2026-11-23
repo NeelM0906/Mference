@@ -212,8 +212,9 @@ product models among them through the [engine](ENGINE.md) (`EngineCatalog` and
   its reason.
 - `--catalog product` (the default) lists only the product models, under their
   stable identifiers: `qwen3.5-4b` (Quick) and `qwen3.8-27b` (Deep) through
-  llama.cpp, and `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and
-  `maple-preview-2bit-mlx` through the native runtime. A request for any other
+  llama.cpp, and `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64`,
+  `maple-preview-2bit-mlx` and `inkling-2-mini-ud-q4_k_xl` (on Macs with
+  32 GB or more) through the native runtime. A request for any other
   runnable install gets `400 model_not_runnable`. `--catalog all` is a
   developer switch that lists every runnable install; extra installs of one
   family get an `@<directory basename>` suffix.
