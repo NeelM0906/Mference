@@ -406,6 +406,54 @@ struct Inkling2Shape {
         #expect(generation["eos_token_id"] as? Int == 4 && generation["pad_token_id"] as? Int == 5)
     }
 
+    /// One GGUF, one `tokenizer.json`: members sorted by key bytes, the vocab
+    /// in id order (`ab` after `b`), nothing taken from a dictionary's hash
+    /// order. The real file's vocab came out in a different order per run
+    /// through `JSONSerialization`'s `.sortedKeys`.
+    @Test func tokenizerJSONBytesAreFixed() throws {
+        let data = Inkling2Shape().fixture().encode().data
+        guard case .complete(let header) = try GGUF.parseHeader(path: "toy", fileSize: UInt64(data.count),
+                                                                prefix: data) else {
+            Issue.record("toy header did not parse"); return
+        }
+        let sidecars = try GGUFTokenizer.synthesize(metadata: header.metadata, path: "toy")
+        let regex = try #require(GGUFTokenizer.preTokenizers["inkling2"]?.regex)
+            .replacingOccurrences(of: #"\"#, with: #"\\"#)
+        let special = #""lstrip":false,"normalized":false,"rstrip":false,"single_word":false,"special":true}"#
+        let parts: [String] = [
+            #"{"added_tokens":[{"content":"<|end|>","id":4,"#, special,
+            #",{"content":"<|pad|>","id":5,"#, special, "],",
+            #""decoder":{"add_prefix_space":true,"trim_offsets":true,"type":"ByteLevel","use_regex":true},"#,
+            #""model":{"byte_fallback":false,"continuing_subword_prefix":null,"dropout":null,"#,
+            #""end_of_word_suffix":null,"fuse_unk":false,"ignore_merges":true,"merges":[["a","b"]],"#,
+            #""type":"BPE","unk_token":null,"vocab":{"a":0,"b":1,"ab":2,"c":3}},"#,
+            #""normalizer":null,"padding":null,"#,
+            #""post_processor":{"add_prefix_space":true,"trim_offsets":false,"type":"ByteLevel","use_regex":true},"#,
+            #""pre_tokenizer":{"pretokenizers":[{"behavior":"Isolated","invert":false,"pattern":{"Regex":""#,
+            regex, #""},"type":"Split"},"#,
+            #"{"add_prefix_space":false,"trim_offsets":true,"type":"ByteLevel","use_regex":false}],"#,
+            #""type":"Sequence"},"truncation":null,"version":"1.0"}"#,
+        ]
+        let expected = parts.joined()
+        #expect(String(decoding: sidecars.tokenizerJSON, as: UTF8.self) == expected)
+        let again = try GGUFTokenizer.synthesize(metadata: header.metadata, path: "toy")
+        #expect(again.tokenizerJSON == sidecars.tokenizerJSON)
+    }
+
+    @Test func orderedJSONKeepsMemberOrderAndEscapes() throws {
+        typealias J = GGUFTokenizer.OrderedJSON
+        let text = "q\"b\\s/\u{1}\u{1F}\n\t\u{8}\u{C}\r\u{7F}é"
+        let value: J = .object([("z", .int(-3)), ("a", .array([.null, .bool(true), .bool(false)])),
+                                ("s", .string(text))])
+        #expect(String(decoding: value.bytes, as: UTF8.self)
+                == #"{"z":-3,"a":[null,true,false],"s":"q\"b\\s/\u0001\u001f\n\t\b\f\r"# + "\u{7F}é\"}")
+        let back = try #require(try JSONSerialization.jsonObject(with: Data(value.bytes)) as? [String: Any])
+        #expect(back["s"] as? String == text && back["z"] as? Int == -3)
+        // Sorted by UTF-8 bytes: case-sensitive, not numeric.
+        let sorted: J = .sorted(["b": .null, "a9": .null, "B": .null, "a10": .null])
+        #expect(String(decoding: sorted.bytes, as: UTF8.self) == #"{"B":null,"a10":null,"a9":null,"b":null}"#)
+    }
+
     // MARK: - Local install end to end
 
     static func install(_ gguf: (path: String, data: Data, offsets: [String: UInt64]), output: String,
