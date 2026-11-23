@@ -9,20 +9,29 @@ comparison of two such runs (stdlib only).
 order to 127.0.0.1:N and appends one JSON row per case to FILE.jsonl: the
 request, the HTTP status, the raw body (or SSE text) and the normalized
 fields. `compare` matches rows by (model, case) and compares the normalized
-fields and the request; it exits 1 on any difference, 2 when a case is
-missing from one side, 0 when every case is the same.
+fields and the request against every case the families in the files should
+have; it exits 1 on any difference, 2 when a case is missing on either side
+(or there are no rows), 0 when every case is the same. A file with a
+duplicate (model, case) is refused.
 
-Normalized: status; error type, param and code for an error; message content
-and reasoning_content; tool calls as (name, parsed arguments), ids dropped, and
-the arguments strings as sent (a difference in the string alone, parsed JSON
-equal, is reported on its own line);
-finish_reason; every integer usage field (nested ones as `parent.field`).
-A stream is reduced to the same fields (concatenated deltas, assembled tool
-calls, the last finish_reason, the usage chunk) plus any in-band errors.
-Ids, `created`, timings and logs are not compared.
+Normalized: status; for an error, its type, param and code (the whole body
+when it has no error object); message content and reasoning_content exactly
+("" and null stay distinct); tool calls as (name, parsed arguments), ids
+dropped, and the arguments strings as sent (a difference in the string alone,
+parsed JSON equal, is reported on its own line); finish_reason; every integer
+usage field (nested ones as `parent.field`). A stream keeps its concatenated
+deltas, the assembled tool calls with their indexes, every finish_reason and
+usage frame, every frame that is not a delta (in-band errors included), the
+lines it could not parse and whether `data: [DONE]` came; SSE comment lines
+(the timed `: ping` keepalives) are skipped. Ids, `created`,
+timings and logs are not compared. Each stream is also checked against its
+non-stream twin on the same server, loosely, as a printed note that does not
+gate.
 """
 
+import http.client
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -120,36 +129,58 @@ def post(port, body):
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, OSError) as e:  # no answer at all: status 0, recorded, compared
-        return 0, json.dumps({"error": {"type": "transport_error", "message": str(e)}})
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+        # no (complete) answer: status 0, recorded and compared
+        return 0, json.dumps({"error": {"type": "transport_error", "message": f"{type(e).__name__}: {e}"}})
 
 
 def normalize(status, raw, stream):
+    """The compared fields. Non-stream values are kept exactly ("" and null, [] and absent stay
+    distinct); a stream keeps every frame that is not a plain delta, every finish_reason and usage
+    frame, the [DONE] marker and the count of lines it could not parse."""
     if status != 200:
         try:
-            err = json.loads(raw).get("error", {})
+            body = json.loads(raw)
         except ValueError:
-            err = {"type": "<not JSON>"}
+            return {"status": status, "error_raw": raw}
+        err = body.get("error") if isinstance(body, dict) else None
+        if not isinstance(err, dict):
+            return {"status": status, "error_raw": body}
         return {"status": status, "error_type": err.get("type"), "error_param": err.get("param"),
                 "error_code": err.get("code")}
     if not stream:
-        d = json.loads(raw)
-        ch = d["choices"][0]
-        m = ch.get("message") or {}
-        # "" and null both mean no text; a stream with no deltas reduces to null
-        return {"status": status, "content": m.get("content") or None, "reasoning": m.get("reasoning_content") or None,
+        try:
+            d = json.loads(raw)
+            ch = d["choices"][0]
+            m = ch.get("message") or {}
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            return {"status": status, "unparsed_body": raw}
+        return {"status": status, "content": m.get("content"), "reasoning": m.get("reasoning_content"),
                 "tool_calls": tool_calls_norm(m.get("tool_calls")), "tool_calls_raw": tool_calls_raw(m.get("tool_calls")),
-                "finish_reason": ch.get("finish_reason"), "usage": usage_ints(d.get("usage"))}
-    content, reasoning, calls, finish, usage, errors = [], [], {}, None, None, []
-    for line in raw.splitlines():
-        if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                "tool_calls_present": "tool_calls" in m, "finish_reason": ch.get("finish_reason"),
+                "usage": usage_ints(d.get("usage")), "usage_present": d.get("usage") is not None}
+    content, reasoning, calls, finishes, usages, other, unparsed, done = [], [], {}, [], [], [], [], False
+    for line in raw.split("\n"):  # not splitlines(): U+2028 and friends may sit unescaped inside JSON strings
+        line = line.rstrip("\r")
+        if not line.strip() or line.startswith(":"):
+            continue  # blank separators and SSE comments (the server's timed ": ping" keepalives)
+        if not line.startswith("data:"):
+            other.append({"line": line})
             continue
-        ev = json.loads(line[6:])
-        if "error" in ev:
-            errors.append(ev["error"])
+        payload = line[5:].lstrip(" ")
+        if payload == "[DONE]":
+            done = True
             continue
-        if ev.get("usage"):
-            usage = ev["usage"]
+        try:
+            ev = json.loads(payload)
+        except ValueError:
+            unparsed.append(payload)
+            continue
+        if not isinstance(ev, dict) or "choices" not in ev:
+            other.append(ev)  # error frames and anything else that is not a delta, in order
+            continue
+        if ev.get("usage") is not None:
+            usages.append(usage_ints(ev["usage"]))
         for ch in ev.get("choices") or []:
             dl = ch.get("delta") or {}
             if dl.get("content"):
@@ -157,22 +188,31 @@ def normalize(status, raw, stream):
             if dl.get("reasoning_content"):
                 reasoning.append(dl["reasoning_content"])
             for tc in dl.get("tool_calls") or []:
-                slot = calls.setdefault(tc.get("index", 0), {"name": None, "arguments": ""})
+                key = tc.get("index", "<no index>")  # a missing index is a difference, not slot 0
+                slot = calls.setdefault(key, {"name": None, "arguments": ""})
                 f = tc.get("function") or {}
                 if f.get("name"):
                     slot["name"] = f["name"]
                 slot["arguments"] += f.get("arguments") or ""
             if ch.get("finish_reason"):
-                finish = ch["finish_reason"]
-    assembled = [{"type": "function", "function": calls[i]} for i in sorted(calls)]
+                finishes.append(ch["finish_reason"])
+    order = sorted(calls, key=lambda k: (isinstance(k, str), str(k) if isinstance(k, str) else k))
+    assembled = [{"type": "function", "function": calls[i], "index": i} for i in order]
     return {"status": status, "content": "".join(content) or None, "reasoning": "".join(reasoning) or None,
-            "tool_calls": tool_calls_norm(assembled), "tool_calls_raw": tool_calls_raw(assembled),
-            "finish_reason": finish, "usage": usage_ints(usage), "stream_errors": errors}
+            "tool_calls": [dict(t, index=c["index"]) for t, c in zip(tool_calls_norm(assembled), assembled)],
+            "tool_calls_raw": tool_calls_raw(assembled), "finish_reasons": finishes, "usage_frames": usages,
+            "other_frames": other, "unparsed_lines": unparsed, "done": done}
 
 
 def run(args):
     opt = lambda k: args[args.index(k) + 1]
     port, model, family, out = opt("--port"), opt("--model"), opt("--family"), opt("--out")
+    if family not in THINKING:
+        sys.exit(f"unknown family {family}")
+    if os.path.exists(out):  # one file may hold several models (library mode), never one model twice
+        with open(out) as f:
+            if any(json.loads(l).get("model") == model for l in f if l.strip()):
+                sys.exit(f"{out} already has rows for {model}; use a new file")
     got = {}
     with open(out, "a") as f:
         for cid, body in cases(family):
@@ -185,31 +225,52 @@ def run(args):
             f.write(json.dumps({"model": model, "family": family, "case": cid, "request": body,
                                 "status": status, "raw": raw, "norm": norm}) + "\n")
             f.flush()
-            print(f"{model} {cid}: {status} finish={norm.get('finish_reason')} usage={norm.get('usage')}", flush=True)
+            print(f"{model} {cid}: {status} finish={norm.get('finish_reason', norm.get('finish_reasons'))}", flush=True)
     return 0
+
+
+def loose(n):
+    """For the stream-against-twin note only: the stream's view of a non-stream row."""
+    return {"content": n.get("content") or None, "reasoning": n.get("reasoning") or None,
+            "tool_calls": [{k: v for k, v in t.items() if k != "index"} for t in n.get("tool_calls") or []],
+            "tool_calls_raw": n.get("tool_calls_raw") or [],
+            "finish_reason": n.get("finish_reason") or (n.get("finish_reasons") or [None])[-1],
+            "usage": n.get("usage") or ((n.get("usage_frames") or [{}])[-1])}
 
 
 def compare(a_path, b_path):
     def load(p):
+        rows = {}
         with open(p) as f:
-            return {(r["model"], r["case"]): r for r in map(json.loads, f)}
+            for l in f:
+                if not l.strip():
+                    continue
+                r = json.loads(l)
+                k = (r["model"], r["case"])
+                if k in rows:
+                    sys.exit(f"{p}: {k} appears twice; refusing to compare")
+                rows[k] = r
+        return rows
     a, b = load(a_path), load(b_path)
-    keys = sorted(set(a) | set(b))
+    # every case each model's family should have, whether or not either side wrote it
+    fams = {r["model"]: r["family"] for r in list(a.values()) + list(b.values())}
+    expected = {(m, c) for m, f in fams.items() for c, _ in cases(f)}
+    keys = sorted(expected | set(a) | set(b))
     diffs = missing = raw_only_n = 0
     print("| Model | Case | Result | Fields that differ |")
     print("|---|---|---|---|")
     for k in keys:
         if k not in a or k not in b:
             missing += 1
-            print(f"| {k[0]} | {k[1]} | MISSING on {'A' if k not in a else 'B'} | |")
+            where = "both sides" if k not in a and k not in b else ("A" if k not in a else "B")
+            print(f"| {k[0]} | {k[1]} | MISSING on {where} | |")
             continue
         na, nb = a[k]["norm"], b[k]["norm"]
         bad = [f for f in sorted(set(na) | set(nb)) if na.get(f) != nb.get(f)]
         if a[k]["request"] != b[k]["request"]:
             bad.append("request")
         diffs += bool(bad)
-        # an arguments string that differs while the parsed JSON is equal is reported on its own
-        raw_only = bad == ["tool_calls_raw"]
+        raw_only = bad == ["tool_calls_raw"]  # the arguments string alone, parsed JSON equal
         raw_only_n += raw_only
         label = "DIFFER (arguments string only; parsed JSON equal)" if raw_only else ("DIFFER" if bad else "same")
         print(f"| {k[0]} | {k[1]} | {label} | {', '.join(bad)} |")
@@ -222,12 +283,15 @@ def compare(a_path, b_path):
         for (m, c), r in sorted(rows.items()):
             twin = {"P2": "P1", "T2": "T1", "U2": "U1", "R2": "R1", "L2": "L1", "S2": "S1", "S4": "S3"}.get(c)
             if twin and (m, twin) in rows:
-                n1, n2 = rows[(m, twin)]["norm"], r["norm"]
-                fs = [f for f in ("content", "reasoning", "tool_calls", "tool_calls_raw", "finish_reason", "usage")
-                      if n1.get(f) != n2.get(f)]
+                l1, l2 = loose(rows[(m, twin)]["norm"]), loose(r["norm"])
+                fs = [f for f in l1 if l1[f] != l2[f]]
                 if fs:
                     print(f"note (not gated): {side} {m} {c} against {twin}: {', '.join(fs)}")
-    print(f"\n{len(keys)} cases; {diffs} differ ({raw_only_n} in the tool-call arguments string only); {missing} missing")
+    print(f"\n{len(keys)} cases expected; {diffs} differ ({raw_only_n} in the tool-call arguments string only); "
+          f"{missing} missing")
+    if not keys:
+        print("no rows at all")
+        return 2
     return 1 if diffs else (2 if missing else 0)
 
 

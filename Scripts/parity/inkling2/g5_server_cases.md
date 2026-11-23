@@ -9,12 +9,14 @@
 ## Compared fields
 
 - the status, and `error.type`, `error.param` and `error.code` for an error;
-- the content and `reasoning_content` (empty and null are equal);
+- the content and `reasoning_content`, exactly (empty and null differ);
 - tool calls, by name and parsed arguments, and also the arguments strings as sent;
 - `finish_reason`;
 - every integer usage field.
 
-A stream is reduced to the same fields. Ids, `created`, timings and logs are not compared.
+A stream is reduced to its concatenated deltas, the assembled tool calls with their indexes, every finish reason and usage frame, every frame that is not a delta, unparsed lines and the `[DONE]` marker. Ids, `created`, timings and logs are not compared.
+
+`compare` checks every case the families in the files should have, so a case missing on both sides counts as missing. It refuses a file that holds a case twice.
 
 A difference in the arguments string alone, with the parsed JSON equal, is reported on its own line.
 

@@ -17,6 +17,7 @@ mkdir -p "$O"; tag=$MODE${FAM:+-$FAM}
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$O/$tag.log"; }
 SPID=""; CPID=""
 stop() {
+  trap '' INT TERM  # a signal during the shutdown wait must not cut the cleanup short
   [ -n "$CPID" ] && kill -0 "$CPID" 2>/dev/null && kill -TERM "$CPID" 2>/dev/null
   [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null || return 0
   kill -INT "$SPID" 2>/dev/null
@@ -26,6 +27,7 @@ stop() {
 }
 trap stop EXIT
 trap 'log interrupted; exit 130' INT TERM
+case "$MODE:$FAM" in model:minicpm5|model:qwen36|model:maple|library:) ;; *) echo "usage: $0 <server-dir> <out-dir> model minicpm5|qwen36|maple | library" >&2; exit 2 ;; esac
 if [ "$MODE" = model ]; then args=(--model "$(inst "$FAM")"); fams=("$FAM"); else args=(--library); fams=(minicpm5 qwen36 maple); fi
 log "server $(head -1 "$SRV/SOURCE.txt"); args ${args[*]} --max-context 4096; port $PORT"
 "$SRV/MferenceServer" "${args[@]}" --port "$PORT" --max-context 4096 > "$O/$tag.server.log" 2>&1 &
@@ -33,7 +35,7 @@ SPID=$!
 for _ in $(seq 1 900); do grep -q "MferenceServer ready" "$O/$tag.server.log" && break; kill -0 "$SPID" 2>/dev/null || { log "server exited before ready"; exit 75; }; sleep 1; done
 grep -q "MferenceServer ready" "$O/$tag.server.log" || { log "not ready"; exit 75; }
 log "ready: $(grep 'MferenceServer ready' "$O/$tag.server.log" | tail -1)"
-curl -sS "http://127.0.0.1:$PORT/v1/models" > "$O/$tag.models.json" || { log "GET /v1/models failed"; exit 75; }
+curl -sS --max-time 30 "http://127.0.0.1:$PORT/v1/models" > "$O/$tag.models.json" || { log "GET /v1/models failed"; exit 75; }
 rc=0
 for f in "${fams[@]}"; do
   if [ "$MODE" = model ]; then id=$(python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['data'][0]['id'])" "$O/$tag.models.json"); else id=$(pid_of "$f"); fi

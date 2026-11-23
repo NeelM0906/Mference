@@ -31,7 +31,7 @@ def sse(events):
 
 
 class NormalizeTests(unittest.TestCase):
-    def test_stream_reduces_to_the_non_stream_fields(self):
+    def test_stream_against_its_twin(self):
         call = [{"id": "c", "type": "function", "function": {"name": "f", "arguments": "{\"a\": 1, \"b\": 2}"}}]
         a = g.normalize(200, nonstream(content="", reasoning="think", calls=call, finish="tool_calls"), False)
         b = g.normalize(200, sse([
@@ -40,16 +40,36 @@ class NormalizeTests(unittest.TestCase):
             {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "z", "function": {"name": "f", "arguments": "{\"a\": 1,"}}]}}]},
             {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": " \"b\": 2}"}}]}, "finish_reason": "tool_calls"}]},
             {"choices": [], "usage": USAGE}]), True)
-        b.pop("stream_errors")
-        self.assertEqual(a, b)
-        self.assertIsNone(a["content"])  # "" and null both mean no text
-        self.assertEqual(a["tool_calls_raw"], ["{\"a\": 1, \"b\": 2}"])
-        self.assertEqual(a["usage"]["prompt_tokens_details.cached_tokens"], 3)
+        self.assertEqual(g.loose(a), g.loose(b))
+        self.assertEqual(a["content"], "")  # kept exactly for A-against-B
+        self.assertIsNone(b["content"])
+        self.assertTrue(b["done"])
+        self.assertEqual(b["tool_calls"][0]["index"], 0)
+        self.assertEqual(a["tool_calls_raw"], b["tool_calls_raw"])
+
+    def test_stream_details_that_must_not_compare_equal(self):
+        base_events = [{"choices": [{"delta": {"content": "Hi"}, "finish_reason": "stop"}]}]
+        ok = g.normalize(200, sse(base_events), True)
+        no_done = g.normalize(200, "".join(f"data: {json.dumps(e)}\n\n" for e in base_events), True)
+        self.assertNotEqual(ok, no_done)
+        frame = g.normalize(200, sse(base_events + [{"object": "error", "message": "x"}]), True)
+        self.assertNotEqual(ok, frame)
+        self.assertEqual(ok, g.normalize(200, ": ping\n\n" + sse(base_events) + ": ping\n\n", True))  # keepalives are timing
+        junk = g.normalize(200, sse(base_events).replace("data: [DONE]", "data: {not json\ndata: [DONE]"), True)
+        self.assertEqual(junk["unparsed_lines"], ["{not json"])
+        tc = lambda extra: [{"choices": [{"delta": {"tool_calls": [dict({"function": {"name": "f", "arguments": "{}"}}, **extra)]}}]}]
+        self.assertNotEqual(g.normalize(200, sse(tc({"index": 0})), True), g.normalize(200, sse(tc({})), True))
+        # U+2028 inside a JSON string must not split the line
+        sep = g.normalize(200, "data: " + json.dumps({"choices": [{"delta": {"content": "a\u2028b"}}]}, ensure_ascii=False) + "\n\ndata: [DONE]\n\n", True)
+        self.assertEqual(sep["content"], "a\u2028b")
+        self.assertEqual(sep["unparsed_lines"], [])
 
     def test_errors(self):
         n = g.normalize(400, json.dumps({"error": {"type": "invalid_request_error", "param": "p", "code": "c"}}), False)
         self.assertEqual(n, {"status": 400, "error_type": "invalid_request_error", "error_param": "p", "error_code": "c"})
-        self.assertEqual(g.normalize(500, "not json", False)["error_type"], "<not JSON>")
+        self.assertEqual(g.normalize(500, "not json", False), {"status": 500, "error_raw": "not json"})
+        self.assertEqual(g.normalize(500, json.dumps({"error": None}), False), {"status": 500, "error_raw": {"error": None}})
+        self.assertNotEqual(g.normalize(500, json.dumps({"error": "a"}), False), g.normalize(500, json.dumps({"error": "b"}), False))
 
     def test_cases_per_family(self):
         ids = lambda f: [c for c, _ in g.cases(f)]
@@ -75,6 +95,10 @@ class CompareTests(unittest.TestCase):
                 f.write(json.dumps({"model": "m", "family": "qwen36", "case": case, "request": {"x": 1}, "norm": norm}) + "\n")
         return p
 
+    def full(self, name, override=None):
+        n = g.normalize(200, nonstream(), False)
+        return self.write(name, [(c, (override or {}).get(c, n)) for c, _ in g.cases("qwen36")])
+
     def run_compare(self, a, b):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -83,19 +107,30 @@ class CompareTests(unittest.TestCase):
 
     def test_same_different_missing(self):
         n = g.normalize(200, nonstream(), False)
-        a = self.write("a.jsonl", [("P1", n), ("P2", n)])
-        self.assertEqual(self.run_compare(a, self.write("b.jsonl", [("P1", n), ("P2", n)]))[0], 0)
-        m = dict(n, content="Blue")
-        rc, out = self.run_compare(a, self.write("c.jsonl", [("P1", n), ("P2", m)]))
+        a = self.full("a.jsonl")
+        self.assertEqual(self.run_compare(a, self.full("b.jsonl"))[0], 0)
+        rc, out = self.run_compare(a, self.full("c.jsonl", {"P2": dict(n, content="Blue")}))
         self.assertEqual(rc, 1)
         self.assertIn("| m | P2 | DIFFER | content |", out)
-        self.assertEqual(self.run_compare(a, self.write("d.jsonl", [("P1", n)]))[0], 2)
+        part = self.write("d.jsonl", [("P1", n)])
+        self.assertEqual(self.run_compare(a, part)[0], 2)
+        # a case missing on both sides still counts: both runs stopped after P1
+        rc, out = self.run_compare(part, self.write("e.jsonl", [("P1", n)]))
+        self.assertEqual(rc, 2)
+        self.assertIn("MISSING on both sides", out)
+        # no rows at all is not a pass
+        self.assertEqual(self.run_compare(self.write("f.jsonl", []), self.write("g.jsonl", []))[0], 2)
+
+    def test_duplicate_rows_are_refused(self):
+        n = g.normalize(200, nonstream(), False)
+        with self.assertRaises(SystemExit):
+            self.run_compare(self.write("a.jsonl", [("P1", n), ("P1", n)]), self.full("b.jsonl"))
 
     def test_arguments_string_only_is_its_own_line(self):
         call = lambda args: [{"id": "c", "type": "function", "function": {"name": "f", "arguments": args}}]
         x = g.normalize(200, nonstream(content=None, calls=call("{\"a\":1,\"b\":2}"), finish="tool_calls"), False)
         y = g.normalize(200, nonstream(content=None, calls=call("{\"b\": 2, \"a\": 1}"), finish="tool_calls"), False)
-        rc, out = self.run_compare(self.write("a.jsonl", [("U1", x)]), self.write("b.jsonl", [("U1", y)]))
+        rc, out = self.run_compare(self.full("a.jsonl", {"U1": x}), self.full("b.jsonl", {"U1": y}))
         self.assertEqual(rc, 1)
         self.assertIn("DIFFER (arguments string only; parsed JSON equal)", out)
         self.assertIn("1 differ (1 in the tool-call arguments string only)", out)
