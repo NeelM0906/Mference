@@ -108,6 +108,9 @@ struct Inkling2DecodeDepthTests {
 
     static func stats(_ rows: [(pos: Int, agree: Bool, margin: Double, dlp: Double, kl: Double)],
                       from: Int, to: Int) -> Stats? {
+        // A segment that starts at or past its end is empty (and `from..<to`
+        // would trap): lp06 ends before 2,048, lp07's splits start past 1,024.
+        guard from < to else { return nil }
         let r = rows.filter { (from..<to).contains($0.pos) }
         guard !r.isEmpty else { return nil }
         let confident = r.filter { $0.margin >= 0.2 }
@@ -119,6 +122,33 @@ struct Inkling2DecodeDepthTests {
                      p95_dlp: percentile(r.map { $0.dlp }, 0.95),
                      mean_kl: r.map { $0.kl }.reduce(0, +) / Double(r.count), p95_kl: percentile(r.map { $0.kl }, 0.95),
                      max_kl: r.map { $0.kl }.max()!)
+    }
+
+    /// The segments split at 1,024 (the window wraps) and 2,048 (the global
+    /// KV's growth step), clipped to `[split, n)`; empty ones are left out.
+    static func segmentStats(_ rows: [(pos: Int, agree: Bool, margin: Double, dlp: Double, kl: Double)],
+                             split: Int, tokens n: Int) -> [Stats] {
+        [(split, 1024), (1024, 2048), (2048, n)].compactMap { stats(rows, from: max($0.0, split), to: min($0.1, n)) }
+    }
+
+    /// Model-free: the segments for splits past 1,024 and prompts under
+    /// 2,048 tokens (the cases that trapped on the real install), and an
+    /// inverted range.
+    @Test func segmentsClipToThePrompt() throws {
+        func rows(_ split: Int, _ n: Int) -> [(pos: Int, agree: Bool, margin: Double, dlp: Double, kl: Double)] {
+            (split..<n).map { (pos: $0, agree: true, margin: 1, dlp: 0, kl: 0) }
+        }
+        for (split, n, want) in [(64, 1315, [(64, 1024), (1024, 1315)]),
+                                 (1915, 2615, [(1915, 2048), (2048, 2615)]),
+                                 (2100, 2615, [(2100, 2615)]),
+                                 (1100, 1315, [(1100, 1315)])] {
+            let got = Self.segmentStats(rows(split, n), split: split, tokens: n)
+            #expect(got.map { [$0.from, $0.to] } == want.map { [$0.0, $0.1] }, "split \(split) of \(n)")
+            #expect(got.map(\.positions).reduce(0, +) == n - split, "split \(split) of \(n)")
+        }
+        #expect(Self.stats(rows(64, 1315), from: 2048, to: 1315) == nil)
+        #expect(Self.stats(rows(1915, 2615), from: 1915, to: 1024) == nil)
+        #expect(Self.stats(rows(64, 1315), from: 1024, to: 1024) == nil)
     }
 
     @Test(.enabled(if: install != nil && output != nil,
@@ -221,7 +251,7 @@ struct Inkling2DecodeDepthTests {
             }
             #expect(rows.allSatisfy { $0.dlp.isFinite && $0.kl.isFinite }, "\(id)")
             let overall = try #require(Self.stats(rows, from: split, to: n))
-            let segments = [(split, 1024), (1024, 2048), (2048, n)].compactMap { Self.stats(rows, from: $0.0, to: $0.1) }
+            let segments = Self.segmentStats(rows, split: split, tokens: n)
             let worst = rows.sorted { $0.dlp > $1.dlp }.prefix(5).map {
                 Worst(pos: $0.pos, dlp: $0.dlp, kl: $0.kl, prefill_margin: $0.margin, top1_agree: $0.agree)
             }
