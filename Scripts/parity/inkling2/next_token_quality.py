@@ -78,19 +78,10 @@ def boot(diffs, reps, rng):
     return (ms[int(0.025 * reps)], ms[int(0.975 * reps) - 1])
 
 
-def main():
-    args = sys.argv[1:]
-    opt = lambda k, d=None: args[args.index(k) + 1] if k in args else d
-    runs = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or not args[i - 1].startswith("--"))]
-    if len(runs) != 3:
-        sys.exit(__doc__)
-    names = opt("--names", "A,B,C").split(",")
-    goldens = opt("--goldens") or os.path.join(ink_dir(), "goldens")
-    prompts = opt("--prompts", ",".join(DEFAULT)).split(",")
-    reps = int(opt("--boot", "10000"))
-    rng = random.Random(20261123)
-
-    rows = {"top20": [], "exact": []}  # (pid, pos, lp_a, lp_b, lp_c)
+def collect(runs, goldens, prompts):
+    """Rows per measure, [(pid, pos, lp_run0, lp_run1, lp_run2)], with the prompts
+    used and the prompts not yet in every run."""
+    rows = {"top20": [], "exact": []}
     used, missing = [], []
     for pid in prompts:
         gs = [load(r, pid, "golden.json") for r in runs]
@@ -100,7 +91,7 @@ def main():
             continue
         ids = gs[0]["prompt_ids"]
         if any(g["prompt_ids"] != ids for g in gs):
-            sys.exit(f"{pid}: the three runs' prompt ids differ")
+            raise SystemExit(f"{pid}: the three runs' prompt ids differ")
         n0 = original_prompt_length(goldens, pid)
         by = [{r["pos"]: r for r in l} for l in ls]
         used.append(pid)
@@ -113,6 +104,22 @@ def main():
                 rows["top20"].append((pid, p) + tuple(tp[t] for tp in tops))
             if all(b[p].get("next") == t and b[p].get("next_logprob") is not None for b in by):
                 rows["exact"].append((pid, p) + tuple(b[p]["next_logprob"] for b in by))
+    return rows, used, missing
+
+
+def main():
+    args = sys.argv[1:]
+    opt = lambda k, d=None: args[args.index(k) + 1] if k in args else d
+    runs = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or not args[i - 1].startswith("--"))]
+    if len(runs) != 3:
+        sys.exit(__doc__)
+    names = opt("--names", "A,B,C").split(",")
+    goldens = opt("--goldens") or os.path.join(ink_dir(), "goldens")
+    prompts = opt("--prompts", ",".join(DEFAULT)).split(",")
+    reps = int(opt("--boot", "10000"))
+    rng = random.Random(20261123)
+
+    rows, used, missing = collect(runs, goldens, prompts)
 
     pairs = [(0, 1), (0, 2), (1, 2)]  # A - B, A - C, B - C: pass the runner first for runner - Metal, runner - CPU, Metal - CPU
     report = {"runs": dict(zip(names, runs)), "prompts_used": used, "prompts_missing": missing, "measures": {}}

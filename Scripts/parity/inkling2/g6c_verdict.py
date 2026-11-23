@@ -2,7 +2,7 @@
 """Tier G6c for a candidate run against the Inkling 2 reference (stdlib).
 
     python3 -I Scripts/parity/inkling2/g6c_verdict.py <candidate-dir> [--traces <dir>]
-        [--goldens <goldens-dir>] [--json out.json]
+        [--goldens <goldens-dir>] [--json out.json] [--precision-root <dir>] [--no-rebased]
 
 <candidate-dir> holds the runner's output, in ink-golden's `generate` layout,
 for the teacher-forced prompt set (`inputs/generate_prompts_tf.json`: each
@@ -35,6 +35,14 @@ rule 2 against the free-running Metal goldens (`generate/metal`,
 (`noise/metal-vs-cpu.json`, `noise/set2-metal-vs-cpu.json`) and floor 0.03.
 llama.cpp's own Metal fails it on g01-capital (decode steps in the golden)
 and trace02 (traced golden); the report notes those.
+
+Also printed, report only (a DRAFT re-based tier for the maintainer, which does
+not affect the verdict or the exit code): (a) the runner against K4's exact
+fp32 reference, (b) a llama.cpp-rounding reference against tf Metal under
+today's bounds, (c1) the runner within 2x today's bounds of tf CPU, (c2) the
+runner no farther from tf CPU than the fp32 reference (+10%), and (d) the
+next-token quality check (next_token_quality.py). --precision-root defaults to
+$INK/results/k4/precision.
 
 Exit: 0 the gate passes with traces checked; 1 the gate fails; 3 the
 log-prob rules pass but no --traces was given (rule 4 unchecked).
@@ -170,6 +178,124 @@ def traces(goldens, tdir):
     return res
 
 
+# ---------------------------------------------------------------- re-based tier (draft, report only)
+# The draft in $INK/inbox/k0-notice-g6c-rebased-tier-draft.md, for the
+# maintainer's decision; nothing here changes the gate's verdict or exit code.
+# The reference runs come from K4's precision tree:
+#   <precision-root>/<prompt>/<mode>/tf/<prompt>/{golden,logprobs}.json and
+#   <precision-root>/<prompt>/<mode>/traces/<prompt>/..., mode fp32 (exact) or a
+#   llama.cpp rounding mode (llamaExperts preferred, then llamaCPU).
+EXACT_BOUNDS = {"mean_kl": 0.0015, "p95_kl": 0.005, "max_dlp": 0.1}  # 5 x K4's trace02 runner-vs-fp32
+EXPERT_AGREEMENT_MIN = 0.98
+LLAMA_MODES = ("llamaExperts", "llamaCPU")
+QUALITY_MARGIN = 0.01  # nats
+
+
+def pair(ref_dir, cand_dir, pid):
+    """compare_goldens' log-prob record of cand against ref for one prompt, or None."""
+    ga, gb = cg.load(ref_dir, pid, "golden.json"), cg.load(cand_dir, pid, "golden.json")
+    la, lb = cg.load(ref_dir, pid, "logprobs.json"), cg.load(cand_dir, pid, "logprobs.json")
+    if not (ga and gb and la and lb) or ga["prompt_ids"] != gb["prompt_ids"]:
+        return None
+    return cg.lp_metrics(la, lb, len(ga["prompt_ids"]))
+
+
+def rebased(goldens, cand, tdir, root, meas_g, expected):
+    out = {"a": {}, "b": {}, "c1": {}, "c2": {}, "d": None}
+    cpu = os.path.join(goldens, "generate-tf", "cpu")
+    metal = os.path.join(goldens, "generate-tf", "metal")
+    for pid in expected:
+        fp32 = os.path.join(root, pid, "fp32") if root else None
+        # (a) the runner against the exact reference
+        if fp32 and os.path.isdir(os.path.join(fp32, "tf", pid)):
+            l = pair(os.path.join(fp32, "tf"), cand, pid)
+            if l is None:
+                out["a"][pid] = {"pass": False, "fails": {"missing": "runner or reference output"}}
+            else:
+                got = {"mean_kl": l["mean_kl_top20_approx"], "p95_kl": l["p95_kl_top20_approx"],
+                       "max_dlp": l["max_abs_dlogprob_top1"]}
+                fails = {k: f"{got[k]:.4g} > {b}" for k, b in EXACT_BOUNDS.items() if not within(got[k], b)}
+                m02 = l["top1_at_margin"]["0.2"]
+                if m02["positions"] and m02["agree"] != m02["positions"]:
+                    fails["top1_at_margin_0.2"] = f"{m02['agree']}/{m02['positions']}"
+                ex = None
+                if tdir and os.path.isdir(os.path.join(fp32, "traces", pid)) and os.path.isdir(os.path.join(tdir, pid)):
+                    t = cg.trace_metrics(os.path.join(fp32, "traces"), tdir, pid)
+                    ex = t["mean_expert_set_agreement"] if t else None
+                    if ex is not None and not ex >= EXPERT_AGREEMENT_MIN:
+                        fails["expert_sets"] = f"{ex:.4f} < {EXPERT_AGREEMENT_MIN}"
+                out["a"][pid] = {"pass": not fails, "fails": fails, "metrics": got, "expert_set_agreement": ex}
+        # (b) the reference in a llama.cpp rounding mode against tf Metal, today's bounds
+        for mode in LLAMA_MODES:
+            ref = os.path.join(root, pid, mode, "tf") if root else None
+            if ref and os.path.isdir(os.path.join(ref, pid)):
+                l = pair(metal, ref, pid)
+                if l is None:
+                    out["b"][pid] = {"mode": mode, "pass": False, "fails": {"missing": "reference output"}}
+                else:
+                    ok, fails, _ = judge({"logprobs": l}, meas_g[pid], True, meas_g[pid]["top1"][1])
+                    out["b"][pid] = {"mode": mode, "pass": ok, "fails": fails}
+                break
+        # (c1) the runner within 2 x today's bounds of tf CPU; (c2) no farther than fp32 is
+        l = pair(cpu, cand, pid)
+        if l is not None:
+            got = metrics(l)
+            fails = {}
+            for k, (v, n) in meas_g[pid].items():
+                floor = max(FLOORS[k], 2 / n) if k in ("top1", "top1_m02") and n else FLOORS[k]
+                bound = 2 * max(1.5 * v, floor)
+                if not within(got[k][0], bound):
+                    fails[k] = f"{got[k][0]:.4g} > {bound:.4g}"
+            out["c1"][pid] = {"pass": not fails, "fails": fails}
+            le = pair(cpu, os.path.join(fp32, "tf"), pid) if fp32 and os.path.isdir(os.path.join(fp32, "tf", pid)) else None
+            if le is not None:
+                ge = metrics(le)
+                fails = {}
+                for k in got:
+                    floor = FLOORS[k]
+                    bound = max(1.1 * ge[k][0], floor) if finite(ge[k][0]) else float("nan")
+                    if not within(got[k][0], bound):
+                        fails[k] = f"{got[k][0]:.4g} > {bound:.4g} (fp32 {ge[k][0]:.4g})"
+                out["c2"][pid] = {"pass": not fails, "fails": fails}
+    # (d) quality: the true next token's log-probability, runner against both llama.cpp runs
+    import next_token_quality as ntq
+    rows, used, missing = ntq.collect([cand, metal, cpu], goldens, ntq.DEFAULT)
+    measure = "exact" if rows["exact"] else "top20"
+    rs = rows[measure]
+    if rs:
+        rng = __import__("random").Random(20261123)
+        d = {"measure": measure, "positions": len(rs), "prompts": used, "missing": missing, "pairs": {}}
+        for k, name in ((1, "metal"), (2, "cpu")):
+            diffs = [r[2] - r[2 + k] for r in rs]
+            lo, hi = ntq.boot(diffs, 10000, rng)
+            d["pairs"][f"runner - {name}"] = {"mean": ntq.mean(diffs), "ci95": [lo, hi],
+                                              "pass": finite(lo) and lo >= -QUALITY_MARGIN}
+        d["pass"] = all(v["pass"] for v in d["pairs"].values())
+        out["d"] = d
+    return out
+
+
+def print_rebased(rb):
+    print("\nRe-based tier, DRAFT for the maintainer (report only; not adopted; no effect on the verdict or exit code):")
+    for key, title in (("a", "(a) runner vs exact reference (fp32)"), ("b", "(b) llama.cpp-mode reference vs tf Metal, today's bounds"),
+                       ("c1", "(c1) runner vs tf CPU within 2x today's bounds"), ("c2", "(c2) runner no farther from tf CPU than fp32 (+10%)")):
+        part = rb[key]
+        if not part:
+            print(f"  {title}: no data")
+            continue
+        bad = {p: v["fails"] for p, v in part.items() if not v["pass"]}
+        status = "pass" if not bad else "FAIL " + "; ".join(f"{p}: {', '.join(f'{k} {x}' for k, x in f.items())}" for p, f in bad.items())
+        print(f"  {title}: {len(part) - len(bad)}/{len(part)} prompts pass ({', '.join(part)}); {status}")
+    d = rb["d"]
+    if not d:
+        print("  (d) quality: no data")
+    else:
+        pairs = "; ".join(f"{k} {v['mean']:+.4f} [{v['ci95'][0]:+.4f}, {v['ci95'][1]:+.4f}]" for k, v in d["pairs"].items())
+        print(f"  (d) quality ({d['measure']}, {d['positions']} positions, {', '.join(d['prompts'])}"
+              + (f"; missing {', '.join(d['missing'])}" if d["missing"] else "") + f"): {pairs}: "
+              + ("pass" if d["pass"] else f"FAIL (a lower bound below -{QUALITY_MARGIN})"))
+
+
 def ink_dir():
     """$INK, else the program directory under the main checkout's scratch/
     (as paths.sh finds it)."""
@@ -250,6 +376,10 @@ def main():
     print(f"\nG6c gate (spec v1.8): {gate}")
     print(f"Plain v2, record only: {'pass' if report['plain_v2_pass'] else 'FAIL'}"
           + ("" if tdir else " (traces unchecked)"))
+    root = opt("--precision-root") or os.path.join(os.path.dirname(goldens), "results", "k4", "precision")
+    if "--no-rebased" not in args:
+        report["rebased_draft"] = rebased(goldens, cand, tdir, root if os.path.isdir(root) else None, meas_g, expected)
+        print_rebased(report["rebased_draft"])
     if out_json:
         json.dump(report, open(out_json, "w"), indent=1, default=str)
     sys.exit(0 if report["gate_pass"] else (3 if logprob_gate and tr_ok and not tdir else 1))
