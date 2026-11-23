@@ -254,14 +254,19 @@ struct Inkling2ForwardRunnerToyTests {
                                                  decodeSlots: .perLayer(24))
 
         func run(_ weights: Inkling2RunnerWeights) async throws
-            -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], cache: Inkling2ForwardRunner.DecodeCacheStats) {
+            -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], routerLogits: [Float],
+                cache: Inkling2ForwardRunner.DecodeCacheStats) {
             let runner = try Inkling2ForwardRunner(weights: weights, context: context,
                                                    maxContext: 64, maxChunkTokens: 4)
             let device = context.device
             let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
             let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
             let routes = try #require(device.makeBuffer(length: 48 * rows * c.topK * 4, options: .storageModeShared))
-            runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows)
+            // The trace's router logits too: staged decode visits record them
+            // after `split()`, in the buffer that follows the readback.
+            let routerLogits = try #require(device.makeBuffer(length: 48 * rows * c.numExperts * 4,
+                                                              options: .storageModeShared))
+            runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows, routerLogits: routerLogits)
             var logits: [[UInt16]] = []
             var position = 0
             for (chunk, decode) in steps {
@@ -278,13 +283,17 @@ struct Inkling2ForwardRunnerToyTests {
             }
             let traced = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * c.topK)
             return (logits, Inkling2BufferMatrix.floats(outputs, offset: 0, count: 48 * rows * d),
-                    Array(UnsafeBufferPointer(start: traced, count: 48 * rows * c.topK)), runner.decodeCacheStats)
+                    Array(UnsafeBufferPointer(start: traced, count: 48 * rows * c.topK)),
+                    Inkling2BufferMatrix.floats(routerLogits, offset: 0, count: 48 * rows * c.numExperts),
+                    runner.decodeCacheStats)
         }
         let fixed = try await run(toy.runnerWeights)
         let staged = try await run(stored)
         #expect(staged.logits == fixed.logits)
         #expect(staged.outputs == fixed.outputs)
         #expect(staged.routes == fixed.routes)
+        #expect(staged.routerLogits == fixed.routerLogits)
+        #expect(fixed.routerLogits.allSatisfy(\.isFinite) && fixed.routerLogits.contains { $0 != 0 })
         // Every decode step's staged visits went through the slot caches.
         let decodeSteps = steps.filter(\.decode).count
         /// The stored layer of visit `v`: prelude 0-5, three passes of 6-17, coda 18-23.

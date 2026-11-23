@@ -265,7 +265,9 @@ struct Inkling2TraceMarginsToyTests {
                 for t in 0..<n {
                     let row = v * rows + position + t
                     let margin = Inkling2G6cTests.selectionMargin(logits: lp + row * experts, bias: bias, topK: topK)
-                    worst = max(worst, abs(margin - trace.routeMargins[v][t]))
+                    let difference = abs(margin - trace.routeMargins[v][t])
+                    #expect(difference.isFinite, "visit \(v) token \(position + t)")
+                    worst = max(worst, difference)
                     // The top-8 by these logits is the runner's own set.
                     let scores = (0..<experts).map { e in
                         1 / (1 + exp(-min(max(lp[row * experts + e], -80), 80))) + bias[e]

@@ -27,8 +27,9 @@ import MferenceValidationSupport
 /// and then only inside `model-hold.sh`. `MFERENCE_INKLING2_PRECISION_TRACE`
 /// (relative to the goldens folder) picks the prompt, `generate2/cpu/trace02`
 /// by default: any golden folder; without a `trace.json` (a teacher-forced
-/// prompt, `generate-tf/metal/<id>`) only the log-probs are written and
-/// `margins` is refused. `llamaCPU` and `margins` need fewer than 32 tokens,
+/// prompt, `generate-tf/metal/<id>`) the log-probs and the reference's own
+/// trace are written, nothing is compared with a CPU trace, and `margins` is
+/// refused. `llamaCPU` and `margins` need fewer than 32 tokens,
 /// `llamaExperts` 32 or more; at most 512 tokens (the trace's arrays).
 @Suite("Inkling2 precision and routing on the real install", .serialized)
 struct Inkling2PrecisionRoutingTests {
@@ -184,11 +185,14 @@ struct Inkling2PrecisionRoutingTests {
             let traceDir = outURL.appendingPathComponent(mode).appendingPathComponent("traces")
                 .appendingPathComponent(id)
             try FileManager.default.createDirectory(at: traceDir, withIntermediateDirectories: true)
-            var hidden = Data(capacity: 48 * n * d * 4)
+            // Row by row, so no second copy of [48][n][d] is held.
+            let hiddenURL = traceDir.appendingPathComponent("hidden_after_visit.f32")
+            FileManager.default.createFile(atPath: hiddenURL.path, contents: nil)
+            let hidden = try FileHandle(forWritingTo: hiddenURL)
             for v in 0..<48 {
-                for t in 0..<n { own.visitOutputs[v][t].withUnsafeBytes { hidden.append(contentsOf: $0) } }
+                for t in 0..<n { try own.visitOutputs[v][t].withUnsafeBytes { try hidden.write(contentsOf: $0) } }
             }
-            try hidden.write(to: traceDir.appendingPathComponent("hidden_after_visit.f32"))
+            try hidden.close()
             let visits = (0..<48).map { v in
                 Inkling2G6cTests.TraceVisit(visit: v, slot: schedule[v].cacheSlot, layer: schedule[v].layer,
                                             experts: (0..<n).map { own.routes[v][$0].experts },
@@ -203,16 +207,17 @@ struct Inkling2PrecisionRoutingTests {
                                                     runner: "Inkling2ReferenceModel \(mode)"),
                       to: traceDir.appendingPathComponent("golden.json"))
 
+            let peak = Inkling2G6cTests.footprint().peak >> 20
             guard let traceSets else {
                 print("inkling2 precision \(id) \(mode) (\(String(format: "%.0f", seconds)) s): "
-                      + "\(n) positions and their trace written, next \(argmax)")
+                      + "\(n) positions and their trace written, next \(argmax); peak footprint \(peak) MiB")
                 continue
             }
             let flips = (0..<48).reduce(0) { sum, v in
                 sum + (0..<n).filter { Set(own.routes[v][$0].experts) != traceSets[v][$0] }.count
             }
             print("inkling2 precision \(id) \(mode) (\(String(format: "%.0f", seconds)) s): expert set differs "
-                  + "from the CPU trace on \(flips) of \(48 * n) token-visits, next \(argmax)")
+                  + "from the CPU trace on \(flips) of \(48 * n) token-visits, next \(argmax); peak footprint \(peak) MiB")
         }
     }
 }
