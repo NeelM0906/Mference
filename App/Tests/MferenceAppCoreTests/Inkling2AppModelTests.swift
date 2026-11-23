@@ -32,13 +32,19 @@ import Testing
             #expect(fit.verdict(for: .inkling2Mini, sizeBytes: Self.installSize) == .tooLarge)
         }
         #expect(EngineService.memoryGateReason(.inkling2Mini, physicalMemory: (32 << 30) - 1) == Self.reason32)
-        for gigabytes: UInt64 in [32, 64] {
+        for gigabytes: UInt64 in [32, 48, 64] {
             let fit = MemoryFit(physicalMemory: gigabytes << 30)
             #expect(EngineService.memoryGateReason(.inkling2Mini, physicalMemory: gigabytes << 30) == nil)
             #expect(fit.isOffered(.inkling2Mini))
-            // About 1.9 GB resident plus 3 GB headroom.
             #expect(fit.verdict(for: .inkling2Mini, sizeBytes: Self.installSize) == .fits)
         }
+        // The expert residency plan: below 48 GB the looped core and two
+        // staging slabs (about 12.2 GB of the install), from 48 GB all of it;
+        // plus 2 GB for context.
+        let at32 = MemoryFit(physicalMemory: 32 << 30).estimatedResidentBytes(.inkling2Mini, sizeBytes: Self.installSize)
+        #expect(at32 > 14_000_000_000 && at32 < 14_600_000_000)
+        let at48 = MemoryFit(physicalMemory: 48 << 30).estimatedResidentBytes(.inkling2Mini, sizeBytes: Self.installSize)
+        #expect(at48 == Self.installSize + (2_048 << 20))
         // The other models' gates are unchanged.
         #expect(EngineService.memoryGateReason(.qwen36, physicalMemory: 8 << 30) == nil)
         #expect(EngineService.memoryGateReason(.maple, physicalMemory: 8 << 30) == nil)
@@ -55,6 +61,8 @@ import Testing
             Issue.record("Inkling 2 Mini should not be offered at 16 GB"); return
         }
         #expect(reason == Self.reason32)
+        let row = ModelPickerRow(small.first { $0.model == .inkling2Mini }!, selected: nil, physicalMemory: 16 << 30)
+        #expect(row.statusText == "Needs 32 GB or more" && !row.isSelectable)
     }
 
     @Test func aMissingInstallSaysHowToMakeOne() {

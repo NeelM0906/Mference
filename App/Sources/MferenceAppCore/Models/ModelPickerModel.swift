@@ -33,7 +33,12 @@ public struct ModelPickerRow: Sendable, Hashable, Identifiable {
         case .loading: "Loading"
         case .unloading: "Unloading"
         case .notInstalled: "Not installed"
-        case .needsMoreMemory: "Needs more than 16 GB"
+        case .needsMoreMemory:
+            switch model {
+            case .deep: "Needs more than 16 GB"
+            case .inkling2Mini: "Needs 32 GB or more"
+            default: "Needs more memory"
+            }
         }
     }
 

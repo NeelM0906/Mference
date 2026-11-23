@@ -38,16 +38,19 @@ public struct MemoryFit: Sendable, Hashable {
         EngineService.memoryGateReason(model, physicalMemory: physicalMemory)
     }
 
-    /// The share of the install that stays resident, and the headroom for
-    /// KV cache and runtime. Qwen 3.6 and Inkling 2 Mini stream their routed
-    /// experts from the SSD, so most of their install is not resident
-    /// (Inkling 2 Mini: about 1.8 GB of 17.65 GB, plus KV for 48 visits and
-    /// the expert slot cache).
-    static func profile(_ model: AppModel) -> (residentShare: Double, headroom: UInt64) {
+    /// The share of the install that stays resident on a Mac with
+    /// `physicalMemory`, and the headroom for KV cache and runtime. Qwen 3.6
+    /// streams its routed experts from the SSD, so most of its install is not
+    /// resident. Inkling 2 Mini follows its expert residency plan
+    /// (`Inkling2ExpertResidencyPlan`): from 48 GB every layer's experts are
+    /// resident (the whole install); below that the looped core's experts and
+    /// two staging slabs are, about 12.2 GB of the 17.65 GB install before
+    /// context.
+    static func profile(_ model: AppModel, physicalMemory: UInt64) -> (residentShare: Double, headroom: UInt64) {
         switch model {
         case .quick: (1.0, 1_536 << 20)
         case .deep: (1.0, 2_560 << 20)
-        case .inkling2Mini: (0.11, 3_072 << 20)
+        case .inkling2Mini: (physicalMemory >= 48 << 30 ? 1.0 : 0.69, 2_048 << 20)
         case .qwen36: (0.3, 2_048 << 20)
         case .minicpm5: (1.0, 1_024 << 20)
         case .maple: (1.0, 1_536 << 20)
@@ -57,7 +60,7 @@ public struct MemoryFit: Sendable, Hashable {
 
     /// Estimated resident bytes for `model` with `sizeBytes` on disk.
     public func estimatedResidentBytes(_ model: AppModel, sizeBytes: UInt64) -> UInt64 {
-        let profile = Self.profile(model)
+        let profile = Self.profile(model, physicalMemory: physicalMemory)
         return UInt64(Double(sizeBytes) * profile.residentShare) + profile.headroom
     }
 
