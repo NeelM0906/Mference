@@ -36,6 +36,12 @@ constant uint kI2Encoding = is_function_constant_defined(FC_I2_ENCODING) ? FC_I2
 // multiply (default) or after the barrier like the tensor-ops kernels.
 constant bool FC_I2_PIPELINE [[function_constant(201)]];
 constant bool kI2Pipeline = is_function_constant_defined(FC_I2_PIPELINE) ? FC_I2_PIPELINE : true;
+// The one-token NVFP4 decode: codes as FP16 bit patterns two at a time (the
+// default), or one at a time through a table where the GPU does not convert
+// FP16 subnormals exactly. `Inkling2MoEKernels` probes that once
+// (`inkling2_nvfp4_decode_probe`). Both write the same bits where both run.
+constant bool FC_I2_PAIR_DECODE [[function_constant(202)]];
+constant bool kI2PairDecode = is_function_constant_defined(FC_I2_PAIR_DECODE) ? FC_I2_PAIR_DECODE : true;
 constant constexpr uint kI2NVFP4 = 0;
 
 constant constexpr uint kI2Rows = 64;          // routed rows per threadgroup
@@ -812,6 +818,30 @@ kernel void inkling2_moe_input_quant(
 
 // MARK: - Decode (one token)
 
+// The table decode, for GPUs that flush FP16 subnormals (FC_I2_PAIR_DECODE
+// false). Doubled E2M1 magnitudes (0, 1, 2, 3, 4, 6, 8, 12) as the nibbles of
+// one word, so a code decodes in registers.
+constant constexpr uint kI2E2M1Doubled = 0xC8643210u;
+
+static inline float i2_e2m1_doubled(uint code) {
+    const float magnitude = float((kI2E2M1Doubled >> ((code & 7u) << 2)) & 15u);
+    return as_type<float>(as_type<uint>(magnitude) | ((code & 8u) << 28));
+}
+
+// One 16-weight NVFP4 sub-block (codes in `lo4` = bytes 0..3, `hi4` = bytes
+// 4..7) against x[0..16): low nibbles are elements 0..7, high nibbles 8..15.
+static inline float i2_nvfp4_sub_dot_table(uint lo4, uint hi4, device const half4* x) {
+    const float4 a = float4(i2_e2m1_doubled(lo4), i2_e2m1_doubled(lo4 >> 8),
+                            i2_e2m1_doubled(lo4 >> 16), i2_e2m1_doubled(lo4 >> 24));
+    const float4 b = float4(i2_e2m1_doubled(hi4), i2_e2m1_doubled(hi4 >> 8),
+                            i2_e2m1_doubled(hi4 >> 16), i2_e2m1_doubled(hi4 >> 24));
+    const float4 c = float4(i2_e2m1_doubled(lo4 >> 4), i2_e2m1_doubled(lo4 >> 12),
+                            i2_e2m1_doubled(lo4 >> 20), i2_e2m1_doubled(lo4 >> 28));
+    const float4 d = float4(i2_e2m1_doubled(hi4 >> 4), i2_e2m1_doubled(hi4 >> 12),
+                            i2_e2m1_doubled(hi4 >> 20), i2_e2m1_doubled(hi4 >> 28));
+    return dot(a, float4(x[0])) + dot(b, float4(x[1])) + dot(c, float4(x[2])) + dot(d, float4(x[3]));
+}
+
 // NVFP4 codes decode two at a time as FP16 bit patterns: a code's three
 // magnitude bits at bits 9-11 (the exponent's low bits and the mantissa's top
 // bit) and its sign at bit 15 give its E2M1 value times 2^-14, exact for all
@@ -877,15 +907,41 @@ static inline float i2_nvfp4_lane_dot(device const uchar* row, uint groups, uint
     return acc;
 }
 
-// Weights [32 g, 32 g + 32) of a Q8_0 row (one block) against x, FP32.
+// Weights [32 g, 32 g + 32) of a row (half an NVFP4 block through the
+// table, or one Q8_0 block) against x, FP32.
 static inline float i2_group_dot(device const uchar* row, uint g, device const half* x) {
     device const half4* xv = reinterpret_cast<device const half4*>(x + g * 32u);
-    device const uchar* block = row + g * 34u;
-    const float scale = float(*reinterpret_cast<device const half*>(block));
-    device const packed_char4* q = reinterpret_cast<device const packed_char4*>(block + 2u);
-    float sum = 0.0f;
-    I2_UNROLL for (uint i = 0; i < 8; ++i) sum += dot(float4(char4(q[i])), float4(xv[i]));
-    return sum * scale;
+    if (kI2Encoding == kI2NVFP4) {
+        device const uchar* block = row + (g / 2u) * 36u;
+        const uint part = g % 2u;
+        const ushort scales = *reinterpret_cast<device const ushort*>(block + part * 2u);
+        const packed_uint4 q = *reinterpret_cast<device const packed_uint4*>(block + 4u + part * 16u);
+        return i2_nvfp4_sub_dot_table(q.x, q.y, xv) * (i2_ue4m3(scales & 0xFFu) * 0.5f)
+             + i2_nvfp4_sub_dot_table(q.z, q.w, xv + 4) * (i2_ue4m3(scales >> 8) * 0.5f);
+    } else {
+        device const uchar* block = row + g * 34u;
+        const float scale = float(*reinterpret_cast<device const half*>(block));
+        device const packed_char4* q = reinterpret_cast<device const packed_char4*>(block + 2u);
+        float sum = 0.0f;
+        I2_UNROLL for (uint i = 0; i < 8; ++i) sum += dot(float4(char4(q[i])), float4(xv[i]));
+        return sum * scale;
+    }
+}
+
+// The pair decode's exactness on this GPU, run once by the host: thread
+// c < 16 sums a sub-block of sixteen codes c against ones (16 E2M1(c) x
+// 2^-14), thread 16 + b decodes scale byte b (UE4M3(b) x 2^14). Codes 1 and 9
+// and the bytes with exponent 0 go through FP16 subnormals.
+kernel void inkling2_nvfp4_decode_probe(
+    device const half4* ones [[buffer(0)]],
+    device float* out        [[buffer(1)]],
+    uint i [[thread_position_in_grid]]) {
+    if (i < 16u) {
+        const uint codes = i * 0x11111111u;
+        out[i] = i2_nvfp4_sub_dot(codes, codes, ones[0], ones[1], ones[2], ones[3]);
+    } else if (i < 16u + 256u) {
+        out[i] = i2_ue4m3_x2p14(i - 16u);
+    }
 }
 
 // Gate-up and SITU for one token's experts: grid (F / 16, top_k), four
@@ -909,7 +965,7 @@ kernel void inkling2_moe_decode_gate_up(
     device const uchar* w = pool + ulong(expert) * p.expert_stride + p.gate_up_offset + ulong(row) * row_bytes;
     const uint groups = p.D / 32u;
     float acc = 0.0f;
-    if (kI2Encoding == kI2NVFP4) {
+    if (kI2Encoding == kI2NVFP4 && kI2PairDecode) {
         acc = i2_nvfp4_lane_dot(w, groups, lane, x);
     } else {
         for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, x);
@@ -947,7 +1003,7 @@ kernel void inkling2_moe_decode_down(
         device const uchar* w = pool + ulong(expert) * p.expert_stride + p.down_offset + ulong(row) * row_bytes;
         device const half* act = activation + ulong(r) * p.F;
         float acc = 0.0f;
-        if (kI2Encoding == kI2NVFP4) {
+        if (kI2Encoding == kI2NVFP4 && kI2PairDecode) {
             acc = i2_nvfp4_lane_dot(w, groups, lane, act);
         } else {
             for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, act);

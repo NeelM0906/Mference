@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Synchronization
 
 /// Encoding of one Inkling 2 Mini layer's routed experts, as stored in the
 /// Unsloth UD-Q4_K_XL file and copied unchanged into the install.
@@ -315,18 +316,36 @@ final class Inkling2MoEKernels {
     private let reduce: MTLComputePipelineState
     private let encoded: [Inkling2MoEEncoding: Encoded]
 
+    /// How the one-token NVFP4 decode turns codes and scale bytes into values
+    /// (`FC_I2_PAIR_DECODE`): as FP16 bit patterns two codes at a time, exact
+    /// only where the GPU converts FP16 subnormals exactly (E2M1 code 1 and
+    /// UE4M3 bytes with exponent 0 are subnormal there), or one code at a time
+    /// through a table. Where both are exact they write the same bits.
+    enum NVFP4Decode: Sendable, Equatable {
+        case pairs
+        case table
+    }
+
+    /// The NVFP4 decode these pipelines run: `.pairs` when the probe found
+    /// this GPU exact (or a caller asked for it), otherwise `.table`.
+    let nvfp4Decode: NVFP4Decode
+
     /// `pipelined`: the simdgroup kernels load the next K step before the
     /// current multiply (the default; false keeps the plain loop, for A/B
-    /// measurements).
-    init(context: MetalContext, pipelined: Bool = true) throws {
+    /// measurements). `nvfp4Decode`: nil (the default) takes the device's
+    /// probed path (`probedNVFP4Decode`); tests pass a path to run it whatever
+    /// the probe says.
+    init(context: MetalContext, pipelined: Bool = true, nvfp4Decode requested: NVFP4Decode? = nil) throws {
         let device = context.device
         let library = try Inkling2ShaderLibrary.compile(device: device, module: Self.module)
-        func make(_ name: String, encoding: Inkling2MoEEncoding? = nil) throws -> MTLComputePipelineState {
+        func make(_ name: String, encoding: Inkling2MoEEncoding? = nil,
+                  pairDecode: Bool? = nil) throws -> MTLComputePipelineState {
             let values = MTLFunctionConstantValues()
             var raw = encoding?.rawValue ?? 0
             var prefetch = pipelined
             values.setConstantValue(&raw, type: .uint, index: 200)
             values.setConstantValue(&prefetch, type: .bool, index: 201)
+            if var pairs = pairDecode { values.setConstantValue(&pairs, type: .bool, index: 202) }
             let function = try library.makeFunction(name: name, constantValues: values)
             let pipeline = try device.makeComputePipelineState(function: function)
             guard pipeline.maxTotalThreadsPerThreadgroup >= Self.threads else {
@@ -340,6 +359,10 @@ final class Inkling2MoEKernels {
         plan = try make("inkling2_route_plan")
         scatter = try make("inkling2_route_scatter")
         reduce = try make("inkling2_moe_reduce")
+        let decode = requested ?? Self.probedNVFP4Decode(device: device) {
+            try? make("inkling2_nvfp4_decode_probe")
+        }
+        nvfp4Decode = decode
         // The tensor-ops kernels exist only where the GPU builds them
         // (`__HAVE_TENSOR__`); a pipeline that fails leaves the simdgroup path.
         let hasTensorOps = library.functionNames.contains("inkling2_moe_gate_up_tensor")
@@ -357,11 +380,94 @@ final class Inkling2MoEKernels {
                     down: try make("inkling2_moe_down", encoding: encoding),
                     downTail: try make("inkling2_moe_down_tail", encoding: encoding)),
                 tensorOps: tensorOps,
-                decodeGateUp: try make("inkling2_moe_decode_gate_up", encoding: encoding),
-                decodeDown: try make("inkling2_moe_decode_down", encoding: encoding),
+                decodeGateUp: try make("inkling2_moe_decode_gate_up", encoding: encoding,
+                                       pairDecode: decode == .pairs),
+                decodeDown: try make("inkling2_moe_decode_down", encoding: encoding,
+                                     pairDecode: decode == .pairs),
                 inputQuant: try make("inkling2_moe_input_quant", encoding: encoding))
         }
         self.encoded = encoded
+    }
+
+    /// Probe results by device (`MTLDevice.registryID`): the probe runs once
+    /// per device in a process.
+    private static let probed = Mutex<[UInt64: NVFP4Decode]>([:])
+
+    /// The NVFP4 decode for `device`: `.pairs` when `inkling2_nvfp4_decode_probe`
+    /// writes exactly `nvfp4ProbeExpected` (every E2M1 code through the pair
+    /// decode, sixteen of one code against ones, and every UE4M3 byte through
+    /// its scale decode), otherwise `.table`, with one line on stderr naming
+    /// the cause. A probe that cannot run (no pipeline, buffer or command
+    /// buffer, or an error in the command buffer) also selects `.table`, so
+    /// building the pipelines never fails here. The first call for a device
+    /// probes, on its own command queue; later calls reuse the answer.
+    static func probedNVFP4Decode(device: MTLDevice,
+                                  pipeline: () -> MTLComputePipelineState?) -> NVFP4Decode {
+        let id = device.registryID
+        if let known = probed.withLock({ $0[id] }) { return known }
+        let (decode, failure) = runNVFP4Probe(device: device, pipeline: pipeline())
+        if let failure {
+            FileHandle.standardError.write(Data("inkling2: \(failure); the NVFP4 expert decode uses its table path\n".utf8))
+        }
+        probed.withLock { $0[id] = decode }
+        return decode
+    }
+
+    /// One probe run, uncached: the path and, for `.table`, why.
+    static func runNVFP4Probe(device: MTLDevice, pipeline: MTLComputePipelineState?)
+        -> (NVFP4Decode, failure: String?) {
+        let count = nvfp4ProbeExpected.count
+        guard let pipeline,
+              let ones = device.makeBuffer(length: 16 * 2, options: .storageModeShared),
+              let out = device.makeBuffer(length: count * 4, options: .storageModeShared),
+              let queue = device.makeCommandQueue(),
+              let cb = queue.makeCommandBuffer(),
+              let encoder = cb.makeComputeCommandEncoder() else {
+            return (.table, "the FP16 subnormal probe could not be set up")
+        }
+        let h = ones.contents().bindMemory(to: Float16.self, capacity: 16)
+        for i in 0..<16 { h[i] = 1 }
+        memset(out.contents(), 0xFF, count * 4)     // NaN in any slot left unwritten
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(ones, offset: 0, index: 0)
+        encoder.setBuffer(out, offset: 0, index: 1)
+        encoder.dispatchThreadgroups(MTLSize(width: (count + threads - 1) / threads, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        encoder.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        guard cb.status == .completed else {
+            return (.table, "the FP16 subnormal probe failed (\(cb.error.map { "\($0)" } ?? "status \(cb.status.rawValue)"))")
+        }
+        let got = out.contents().bindMemory(to: Float.self, capacity: count)
+        guard nvfp4ProbeIsExact(Array(UnsafeBufferPointer(start: got, count: count))) else {
+            return (.table, "this GPU does not convert FP16 subnormals exactly")
+        }
+        return (.pairs, nil)
+    }
+
+    /// The probe's exact outputs: 16 x E2M1(c) x 2^-14 for codes c = 0..15,
+    /// then UE4M3(b) x 2^14 for bytes b = 0..255, read as `i2_ue4m3` reads
+    /// them: the byte 0x7F is zero, otherwise bit 7 is ignored (0xFF is 480).
+    static let nvfp4ProbeExpected: [Float] = {
+        let e2m1: [Float] = [0, 0.5, 1, 1.5, 2, 3, 4, 6]
+        func ue4m3(_ byte: Int) -> Float {
+            if byte == 0 || byte == 0x7F { return 0 }
+            let e = (byte >> 3) & 15, m = Float(byte & 7)
+            return e == 0 ? m * 0.001953125 : Float(sign: .plus, exponent: e - 7, significand: 1 + m / 8)
+        }
+        var values: [Float] = []
+        for c in 0..<16 {
+            let sixteen: Float = c >= 8 ? -16 : 16
+            values.append(sixteen * e2m1[c & 7] / 16384)
+        }
+        for b in 0..<256 { values.append(ue4m3(b) * 16384) }
+        return values
+    }()
+
+    /// True when the probe's outputs equal `nvfp4ProbeExpected` exactly.
+    static func nvfp4ProbeIsExact(_ got: [Float]) -> Bool {
+        got.count == nvfp4ProbeExpected.count && zip(got, nvfp4ProbeExpected).allSatisfy { $0 == $1 }
     }
 
     /// The grouped-GEMM kernels `encodeGroupedExperts` uses, per weight
