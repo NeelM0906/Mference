@@ -66,11 +66,12 @@ struct Inkling2ForwardRunnerToyTests {
     }
 
     /// Chunks of 2 split the 3-token prefill into 2 + 1 (the 1-row span runs
-    /// the decode kernels); chunks of 4 take it whole; chunks of 40 take the
-    /// 37-row prefill whole. Positions stay below 45: the window, the ring
+    /// the decode kernels); chunks of 4 take it whole; chunks of 16 split the
+    /// 37-row prefill into balanced chunks of 13, 12 and 12
+    /// (`Inkling2ForwardRunner.prefillSpans`); chunks of 40 take it whole. Positions stay below 45: the window, the ring
     /// wrap, the log-scaled global queries and the relative-bias extent
     /// (all from 1,024 or 8,192 tokens) are K3's own tests' and G6's.
-    @Test(.fullTier, arguments: [2, 4, 40])
+    @Test(.fullTier, arguments: [2, 4, 16, 40])
     func runnerMatchesTheReference(maxChunkTokens: Int) async throws {
         let context = try MetalContext()
         let toy = try Inkling2RunnerToy(device: context.device)
@@ -88,7 +89,7 @@ struct Inkling2ForwardRunnerToyTests {
         runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows)
         let ids = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * topK)
         let schedule = c.schedule
-        let steps = maxChunkTokens >= 37 ? Self.longSteps : Self.shortSteps
+        let steps = maxChunkTokens >= 16 ? Self.longSteps : Self.shortSteps
 
         var position = 0
         for (step, (chunk, decode)) in steps.enumerated() {
@@ -221,7 +222,7 @@ struct Inkling2ForwardRunnerToyTests {
         let d = c.hiddenSize, rows = 24
         // The short steps, then a prefill after the decodes (it restages
         // layers whose slots live decode visits used) and one more decode,
-        // then a 10-token prefill in chunks of 4, 4 and 2 (each chunk but the
+        // then a 10-token prefill in balanced chunks of 4, 3 and 3 (each chunk but the
         // last prefetches the next one's first staged read) and a decode.
         let steps = Self.shortSteps + [([88, 5, 61], false), ([41], true),
                                        ((0..<10).map { Int32(($0 * 37 + 11) % 500) }, false), ([9], true)]

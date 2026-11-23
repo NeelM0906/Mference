@@ -114,6 +114,37 @@ enum PrefillChunkPlanner {
         }
         return spans
     }
+
+    /// The same number of chunks as `spans` (ceil(tokenCount / chunk)), with
+    /// sizes as equal as possible: the first tokenCount % n chunks one token
+    /// larger, none above the chunk. 4,111 tokens at 2,048 are 1,371, 1,370
+    /// and 1,370 rather than 2,048, 2,048 and 15. Inkling 2 plans with it
+    /// (`Inkling2ForwardRunner.prefillSpans`). Below 48 GB its every chunk
+    /// reads the staged layers whole whatever the chunk's length, so a short
+    /// tail leaves that read with no compute to hide behind. Every other
+    /// family keeps `spans`.
+    static func balancedSpans(tokenCount: Int,
+                              startPosition: Int,
+                              chunkTokens: Int) -> [PrefillChunkSpan] {
+        precondition(tokenCount >= 0, "prefill tokenCount must be non-negative")
+        precondition(startPosition >= 0, "prefill startPosition must be non-negative")
+        let chunk = max(1, min(chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
+        guard tokenCount > 0 else { return [] }
+        let count = (tokenCount + chunk - 1) / chunk
+        let base = tokenCount / count, larger = tokenCount % count
+        var spans: [PrefillChunkSpan] = []
+        spans.reserveCapacity(count)
+        var offset = 0
+        for index in 0..<count {
+            let size = base + (index < larger ? 1 : 0)
+            spans.append(PrefillChunkSpan(tokenOffset: offset,
+                                          tokenCount: size,
+                                          startPosition: startPosition + offset,
+                                          completedCount: offset + size))
+            offset += size
+        }
+        return spans
+    }
 }
 
 public enum PrefillKVStorageMode: String, Sendable, Equatable {

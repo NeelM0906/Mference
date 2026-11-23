@@ -118,14 +118,14 @@ struct Inkling2LogProbRowTests {
 }
 
 /// The runner's position-logits hook (G6c) on the Mini-width toy, over a
-/// prefill of two chunks ([0, 4) and [4, 6)) with the window starting inside
-/// the first: every row against the CPU reference's logits for that token,
+/// prefill of two chunks ([0, 3) and [3, 6): the runner's balanced plan for 6
+/// tokens at its 4-token chunk) with the window starting inside the first: every row against the CPU reference's logits for that token,
 /// teacher-forced on the runner's own visit outputs and routes as in
 /// `Inkling2ForwardRunnerToyTests` (the random toy amplifies a different
 /// kernel's rounding about twofold every six visits, so only the head is
 /// compared); the last row against the production head's output bit for
 /// bit; and the first chunk's rows against prefills of the prefix alone,
-/// which run the same kernels (chunks of 2 to 4 rows), bit for bit.
+/// which run the same kernels (chunks of 2 and 3 rows), bit for bit.
 /// Production shape (about 1.7 GB of buffers, a slow CPU reference), so full
 /// tier.
 @Suite("Inkling2ForwardRunner position logits on the toy", .serialized)
@@ -145,7 +145,9 @@ struct Inkling2PositionLogitsToyTests {
         let device = context.device
         let rowBytes = c.vocabPadded * 2
         let tokens: [Int32] = [17, 401, 3, 250, 99, 7]
-        let chunks = [0..<4, 4..<6]
+        let chunks = [0..<3, 3..<6]
+        #expect(Inkling2ForwardRunner.prefillSpans(tokenCount: tokens.count, startPosition: 0, chunkTokens: 4)
+                    .map { $0.tokenOffset..<$0.completedCount } == chunks)
         let positions = 1..<6
         let hook = try #require(device.makeBuffer(length: positions.count * rowBytes, options: .storageModeShared))
         let out = try #require(device.makeBuffer(length: rowBytes, options: .storageModeShared))

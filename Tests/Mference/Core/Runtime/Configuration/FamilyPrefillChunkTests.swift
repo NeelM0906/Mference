@@ -67,11 +67,13 @@ import Testing
     }
 
     /// A prompt prefills in chunks of the resolved size and a last, shorter
-    /// one; a prompt shorter than the chunk is one chunk of its own length,
-    /// never padded to the chunk. Pinned for each family's server default on a
-    /// 32 GB Mac and for Inkling 2's 2,048 at every length.
+    /// one (every family but Inkling 2, through `PrefillChunkPlanner.spans`),
+    /// or, for Inkling 2, in the same number of chunks of near-equal size
+    /// (`Inkling2ForwardRunner.prefillSpans`). A prompt shorter than the chunk
+    /// is one chunk of its own length, never padded to the chunk. Pinned for
+    /// each family's server default on a 32 GB Mac.
     @Test func promptsPrefillInChunksOfTheResolvedSize() {
-        for family in ModelFamily.allCases {
+        for family in ModelFamily.allCases where family != .inkling2Loop {
             let chunk = RuntimeConfiguration.defaultServerPrefillChunkTokens(
                 for: family, physicalMemoryBytes: 32 * Self.gib, environment: [:])
             for n in Self.lengths {
@@ -82,10 +84,12 @@ import Testing
                 #expect(spans.last?.completedCount == n)
             }
         }
+        let chunk = RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .inkling2Loop, physicalMemoryBytes: 32 * Self.gib, environment: [:])
         let inkling = Self.lengths.map {
-            PrefillChunkPlanner.spans(tokenCount: $0, startPosition: 0, chunkTokens: 2_048).map(\.tokenCount)
+            Inkling2ForwardRunner.prefillSpans(tokenCount: $0, startPosition: 0, chunkTokens: chunk).map(\.tokenCount)
         }
-        #expect(inkling == [[16], [512], [2_048], [2_048, 2_048], [2_048, 2_048, 904],
-                            Array(repeating: 2_048, count: 9) + [1_568]])
+        #expect(inkling == [[16], [512], [2_048], [2_048, 2_048], [1_667, 1_667, 1_666],
+                            Array(repeating: 2_000, count: 10)])
     }
 }
