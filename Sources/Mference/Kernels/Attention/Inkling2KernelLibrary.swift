@@ -108,3 +108,13 @@ public enum Inkling2AttentionShape {
     /// Layers 5, 11, 17 and 23 attend globally; the others use the window.
     public static func isGlobal(layer: Int) -> Bool { (layer + 1) % 6 == 0 }
 }
+
+extension MTLCommandBuffer {
+    /// Runs `body` in one new (serial) compute encoder and ends it: how every
+    /// Inkling 2 `encode(commandBuffer:)` wraps its `encode(encoder:)` form.
+    func inkling2Compute<R>(_ body: (MTLComputeCommandEncoder) throws -> R) rethrows -> R {
+        let encoder = makeComputeCommandEncoder()!
+        defer { encoder.endEncoding() }
+        return try body(encoder)
+    }
+}

@@ -89,6 +89,12 @@ public final class Inkling2QKVEpilogue {
     }
 
     public func encode(commandBuffer: MTLCommandBuffer, _ a: Arguments) {
+        commandBuffer.inkling2Compute { encode(encoder: $0, a) }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encode(encoder: MTLComputeCommandEncoder, _ a: Arguments) {
         precondition(a.rows > 0)
         precondition((a.columns.keyTaps == nil) == (a.columns.valueTaps == nil))
         precondition(!a.advanceTails || a.rows == 1, "in-place tail advance needs one row")
@@ -109,7 +115,6 @@ public final class Inkling2QKVEpilogue {
             advanceTails: a.advanceTails ? 1 : 0,
             qkClip: Inkling2AttentionShape.qkClip, relClip: Inkling2AttentionShape.relClip,
             clipEps: 1e-6, rmsEps: Inkling2AttentionShape.rmsEps)
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2QKVParams>.stride, index: 0)
         let refs = [a.projections, a.queryScale, a.relativeScale, a.keyConv, a.valueConv, a.keyTail,
@@ -119,7 +124,6 @@ public final class Inkling2QKVEpilogue {
         }
         encoder.dispatchThreadgroups(MTLSize(width: a.rows, height: 16, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 }
 
@@ -150,12 +154,20 @@ public final class Inkling2ConvTail {
 
     public func encode(commandBuffer: MTLCommandBuffer, x: Inkling2BufferRef, xStride: Int, rows: Int,
                        tails: Inkling2BufferRef, runs: [Run]) {
+        commandBuffer.inkling2Compute {
+            encode(encoder: $0, x: x, xStride: xStride, rows: rows, tails: tails, runs: runs)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encode(encoder: MTLComputeCommandEncoder, x: Inkling2BufferRef, xStride: Int, rows: Int,
+                       tails: Inkling2BufferRef, runs: [Run]) {
         precondition(rows > 0 && (1...2).contains(runs.count))
         var params = Inkling2TailParams(tokens: UInt32(rows), xStride: UInt32(xStride),
                                         runCount: UInt32(runs.count), reserved: 0,
                                         run0: Self.packed(runs[0]),
                                         run1: runs.count > 1 ? Self.packed(runs[1]) : Inkling2TailRun())
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2TailParams>.stride, index: 0)
         encoder.setBuffer(x.buffer, offset: x.offset, index: 1)
@@ -163,7 +175,6 @@ public final class Inkling2ConvTail {
         let total = runs.reduce(0) { $0 + $1.channels }
         encoder.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: min(256, total), height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     private static func packed(_ run: Run) -> Inkling2TailRun {
@@ -191,6 +202,22 @@ public final class Inkling2ShortConv {
                        output: Inkling2BufferRef, outputStride: Int,
                        rows: Int, channels: Int = Inkling2AttentionShape.hidden,
                        advanceTail: Bool = false) {
+        commandBuffer.inkling2Compute {
+            encode(encoder: $0, x: x, xStride: xStride, weight: weight, tail: tail, residual: residual,
+                   residualStride: residualStride, output: output, outputStride: outputStride, rows: rows,
+                   channels: channels, advanceTail: advanceTail)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encode(encoder: MTLComputeCommandEncoder,
+                       x: Inkling2BufferRef, xStride: Int,
+                       weight: Inkling2BufferRef, tail: Inkling2BufferRef,
+                       residual: Inkling2BufferRef?, residualStride: Int = 0,
+                       output: Inkling2BufferRef, outputStride: Int,
+                       rows: Int, channels: Int = Inkling2AttentionShape.hidden,
+                       advanceTail: Bool = false) {
         precondition(rows > 0 && channels % 4 == 0 && xStride % 4 == 0 && outputStride % 4 == 0)
         precondition(!advanceTail || rows == 1, "in-place tail advance needs one row")
         precondition(residual == nil || (residualStride > 0 && residualStride % 4 == 0))
@@ -198,7 +225,6 @@ public final class Inkling2ShortConv {
                                         xStride: UInt32(xStride), outStride: UInt32(outputStride),
                                         residualStride: UInt32(residual == nil ? 0 : residualStride),
                                         advanceTail: advanceTail ? 1 : 0, reserved1: 0, reserved2: 0)
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2ConvParams>.stride, index: 0)
         encoder.setBuffer(x.buffer, offset: x.offset, index: 1)
@@ -209,7 +235,6 @@ public final class Inkling2ShortConv {
         encoder.setBuffer(output.buffer, offset: output.offset, index: 5)
         encoder.dispatchThreads(MTLSize(width: channels / 4, height: rows, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: min(64, channels / 4), height: 4, depth: 1))
-        encoder.endEncoding()
     }
 }
 
@@ -226,10 +251,21 @@ public final class Inkling2InputNorm {
                        weight: Inkling2BufferRef, output: Inkling2BufferRef, outputStride: Int,
                        rows: Int, width: Int = Inkling2AttentionShape.hidden,
                        eps: Float = Inkling2AttentionShape.rmsEps) {
+        commandBuffer.inkling2Compute {
+            encode(encoder: $0, x: x, xStride: xStride, weight: weight, output: output,
+                   outputStride: outputStride, rows: rows, width: width, eps: eps)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encode(encoder: MTLComputeCommandEncoder, x: Inkling2BufferRef, xStride: Int,
+                       weight: Inkling2BufferRef, output: Inkling2BufferRef, outputStride: Int,
+                       rows: Int, width: Int = Inkling2AttentionShape.hidden,
+                       eps: Float = Inkling2AttentionShape.rmsEps) {
         precondition(rows > 0)
         var params = Inkling2NormParams(width: UInt32(width), xStride: UInt32(xStride),
                                         outStride: UInt32(outputStride), eps: eps)
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2NormParams>.stride, index: 0)
         encoder.setBuffer(x.buffer, offset: x.offset, index: 1)
@@ -237,7 +273,6 @@ public final class Inkling2InputNorm {
         encoder.setBuffer(output.buffer, offset: output.offset, index: 3)
         encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 }
 
@@ -309,6 +344,12 @@ public final class Inkling2DecodeAttention {
     }
 
     public func encode(commandBuffer: MTLCommandBuffer, _ a: Arguments) {
+        commandBuffer.inkling2Compute { encode(encoder: $0, a) }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encode(encoder: MTLComputeCommandEncoder, _ a: Arguments) {
         let (begin, count) = Self.keyRange(position: a.position, mask: a.mask)
         if case .window(let window) = a.mask {
             precondition(a.cache.ringCapacity == 0 || a.cache.ringCapacity >= window)
@@ -325,27 +366,21 @@ public final class Inkling2DecodeAttention {
             numQHeads: UInt32(Inkling2AttentionShape.numQHeads),
             numKVHeads: UInt32(Inkling2AttentionShape.numKVHeads),
             hasGate: a.gate == nil ? 0 : 1, reserved0: 0, reserved1: 0, reserved2: 0)
-
-        let first = commandBuffer.makeComputeCommandEncoder()!
-        first.setComputePipelineState(partial)
-        first.setBytes(&params, length: MemoryLayout<Inkling2DecodeParams>.stride, index: 0)
+        encoder.setComputePipelineState(partial)
+        encoder.setBytes(&params, length: MemoryLayout<Inkling2DecodeParams>.stride, index: 0)
         for (index, ref) in [a.queries, a.cache.keys, a.cache.values, a.relative, a.table, a.partials].enumerated() {
-            first.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
+            encoder.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
         }
-        first.dispatchThreadgroups(MTLSize(width: blocks, height: Inkling2AttentionShape.numKVHeads, depth: 1),
-                                   threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-        first.endEncoding()
-
-        let second = commandBuffer.makeComputeCommandEncoder()!
-        second.setComputePipelineState(merge)
-        second.setBytes(&params, length: MemoryLayout<Inkling2DecodeParams>.stride, index: 0)
+        encoder.dispatchThreadgroups(MTLSize(width: blocks, height: Inkling2AttentionShape.numKVHeads, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        encoder.setComputePipelineState(merge)
+        encoder.setBytes(&params, length: MemoryLayout<Inkling2DecodeParams>.stride, index: 0)
         let gate = a.gate ?? a.sink
         for (index, ref) in [a.partials, a.sink, gate, a.output].enumerated() {
-            second.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
+            encoder.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
         }
-        second.dispatchThreadgroups(MTLSize(width: Inkling2AttentionShape.numQHeads, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-        second.endEncoding()
+        encoder.dispatchThreadgroups(MTLSize(width: Inkling2AttentionShape.numQHeads, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 }
 

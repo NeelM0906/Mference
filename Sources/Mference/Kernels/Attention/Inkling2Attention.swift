@@ -151,6 +151,12 @@ public final class Inkling2PrefillAttention {
     public func supports(_ variant: Variant) -> Bool { pipelines[variant] != nil }
 
     public func encode(commandBuffer: MTLCommandBuffer, _ a: Arguments, variant forced: Variant? = nil) {
+        commandBuffer.inkling2Compute { encode(encoder: $0, a, variant: forced) }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encode(encoder: MTLComputeCommandEncoder, _ a: Arguments, variant forced: Variant? = nil) {
         precondition(a.rows > 0)
         if case .window(let window) = a.mask {
             precondition(window > 0)
@@ -167,7 +173,6 @@ public final class Inkling2PrefillAttention {
         precondition(a.queryStride % 4 == 0 && a.queries.offset % 8 == 0)
         precondition(a.relativeStride % 4 == 0 && a.relative.offset % 16 == 0)
         precondition(a.cache.slotStride % 4 == 0 && a.outputStride % 2 == 0)
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         var params = Self.params(a)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2AttnParams>.stride, index: 0)
@@ -185,7 +190,6 @@ public final class Inkling2PrefillAttention {
                     height: variant == .gqa16 ? Inkling2AttentionShape.numKVHeads : Inkling2AttentionShape.numQHeads,
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: variant.threadsPerThreadgroup, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     static func params(_ a: Arguments) -> Inkling2AttnParams {
