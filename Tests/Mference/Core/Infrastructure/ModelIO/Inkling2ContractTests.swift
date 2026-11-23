@@ -61,15 +61,12 @@ import Testing
         #expect(outOfRange.layerVisits(numLayers: 4).count == 4)
     }
 
-    /// The family is installable but gated until its runner lands; the
-    /// retired Inkling-Small name is still refused as retired.
-    @Test func familyIsGatedByAxisName() {
+    /// The family runs (`Inkling2ForwardRunner`), so the gate no longer
+    /// holds it; the retired Inkling-Small name is still refused as retired.
+    @Test func familyIsNoLongerGated() {
         #expect(ModelFamily(rawValue: "inkling2Loop") == .inkling2Loop)
-        #expect(ManifestReader.familiesWithoutRunner["inkling2Loop"]
-                == ManifestReader.inkling2RequiredAxes)
-        #expect(ManifestReader.capabilityRefusal(family: "inkling2Loop")
-                == .familyRunnerNotImplemented(family: "inkling2Loop",
-                                               missingAxes: ManifestReader.inkling2RequiredAxes))
+        #expect(ManifestReader.familiesWithoutRunner["inkling2Loop"] == nil)
+        #expect(ManifestReader.capabilityRefusal(family: "inkling2Loop") == nil)
         #expect(ManifestReader.retiredFamilies.contains("inklingSmall"))
         #expect(ModelFamily(rawValue: "inklingSmall") == nil)
         // The installer publishes the runtime's list.

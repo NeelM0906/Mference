@@ -766,7 +766,9 @@ extension Model {
             directoryURL: directoryURL,
             inkling2ExpertLayout: inkling2Experts)
         model.integrityFallbackDetail = fallbackDetail
-        if case .resident = streamingMode {
+        // Inkling 2's runner reads its experts through its own store and never
+        // these streamers; warming them would page in the whole 15.8 GB pool.
+        if case .resident = streamingMode, model.config.family != .inkling2Loop {
             let warmupStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try model.warmUpResidentBackends()
             stats.residentWarmupNanos =

@@ -19,7 +19,7 @@ public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     /// layers whose core (layers 6 to 17) runs three times per token, installed
     /// byte for byte from Unsloth's UD-Q4_K_XL GGUF under its GGUF tensor
     /// names. Distinct from the retired `inklingSmall`, which stays refused.
-    /// Gated in `ManifestReader.familiesWithoutRunner` until its runner lands.
+    /// Runs on `Inkling2ForwardRunner`.
     case inkling2Loop = "inkling2Loop"
 }
 
@@ -1058,8 +1058,8 @@ public struct ArchConfig: Sendable, Equatable {
     ///
     /// A family here has a validated baseline, not necessarily a runner:
     /// `ManifestReader.familiesWithoutRunner` is the separate, authoritative
-    /// gate over whether the runtime can execute one (it holds `inkling2Loop`
-    /// until its runner lands), because a new port earns its baseline first.
+    /// gate over whether the runtime can execute one (it held `inkling2Loop`
+    /// until its runner landed), because a new port earns its baseline first.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .qwen36: .qwen36_35B_A3B,
         .qwen38: .qwen38_27B,

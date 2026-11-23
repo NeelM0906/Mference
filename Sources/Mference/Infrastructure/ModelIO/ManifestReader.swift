@@ -900,12 +900,12 @@ public enum ManifestReader {
     /// runner is built *against*. Presence in this table is the single fact
     /// that decides whether it can be loaded, and it is checked in
     /// `peekFamily` before any of that machinery is reached.
-    static let familiesWithoutRunner: [String: [String]] = [
-        ModelFamily.inkling2Loop.rawValue: inkling2RequiredAxes,
-    ]
+    static let familiesWithoutRunner: [String: [String]] = [:]
 
-    /// The mechanisms an Inkling 2 runner implements, by axis name. The
-    /// installer publishes the same list as `manifest.arch.requiredAxes`.
+    /// The mechanisms the Inkling 2 runner implements, by axis name. The
+    /// installer publishes the same list as `manifest.arch.requiredAxes`; it
+    /// held `inkling2Loop` in `familiesWithoutRunner` until
+    /// `Inkling2ForwardRunner` landed.
     public static let inkling2RequiredAxes: [String] = [
         "loopedCore", "blockAttentionResiduals", "relativePositionBias",
         "projectedAttentionSink", "shortConvolution", "situExpertActivation",
