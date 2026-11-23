@@ -334,18 +334,22 @@ final class Inkling2MoEKernels {
     /// current multiply (the default; false keeps the plain loop, for A/B
     /// measurements). `nvfp4Decode`: nil (the default) takes the device's
     /// probed path (`probedNVFP4Decode`); tests pass a path to run it whatever
-    /// the probe says.
-    init(context: MetalContext, pipelined: Bool = true, nvfp4Decode requested: NVFP4Decode? = nil) throws {
+    /// the probe says. `tailFragmentSkip`: the prefill tail blocks multiply
+    /// only the 8-row fragments that hold a routed row (`FC_I2_TAIL_SKIP`, the
+    /// default; the same bits); false keeps the plain loop, for tests.
+    init(context: MetalContext, pipelined: Bool = true, nvfp4Decode requested: NVFP4Decode? = nil,
+         tailFragmentSkip: Bool = true) throws {
         let device = context.device
         let library = try Inkling2ShaderLibrary.compile(device: device, module: Self.module)
         func make(_ name: String, encoding: Inkling2MoEEncoding? = nil,
-                  pairDecode: Bool? = nil) throws -> MTLComputePipelineState {
+                  pairDecode: Bool? = nil, tailSkip: Bool? = nil) throws -> MTLComputePipelineState {
             let values = MTLFunctionConstantValues()
             var raw = encoding?.rawValue ?? 0
             var prefetch = pipelined
             values.setConstantValue(&raw, type: .uint, index: 200)
             values.setConstantValue(&prefetch, type: .bool, index: 201)
             if var pairs = pairDecode { values.setConstantValue(&pairs, type: .bool, index: 202) }
+            if var skip = tailSkip { values.setConstantValue(&skip, type: .bool, index: 203) }
             let function = try library.makeFunction(name: name, constantValues: values)
             let pipeline = try device.makeComputePipelineState(function: function)
             guard pipeline.maxTotalThreadsPerThreadgroup >= Self.threads else {
@@ -376,9 +380,9 @@ final class Inkling2MoEKernels {
             encoded[encoding] = Encoded(
                 simdgroup: Grouped(
                     gateUp: try make("inkling2_moe_gate_up", encoding: encoding),
-                    gateUpTail: try make("inkling2_moe_gate_up_tail", encoding: encoding),
+                    gateUpTail: try make("inkling2_moe_gate_up_tail", encoding: encoding, tailSkip: tailFragmentSkip),
                     down: try make("inkling2_moe_down", encoding: encoding),
-                    downTail: try make("inkling2_moe_down_tail", encoding: encoding)),
+                    downTail: try make("inkling2_moe_down_tail", encoding: encoding, tailSkip: tailFragmentSkip)),
                 tensorOps: tensorOps,
                 decodeGateUp: try make("inkling2_moe_decode_gate_up", encoding: encoding,
                                        pairDecode: decode == .pairs),

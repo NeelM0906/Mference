@@ -42,6 +42,12 @@ constant bool kI2Pipeline = is_function_constant_defined(FC_I2_PIPELINE) ? FC_I2
 // (`inkling2_nvfp4_decode_probe`). Both write the same bits where both run.
 constant bool FC_I2_PAIR_DECODE [[function_constant(202)]];
 constant bool kI2PairDecode = is_function_constant_defined(FC_I2_PAIR_DECODE) ? FC_I2_PAIR_DECODE : true;
+// Prefill tail blocks (32 rows: an expert's last 1-32 routed rows) multiply only
+// the 8-row fragments that hold a routed row. The fragments in use run the same
+// multiplies in the same order, so the outputs are the same bits; false keeps
+// the plain loop over all four (tests compare the two).
+constant bool FC_I2_TAIL_SKIP [[function_constant(203)]];
+constant bool kI2TailSkip = is_function_constant_defined(FC_I2_TAIL_SKIP) ? FC_I2_TAIL_SKIP : true;
 constant constexpr uint kI2NVFP4 = 0;
 
 constant constexpr uint kI2Rows = 64;          // routed rows per threadgroup
@@ -260,6 +266,8 @@ static inline void i2_gate_up_block(
         acc_up[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     }
     const uint sg_m = (sg / SG_COLS) * 32u, sg_n = (sg % SG_COLS) * COLS;
+    // A tail block's fragments that hold a routed row (sg_m is 0 there).
+    const uint frags = w.row_count > sg_m ? min(4u, (w.row_count - sg_m + 7u) / 8u) : 0u;
 
     // Each thread owns one weight row (gate rows for threads 0-63, up rows
     // for 64-127); the next step's raw weights and activations are loaded
@@ -283,17 +291,29 @@ static inline void i2_gate_up_block(
         }
         I2_UNROLL for (uint kk = 0; kk < kI2K; kk += 8) {
             simdgroup_half8x8 a[4], g[NJ], u[NJ];
-            I2_UNROLL for (uint i = 0; i < 4; ++i) {
-                simdgroup_load(a[i], rows_tile + (sg_m + i * 8u) * kI2Ld + kk, kI2Ld);
-            }
-            I2_UNROLL for (uint j = 0; j < NJ; ++j) {
-                simdgroup_load(g[j], gate_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true);
-                simdgroup_load(u[j], up_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true);
-            }
-            I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
-                simdgroup_multiply_accumulate(acc_gate[i][j], a[i], g[j], acc_gate[i][j]);
-                simdgroup_multiply_accumulate(acc_up[i][j], a[i], u[j], acc_up[i][j]);
-            }
+// The step's multiplies over the first FR row fragments (FR a constant).
+#define I2_GATE_UP_STEP(FR) { \
+            I2_UNROLL for (uint i = 0; i < FR; ++i) { \
+                simdgroup_load(a[i], rows_tile + (sg_m + i * 8u) * kI2Ld + kk, kI2Ld); \
+            } \
+            I2_UNROLL for (uint j = 0; j < NJ; ++j) { \
+                simdgroup_load(g[j], gate_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true); \
+                simdgroup_load(u[j], up_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true); \
+            } \
+            I2_UNROLL for (uint i = 0; i < FR; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) { \
+                simdgroup_multiply_accumulate(acc_gate[i][j], a[i], g[j], acc_gate[i][j]); \
+                simdgroup_multiply_accumulate(acc_up[i][j], a[i], u[j], acc_up[i][j]); \
+            } }
+            if (ROWS == 32u && kI2TailSkip) {
+                switch (frags) {
+                    case 4: I2_GATE_UP_STEP(4) break;
+                    case 3: I2_GATE_UP_STEP(3) break;
+                    case 2: I2_GATE_UP_STEP(2) break;
+                    case 1: I2_GATE_UP_STEP(1) break;
+                    default: break;
+                }
+            } else I2_GATE_UP_STEP(4)
+#undef I2_GATE_UP_STEP
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -345,6 +365,8 @@ static inline void i2_down_block(
         acc[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     }
     const uint sg_m = (sg / SG_COLS) * 32u, sg_n = (sg % SG_COLS) * COLS;
+    // A tail block's fragments that hold a routed row (sg_m is 0 there).
+    const uint frags = w.row_count > sg_m ? min(4u, (w.row_count - sg_m + 7u) / 8u) : 0u;
 
     device const uchar* w_src = down + ulong(n_base + tid) * i2_row_bytes(p.F);
     threadgroup half* w_dst = weight_tile + uint(tid) * kI2Ld;
@@ -364,15 +386,26 @@ static inline void i2_down_block(
         }
         I2_UNROLL for (uint kk = 0; kk < kI2K; kk += 8) {
             simdgroup_half8x8 a[4], b[NJ];
-            I2_UNROLL for (uint i = 0; i < 4; ++i) {
-                simdgroup_load(a[i], rows_tile + (sg_m + i * 8u) * kI2Ld + kk, kI2Ld);
-            }
-            I2_UNROLL for (uint j = 0; j < NJ; ++j) {
-                simdgroup_load(b[j], weight_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true);
-            }
-            I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
-                simdgroup_multiply_accumulate(acc[i][j], a[i], b[j], acc[i][j]);
-            }
+#define I2_DOWN_STEP(FR) { \
+            I2_UNROLL for (uint i = 0; i < FR; ++i) { \
+                simdgroup_load(a[i], rows_tile + (sg_m + i * 8u) * kI2Ld + kk, kI2Ld); \
+            } \
+            I2_UNROLL for (uint j = 0; j < NJ; ++j) { \
+                simdgroup_load(b[j], weight_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true); \
+            } \
+            I2_UNROLL for (uint i = 0; i < FR; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) { \
+                simdgroup_multiply_accumulate(acc[i][j], a[i], b[j], acc[i][j]); \
+            } }
+            if (ROWS == 32u && kI2TailSkip) {
+                switch (frags) {
+                    case 4: I2_DOWN_STEP(4) break;
+                    case 3: I2_DOWN_STEP(3) break;
+                    case 2: I2_DOWN_STEP(2) break;
+                    case 1: I2_DOWN_STEP(1) break;
+                    default: break;
+                }
+            } else I2_DOWN_STEP(4)
+#undef I2_DOWN_STEP
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
