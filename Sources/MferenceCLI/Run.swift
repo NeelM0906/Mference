@@ -62,18 +62,10 @@ public func run(args: Args,
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = try args.generationConfig(defaults: tokenizer.generationDefaults,
                                                maxNewTokens: effectiveMaxNew)
-        let prefillChunkTokens: Int
-        switch args.prefillChunk {
-        case .fixed(let n):
-            prefillChunkTokens = n
-        case .auto:
-            // Smallest allowed chunk that covers the prompt: one chunk per
-            // prompt when it fits, which reads each layer's routed experts
-            // exactly once during prefill.
-            prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
-                .first(where: { $0 >= promptIds.count })
-                ?? RuntimeConfiguration.allowedPrefillChunkTokens.last!
-        }
+        // `auto`: one chunk per prompt when it fits, which reads each layer's
+        // routed experts exactly once, up to the family's own chunk.
+        let prefillChunkTokens = args.prefillChunk.rawChunkTokens(promptTokens: promptIds.count,
+                                                                  modelDirectory: modelURL)
         let runtime = RuntimeConfiguration(
             expertCacheSlots: expertStreaming.configSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),

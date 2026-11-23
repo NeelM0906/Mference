@@ -132,8 +132,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// footprints of 2.3 and 4.4 GB (2026-11-17, 32 GB M1 Max). It takes
     /// 4,096 on hosts with at least 32 GiB and 1,024 on hosts from 16 GiB up
     /// to but not including 32 GiB. Vendor Flash-Next keeps 128 (unmeasured
-    /// here). The server's `--prefill-chunk` and then
-    /// `MFERENCE_SERVER_PREFILL_CHUNK` override.
+    /// here). A family with its own chunk (`familyPrefillChunkTokens(for:)`,
+    /// Inkling 2's 2,048) takes it on every host. The server's
+    /// `--prefill-chunk` and then `MFERENCE_SERVER_PREFILL_CHUNK` override.
     public static func defaultServerPrefillChunkTokens(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
@@ -143,12 +144,44 @@ public struct RuntimeConfiguration: Sendable, Equatable {
            allowedPrefillChunkTokens.contains(requested) {
             return requested
         }
+        if let chunk = familyPrefillChunkTokens(for: family) { return chunk }
         let gib = UInt64(1) << 30
         guard physicalMemoryBytes >= 16 * gib else { return 128 }
         switch family {
         case .qwen36: return 2048
         default: return 128
         }
+    }
+
+    /// A family's own prefill chunk, the single source for it on every path:
+    /// the server's default (`--library` and `--model`), the app's through
+    /// the engine, the CLI's `--chat` (all through
+    /// `defaultServerPrefillChunkTokens`), and the most the CLI's one-shot
+    /// `auto` picks (`autoPrefillChunkTokens`). Nil for the families whose
+    /// chunk follows the rules that predate it, which stay exactly as they
+    /// were. Inkling 2 Mini: 2,048 on every host. On a 4K-token prompt,
+    /// 2,048-token chunks prefilled at 398 tok/s and one 4,096-token chunk at
+    /// 348 tok/s (K2 and K0, 2026-11-23); the runner sizes its scratch from
+    /// the chunk, and the product's memory estimate already assumes
+    /// chunk-2,048 scratch (`Inkling2MemoryFootprint.stateBytes`). A shorter
+    /// prompt still prefills as one chunk of its own length.
+    public static func familyPrefillChunkTokens(for family: ModelFamily) -> Int? {
+        switch family {
+        case .inkling2Loop: 2048
+        case .qwen36, .qwen38, .maple, .minicpm5: nil
+        }
+    }
+
+    /// `auto` for a prompt of `promptTokens` known before prefill (the CLI's
+    /// one-shot run): the smallest allowed chunk that covers the prompt, so
+    /// the prompt prefills in one chunk when it fits and reads each layer's
+    /// routed experts once, up to the family's own chunk
+    /// (`familyPrefillChunkTokens(for:)`). A nil `family` (unknown before
+    /// load) is bounded by the allowed sizes only.
+    public static func autoPrefillChunkTokens(promptTokens: Int, family: ModelFamily?) -> Int {
+        let largest = family.flatMap(familyPrefillChunkTokens(for:)) ?? allowedPrefillChunkTokens.last!
+        let sizes = allowedPrefillChunkTokens.filter { $0 <= largest }
+        return sizes.first(where: { $0 >= promptTokens }) ?? sizes.last!
     }
 
     /// Qwen 3.6's large expert table needs more cache coverage to avoid repeated
