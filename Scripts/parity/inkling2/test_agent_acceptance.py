@@ -44,6 +44,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(body)
         r = self.server.replies.pop(0) if self.server.replies else {"content": "", "finish": "stop"}
+        if r.get("die"):
+            # a server dying mid-stream: a chunked body cut short
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"40\r\ndata: {\"choices\"")
+            self.wfile.flush()
+            self.close_connection = True
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -137,7 +147,8 @@ class Unit(Base):
             {"tool_calls": [tool("open_page", url="https://other.example/")], "finish": "tool_calls"},
             {"tool_calls": [tool("web_search", query="norrby")], "finish": "tool_calls"},
             {"content": "10:00"}])
-        self.assertIn("was not in the search results", self.srv.requests[1]["messages"][-1]["content"])
+        self.assertEqual("Not opened: other.example was not in the search results.",
+                         self.srv.requests[1]["messages"][-1]["content"])
         self.assertTrue(r["passed"])
 
     def test_b_failures(self):
@@ -160,6 +171,42 @@ class Unit(Base):
         r = self.run_case("B", f, [{"tool_calls": [tool("web_search", query="home address")], "finish": "tool_calls"},
                                     {"content": "10:00"}])
         self.assertEqual(r["failure"], "wrong_tool_or_args")
+
+    def test_b_app_rules_urls_pages_rounds(self):
+        # the app's URL key: case-insensitive host, no fragment, empty path is "/"
+        r = self.run_case("B", b_case(), [
+            {"tool_calls": [tool("web_search", query="norrby")], "finish": "tool_calls"},
+            {"tool_calls": [tool("open_page", url="HTTPS://N.EXAMPLE/lib#hours")], "finish": "tool_calls"},
+            {"content": "10:00"}])
+        self.assertTrue(r["passed"])
+        self.assertIn("Page [1]:", self.srv.requests[2]["messages"][-1]["content"])
+        # at most 4 pages, then the app's text
+        c = b_case(check={"required_calls": [], "final_must": ["10:00"], "max_rounds": 8})
+        opens = [{"tool_calls": [tool("open_page", url="https://n.example/lib")], "finish": "tool_calls"}] * 5
+        r = self.run_case("B", c, [{"tool_calls": [tool("web_search", query="norrby")], "finish": "tool_calls"}]
+                          + opens + [{"content": "10:00"}])
+        self.assertTrue(r["passed"])
+        self.assertEqual("Already read 4 pages for this answer. Answer with what you have.",
+                         self.srv.requests[-1]["messages"][-1]["content"])
+        # tools offered for max_rounds rounds, then one request without tools
+        r = self.run_case("B", b_case(), [{"tool_calls": [tool("web_search", query="norrby")], "finish": "tool_calls"}] * 4
+                          + [{"content": "10:00"}])
+        self.assertTrue(r["passed"], r["rubric"])
+        self.assertNotIn("tools", self.srv.requests[-1])
+        self.assertIn("tools", self.srv.requests[-2])
+        # finish_reason tool_calls without any call is the final answer, as in the app
+        r = self.run_case("B", b_case(), [{"tool_calls": [tool("web_search", query="norrby")], "finish": "tool_calls"},
+                                          {"content": "10:00", "finish": "tool_calls"}])
+        self.assertTrue(r["passed"])
+
+    def test_server_dying_fails_only_that_case(self):
+        case = {"id": "c", "block": "C", "messages": [{"role": "user", "content": "doc"}],
+                "check": {"final_must": ["4"], "final_must_not": []}}
+        r = self.run_case("C", case, [{"die": True}])
+        self.assertEqual((r["passed"], r["failure"]), (False, "transport_error"))
+        r = self.run_case("B", b_case(), [{"tool_calls": [tool("web_search", query="norrby")], "finish": "tool_calls"},
+                                          {"die": True}])
+        self.assertEqual((r["failure"], r["requests"]), ("transport_error", 1))  # the completed round is kept
 
     def test_c_exact_anchor_is_whole_answer(self):
         case = {"id": "c", "block": "C", "messages": [{"role": "user", "content": "doc"}],
@@ -188,6 +235,9 @@ class Unit(Base):
         self.assertTrue(k("title:6", "Spring Garden Plans")[0])
         self.assertFalse(k("title:6", "Spring garden plans!")[0])
         self.assertTrue(k("one-sentence", "Because of scattering.")[0])
+        self.assertTrue(k("one-sentence", "Light scatters more, i.e. more blue reaches you.")[0])
+        self.assertTrue(k("one-sentence", "Because of scattering (Rayleigh.)")[0])
+        self.assertFalse(k("one-sentence", "Scattering. More air.")[0])
         self.assertTrue(k("max-words:5", "one two three four five")[0])
         self.assertFalse(k("max-words:5", "one two three four five six")[0])
         self.assertTrue(k('json-equals:["a","b"]', '["a", "b"]')[0])
@@ -218,6 +268,8 @@ class Unit(Base):
         AA.main(args[:-6] + ["--output", out2] + args[-4:])
         AA.main(["summarize", out])
         AA.main(["paired", out, out2])
+        _, ra = AA.measured(out)
+        self.assertEqual(ra[0]["profile"], "p")
         self.assertEqual(AA.wilson(0, 0), (None, None))
         lo, hi = AA.wilson(8, 10)
         self.assertTrue(0.4 < lo < 0.5 and 0.9 < hi < 0.97)
@@ -271,6 +323,20 @@ GOLD_E = {"e01-email-decline": "Hi Lena, thanks for the invite. Thursday does no
           "e06-translate-keep-lines": "Möte kl. 10:30\nRum 4B\nTa med 2 kopior av rapporten"}
 
 
+# (case, final answer, must pass?) beyond gold and non-answer: the review's cases
+ADVERSARIAL = [
+    ("b12-files-count", "You saved 3 train tickets from September [1][2][3].", False),
+    ("b03-web-compare", "The Brisa uses less: 0.5 W versus 0.3 W for the Arvo [1][2].", False),
+    ("b13-web-and-files", "No, it is not longer: 3 years versus 2 years.", False),
+    ("b01-web-single-fact", "On Saturdays it is open 10 AM to 4 PM [1].", True),
+    ("b02-web-open-page", "A child pass is 365 SEK; an adult day pass costs 545 SEK [2].", True),
+    ("b02-web-open-page", "An adult day pass costs 365 SEK [2].", False),
+    ("b07-web-not-found", "The results don't mention their Sunday hours.", True),
+    ("b07-web-not-found", "It closes at 15:00 on Sundays.", False),
+    ("b11-files-not-found", "I don't see an insurance document among your files.", True),
+]
+
+
 @unittest.skipUnless(os.environ.get("AGENT_ACCEPTANCE_CORPUS"), "set AGENT_ACCEPTANCE_CORPUS to check the real corpus")
 class Corpus(Base):
     def cases(self, block):
@@ -284,7 +350,10 @@ class Corpus(Base):
                 with self.subTest(case=case["id"]):
                     if block == "B":
                         gold = gold_b(case["id"])
-                        wrong = gold[:-1] + [{"content": "I am not sure."}]
+                        # where the right answer is "not found", the wrong one is an invented value
+                        fabricated = {"b07-web-not-found": "It closes at 18:00 on Sundays.",
+                                      "b11-files-not-found": "Your policy number is AB-123456."}
+                        wrong = gold[:-1] + [{"content": fabricated.get(case["id"], "I am not sure.")}]
                     elif block == "D":
                         gold = [{"content": "ok"}] * (len(case["turns"]) - 1) + [{"content": GOLD_D[case["id"]]}]
                         wrong = gold[:-1] + [{"content": "I am not sure."}]
@@ -295,6 +364,14 @@ class Corpus(Base):
                     self.assertTrue(r["passed"], f"gold failed: {r['rubric']}")
                     r = self.run_case(block, case, wrong)
                     self.assertFalse(r["passed"], "a non-answer passed")
+
+    def test_adversarial_answers(self):
+        cases = {c["id"]: c for c in self.cases("B")}
+        for cid, answer, ok in ADVERSARIAL:
+            with self.subTest(case=cid, answer=answer):
+                replies = gold_b(cid)[:-1] + [{"content": answer}]
+                r = self.run_case("B", cases[cid], replies)
+                self.assertEqual(r["passed"], ok, r["rubric"])
 
 
 if __name__ == "__main__":

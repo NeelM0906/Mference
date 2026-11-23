@@ -19,7 +19,12 @@ with no sampling fields sends none: the server's product defaults apply.
 Block A uses the release screen's own scoring (Scripts/release_task_screen.py,
 imported), at the acceptance caps instead of its 512-token screen cap.
 Output is create-only JSONL: one header line, then one line per request
-sequence (a case, including every tool round or turn), warmups marked.
+sequence (a case, including every tool round or turn, also the rounds before
+a failure), warmups marked. Two deliberate differences from the app's tool
+loop: a tool call with invalid JSON arguments, or to a tool that was not
+offered, fails the case at once (the app answers with a failure text and
+goes on). Intervals in `summarize` treat every (case, seed) as a trial, so
+with several seeds they are narrower than the per-case truth.
 """
 
 import argparse
@@ -40,7 +45,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent.parent
 REPO = SCRIPTS.parent
 CAPS = {"A": 2048, "B": 2048, "C": 4096, "D": 4096, "E": 2048}
-MAX_PAGES = 3
+MAX_PAGES = 4  # WebToolbox.maxPages
 
 
 def load_screen():
@@ -75,6 +80,19 @@ MARKUP = re.compile(r"<\|(message_model|content_invoke_tool_json|content_thinkin
 
 
 # ------------------------------------------------------------------ tool fixtures (block B)
+
+def url_key(url):
+    """WebAllowlist.key in WebHTTP.swift: no fragment, lowercase scheme and host, empty path is "/"."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return None
+    if p.scheme.lower() not in ("http", "https") or not p.hostname:
+        return None
+    netloc = p.hostname.lower() + (f":{p.port}" if p.port else "")
+    return urlunsplit((p.scheme.lower(), netloc, p.path or "/", p.query, ""))
+
 
 class Fixtures:
     """Plays web_search, open_page and search_files from a case's fixtures, in the app's formats
@@ -118,25 +136,29 @@ class Fixtures:
                 return f"No results for “{query}”."
             lines = [f"Results for “{query}”:", f"<<<WEB CONTENT {self.code}>>>"]
             for r in results:
-                self.allowed_urls.add(r["url"])
-                lines += ["", f"[{self.number(r['url'])}] {r['title']}", r["url"], r["snippet"][:300]]
+                self.allowed_urls.add(url_key(r["url"]))
+                lines += ["", f"[{self.number(url_key(r['url']))}] {r['title']}", r["url"], r["snippet"][:300]]
             lines.append(f"<<<END WEB CONTENT {self.code}>>>")
             return "\n".join(lines)
         if name == "open_page":
             url = str(args.get("url", ""))
             if not url:
                 return "open_page needs the \"url\" of a search result."
-            if url not in self.allowed_urls:
-                return f"{url} was not in the search results; open only the URL of a result."
+            key = url_key(url)
+            if key is None or key not in self.allowed_urls:
+                from urllib.parse import urlsplit
+                host = urlsplit(url).hostname or url
+                return f"Not opened: {host} was not in the search results."
             if self.pages_read >= MAX_PAGES:
                 return f"Already read {MAX_PAGES} pages for this answer. Answer with what you have."
             self.pages_read += 1
-            page = self.fx.get("open_page", {}).get(url)
+            pages = {url_key(u): v for u, v in self.fx.get("open_page", {}).items()}
+            page = pages.get(key)
             if page is None:
                 return f"The page could not be read ({url})."
             if "error" in page:
                 return page["error"]
-            return (f"Page [{self.number(url)}]: {url}\n<<<WEB CONTENT {self.code}>>>\n{page['title']}\n\n"
+            return (f"Page [{self.number(key)}]: {url}\n<<<WEB CONTENT {self.code}>>>\n{page['title']}\n\n"
                     f"{page['text']}\n<<<END WEB CONTENT {self.code}>>>")
         if name == "search_files":
             query = str(args.get("query", "")).strip()
@@ -207,9 +229,12 @@ def words(s):
 
 
 def sentences(s):
+    """Sentences end in . ! or ? (optionally followed by closing quotes or brackets) before a capital letter or
+    the end; "i.e. more" stays one sentence. -1 when the text does not end a sentence."""
     s = s.strip()
-    parts = [p for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
-    return len(parts) if s and s[-1] in ".!?" else -1
+    if not s or s.rstrip(")\"'’”]")[-1:] not in (".", "!", "?"):
+        return -1
+    return len(re.findall(r"[.!?][)\"'’”\]]*(?=\s+[A-Z0-9“\"'(]|\s*$)", s))
 
 
 def check_kind(kind, text):
@@ -251,9 +276,11 @@ def check_kind(kind, text):
     return False, f"unknown check kind {kind}"
 
 
-def finished(response):
+def finished(response, allow_tool_finish=False):
     """(ok, category) for a reply that should end the case with an answer."""
     fin = choice(response).get("finish_reason")
+    if allow_tool_finish and fin == "tool_calls":
+        fin = "stop"
     text = visible(response)
     if fin == "length":
         return False, "truncated"
@@ -289,73 +316,83 @@ def assistant_turn(response):
     return out
 
 
-def run_a(url, case, profile, seed, timeout):
+def run_a(url, case, profile, seed, timeout, rounds):
     body = base_body(profile, "A", seed)
     body["messages"] = [{"role": "user", "content": case["prompt"]}]
     if "tool" in case:
         body["tools"] = [{"type": "function", "function": case["tool"]}]
     response, metrics = post(url, body, timeout)
+    rounds.append({"request": body, "response": response, "metrics": metrics})
     passed, rubric = SCREEN.score(case, response)
     cat = None
     if not passed:
         fin = choice(response).get("finish_reason")
         cat = "truncated" if fin == "length" else ("empty" if not visible(response) and fin == "stop" else "wrong_answer")
-    return passed, cat, rubric, [{"request": body, "response": response, "metrics": metrics}]
+    return passed, cat, rubric
 
 
-def run_b(url, case, profile, seed, timeout):
+def run_b(url, case, profile, seed, timeout, rounds):
     offered = {t["function"]["name"] for t in case["tools"]}
     fx = Fixtures(case["fixtures"], offered)
     messages = [{"role": "system", "content": case["system"]}] + list(case["messages"])
-    calls, rounds = [], []
+    calls = []
     check = case["check"]
-    for _ in range(check.get("max_rounds", 6)):
+    max_rounds = check.get("max_rounds", 6)
+    # as ChatViewModel: tools are offered in rounds 0..max_rounds-1, then one request without tools
+    for rnd in range(max_rounds + 1):
         body = base_body(profile, "B", seed)
-        body.update(messages=list(messages), tools=case["tools"])
+        body["messages"] = list(messages)
+        if rnd < max_rounds:
+            body["tools"] = case["tools"]
         response, metrics = post(url, body, timeout)
         rounds.append({"request": body, "response": response, "metrics": metrics})
-        fin = choice(response).get("finish_reason")
-        if fin != "tool_calls":
-            ok, cat = finished(response)
+        tool_calls = choice(response)["message"].get("tool_calls") or []
+        if not tool_calls:
+            # a reply without calls is the final answer (as the app treats it), whatever its finish reason
+            ok, cat = finished(response, allow_tool_finish=True)
             if not ok:
-                return False, cat, "no usable final answer", rounds
+                return False, cat, "no usable final answer"
             ok, cat, why = check_trace(check, calls)
             if not ok:
-                return False, cat, why, rounds
+                return False, cat, why
             ok, why = check_text(check, visible(response))
-            return ok, None if ok else "wrong_answer", why, rounds
+            return ok, None if ok else "wrong_answer", why
+        if rnd == max_rounds:
+            break
         messages.append(assistant_turn(response))
-        for tc in choice(response)["message"].get("tool_calls", []):
+        for tc in tool_calls:
             name = tc.get("function", {}).get("name", "")
             try:
                 args = json.loads(tc.get("function", {}).get("arguments") or "{}")
                 if not isinstance(args, dict):
                     raise ValueError("arguments are not an object")
             except ValueError:
-                return False, "malformed_tool_call", f"invalid arguments for {name}", rounds
+                # stricter than the app (which answers with a failure text): a malformed call fails the case
+                return False, "malformed_tool_call", f"invalid arguments for {name}"
             if name not in offered:
-                return False, "wrong_tool_or_args", f"call to a tool not offered: {name}", rounds
+                # stricter than the app ("There is no tool named ..."): calling a tool not offered fails the case
+                return False, "wrong_tool_or_args", f"call to a tool not offered: {name}"
             calls.append({"name": name, "args": args})
             result = fx.run(name, args)
             rounds[-1].setdefault("tool_results", []).append(result)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
-    return False, "loop_not_ended", f"no final answer within {check.get('max_rounds', 6)} rounds", rounds
+    return False, "loop_not_ended", f"still calling tools after {max_rounds} tool rounds"
 
 
-def run_single(url, case, profile, seed, timeout, block):
+def run_single(url, case, profile, seed, timeout, block, rounds):
     body = base_body(profile, block, seed)
     body["messages"] = list(case["messages"])
     response, metrics = post(url, body, timeout)
+    rounds.append({"request": body, "response": response, "metrics": metrics})
     ok, cat = finished(response)
     if not ok:
-        return False, cat, "no usable final answer", [{"request": body, "response": response, "metrics": metrics}]
-    text = visible(response)
-    ok, why = check_text(case["check"], text)
-    return ok, None if ok else "wrong_answer", why, [{"request": body, "response": response, "metrics": metrics}]
+        return False, cat, "no usable final answer"
+    ok, why = check_text(case["check"], visible(response))
+    return ok, None if ok else "wrong_answer", why
 
 
-def run_d(url, case, profile, seed, timeout):
-    messages, rounds = [], []
+def run_d(url, case, profile, seed, timeout, rounds):
+    messages = []
     for turn in case["turns"]:
         messages.append({"role": "user", "content": turn})
         body = base_body(profile, "D", seed)
@@ -364,27 +401,27 @@ def run_d(url, case, profile, seed, timeout):
         rounds.append({"request": body, "response": response, "metrics": metrics})
         ok, cat = finished(response)
         if not ok:
-            return False, cat, f"turn {len(rounds)}: no usable answer", rounds
+            return False, cat, f"turn {len(rounds)}: no usable answer"
         messages.append(assistant_turn(response))
     ok, why = check_text(case["check"], visible(rounds[-1]["response"]))
-    return ok, None if ok else "wrong_answer", why, rounds
+    return ok, None if ok else "wrong_answer", why
 
 
 def run_case(url, block, case, profile, seed, timeout):
     started = time.monotonic()
+    rounds = []  # filled in place, so the rounds before a failure are kept
     try:
         if block == "A":
-            r = run_a(url, case, profile, seed, timeout)
+            passed, cat, why = run_a(url, case, profile, seed, timeout, rounds)
         elif block == "B":
-            r = run_b(url, case, profile, seed, timeout)
+            passed, cat, why = run_b(url, case, profile, seed, timeout, rounds)
         elif block == "D":
-            r = run_d(url, case, profile, seed, timeout)
+            passed, cat, why = run_d(url, case, profile, seed, timeout, rounds)
         else:
-            r = run_single(url, case, profile, seed, timeout, block)
-        passed, cat, why, rounds = r
+            passed, cat, why = run_single(url, case, profile, seed, timeout, block, rounds)
         error = None
-    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, ValueError, KeyError, IndexError) as e:
-        passed, cat, why, rounds, error = False, "transport_error", "transport or protocol error", [], str(e)
+    except Exception as e:  # any transport or protocol failure is this case's failure, never the run's
+        passed, cat, why, error = False, "transport_error", "transport or protocol error", f"{type(e).__name__}: {e}"
     usage = [ro["response"].get("usage") for ro in rounds]
     return {"passed": passed, "failure": cat, "rubric": why, "rounds": rounds, "error": error,
             "requests": len(rounds), "seconds": time.monotonic() - started,
@@ -431,10 +468,12 @@ def cmd_run(a):
     seeds = [int(s) for s in a.seeds.split(",")] if a.seeds else tier["seeds"]
     url = f"http://127.0.0.1:{a.port}/v1/chat/completions"
     manifest = {n: sha256(os.path.join(a.corpus, n)) for n in sorted(os.listdir(a.corpus)) if n.endswith(".json")}
+    machine = Path(a.machine_record).read_text()  # read before the create-only output exists
+    warmups = a.warmups if a.warmups is not None else tier.get("warmups", 1)
     with open(a.output, "x") as out:
         header = {"protocol": "agent-acceptance-v1", "tier": a.tier, "blocks": blocks, "seeds": seeds,
-                  "warmups_per_case": a.warmups, "caps": CAPS, "profiles": profiles,
-                  "engine_commit": a.engine_commit, "machine": Path(a.machine_record).read_text(),
+                  "warmups_per_case": warmups, "caps": CAPS, "profiles": profiles,
+                  "engine_commit": a.engine_commit, "machine": machine,
                   "corpus_sha256": manifest, "release_screen_sha256": sha256(screen_path), "port": a.port}
         out.write(json.dumps(header) + "\n")
         out.flush()
@@ -442,10 +481,10 @@ def cmd_run(a):
             for block, case in cases:
                 for si, seed in enumerate(seeds):
                     # warmups: per case and profile (before the first seed only), as the release screen
-                    for rep in range((a.warmups if si == 0 else 0) + 1):
+                    for rep in range((warmups if si == 0 else 0) + 1):
                         r = run_case(url, block, case, profile, seed, a.timeout)
                         r.update(profile=profile["label"], block=block, case=case["id"], seed=seed,
-                                 warmup=si == 0 and rep < a.warmups)
+                                 warmup=si == 0 and rep < warmups)
                         out.write(json.dumps(r, ensure_ascii=False) + "\n")
                         out.flush()
                         print(json.dumps({k: r[k] for k in ("profile", "block", "case", "seed", "warmup", "passed",
@@ -484,7 +523,7 @@ def cmd_summarize(a):
     print("|---|---|---:|---:|---|---:|---|")
     for (p, b), g in sorted(groups.items()):
         s = sorted(g["secs"])
-        med = s[len(s) // 2] if s else None
+        med = (s[(len(s) - 1) // 2] + s[len(s) // 2]) / 2 if s else None
         lo, hi = wilson(g["k"], g["n"])
         print(f"| {p} | {b} | {g['k']}/{g['n']} | {g['k'] / g['n']:.3f} | {lo}-{hi} | {med:.1f} | "
               + ", ".join(f"{k} {v}" for k, v in sorted(g["fail"].items())) + " |")
@@ -493,18 +532,18 @@ def cmd_summarize(a):
 def cmd_paired(a):
     _, ra = measured(a.run_a)
     _, rb = measured(a.run_b)
-    key = lambda r: (r["block"], r["case"], r["seed"])
+    key = lambda r: (r["profile"], r["block"], r["case"], r["seed"])
     ia = {key(r): r["passed"] for r in ra}
     ib = {key(r): r["passed"] for r in rb}
     common = sorted(set(ia) & set(ib))
     table = {}
     for k in common:
-        t = table.setdefault(k[0], [0, 0, 0, 0])
+        t = table.setdefault((k[0], k[1]), [0, 0, 0, 0])
         t[(0 if ia[k] else 2) + (0 if ib[k] else 1)] += 1
-    print(f"| Block | Both pass | Only A ({os.path.basename(a.run_a)}) | Only B ({os.path.basename(a.run_b)}) | Neither |")
-    print("|---|---:|---:|---:|---:|")
-    for b, t in sorted(table.items()):
-        print(f"| {b} | {t[0]} | {t[1]} | {t[2]} | {t[3]} |")
+    print(f"| Profile | Block | Both pass | Only A ({os.path.basename(a.run_a)}) | Only B ({os.path.basename(a.run_b)}) | Neither |")
+    print("|---|---|---:|---:|---:|---:|")
+    for (p, b), t in sorted(table.items()):
+        print(f"| {p} | {b} | {t[0]} | {t[1]} | {t[2]} | {t[3]} |")
     print(f"\n{len(common)} paired cases; {len(set(ia) ^ set(ib))} present in only one run.")
 
 
@@ -521,7 +560,7 @@ def main(argv=None):
     r.add_argument("--port", type=int, default=18489)
     r.add_argument("--blocks", default="A,B,C,D,E")
     r.add_argument("--seeds", default=None)
-    r.add_argument("--warmups", type=int, default=1)
+    r.add_argument("--warmups", type=int, default=None, help="default: the tier's (gate 0, full 1)")
     r.add_argument("--timeout", type=float, default=900)
     s = sub.add_parser("summarize")
     s.add_argument("run")

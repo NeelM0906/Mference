@@ -83,7 +83,7 @@ def block_b(commit):
                 R("Norrby municipality - Culture", "https://norrby.example.org/culture",
                   "Museums, the library and the arts centre in Norrby.")]}]},
             {"required_calls": [{"name": "web_search", "args": {"query": "(?i)norrby"}}],
-             "final_must": ["10[:.]?00|10 ?am", "16[:.]?00|4 ?pm", "\\[1\\]"]}),
+             "final_must": ["(?i)10[:.]?00|10 ?am", "(?i)16[:.]?00|4 ?pm", "\\[1\\]"]}),
         web("b02-web-open-page", "How much does an adult day pass for the Halvbacken ski lift cost this season?",
             {"web_search": [{"when_any": ["(?i)halvbacken"], "results": [
                 R("Halvbacken Ski - Season 2026/27", "https://halvbacken.example.com/season",
@@ -97,15 +97,16 @@ def block_b(commit):
                  "text": "The season runs from 12 December 2026 to 11 April 2027, weather permitting."}}},
             {"required_calls": [{"name": "web_search", "args": {"query": "(?i)halvbacken"}},
                                 {"name": "open_page", "args": {"url": "^https://halvbacken\\.example\\.com/prices$"}}],
-             "final_must": ["545", "\\[2\\]"], "final_must_not": ["365 SEK.*adult"]}),
-        web("b03-web-compare", "Which uses less power in standby, the Arvo K2 kettle or the Brisa T5 toaster?",
+             "final_must": ["545", "\\[2\\]"], "final_must_not": ["(?i)adult[^.\\n]{0,40}\\b365\\b"]}),
+        web("b03-web-compare", "Which uses less power in standby, the Arvo K2 kettle or the Brisa T5 toaster? Start "
+            "your answer with the name of the one that uses less.",
             {"web_search": [{"when_any": ["(?i)arvo|brisa"], "results": [
                 R("Arvo K2 kettle - specifications", "https://arvo.example.com/k2",
                   "Arvo K2: 1.7 l, 2200 W. Standby power 0.3 W."),
                 R("Brisa T5 toaster - technical data", "https://brisa.example.com/t5",
                   "Brisa T5: 2 slots, 900 W. Standby power 0.5 W.")]}]},
             {"required_calls": [{"name": "web_search", "args": {"query": "(?i)arvo|brisa"}}],
-             "final_must": ["(?i)arvo", "0[.,]3", "0[.,]5"]}),
+             "final_must": ["(?i)^\\W*(the )?arvo", "0[.,]3", "0[.,]5"]}),
         web("b04-web-refine-search", "What is the phone number of the Sundbyholm ferry office?",
             {"web_search": [{"calls": [1], "results": []},
                             {"when_any": ["(?i)sundbyholm"], "results": [
@@ -146,7 +147,7 @@ def block_b(commit):
                  "text": "Sourdough bread, cinnamon buns and cakes since 1987. Order cakes by phone."},
                  "https://ekbacka.example.com/story": {"title": "Our story", "text": "Three generations of bakers."}}},
             {"required_calls": [{"name": "web_search", "args": {}}],
-             "final_must": ["(?i)(could ?n['’]?t|can ?not|cannot|unable to|did ?n['’]?t|didn['’]t|no information|not (find|found|listed|mention|say|state|available|include|show|provide)|does ?n['’]?t (say|list|mention|show|include|give))"],
+             "final_must": ["(?i)\\b(not|no|none|unable|cannot|unknown|unclear|without)\\b|n['’]t\\b"],
              "final_must_not": ["(?i)closes? (at )?\\d{1,2}([:.]\\d{2})? ?(am|pm)?"]}),
         web("b08-web-privacy", "My name is Ola Berg and I live at Storgatan 12 in Norrby. Which day is household "
             "waste collected on Storgatan?",
@@ -174,20 +175,21 @@ def block_b(commit):
         files("b11-files-not-found", "What is my car insurance policy number?",
               {"search_files": []},
               {"required_calls": [{"name": "search_files", "args": {}}],
-               "final_must": ["(?i)(could ?n['’]?t|can ?not|cannot|unable to|did ?n['’]?t|didn['’]t|no (file|match|result|information)|not (find|found|in))"],
+               "final_must": ["(?i)\\b(not|no|none|unable|cannot|unknown|unclear|without)\\b|n['’]t\\b"],
                "final_must_not": ["(?i)policy number (is|:) ?[A-Z0-9-]{4,}"]}),
-        files("b12-files-count", "How many train tickets to Malmö did I save from September?",
+        files("b12-files-count", "How many train tickets to Malmö did I save from September? Start your answer with "
+              "the number.",
               {"search_files": [{"when_any": ["(?i)train|ticket|malm"], "files": [
                   F("SJ ticket 2026-09-04.pdf", "Downloads", "4 Sep 2026", "Train ticket Stockholm - Malmö, 4 September 2026, seat 34."),
                   F("SJ ticket 2026-09-18.pdf", "Downloads", "18 Sep 2026", "Train ticket Stockholm - Malmö, 18 September 2026, seat 12."),
                   F("SJ ticket 2026-09-27.pdf", "Downloads", "27 Sep 2026", "Train ticket Malmö - Stockholm, 27 September 2026, seat 51."),
                   F("SJ ticket 2026-10-02.pdf", "Downloads", "2 Oct 2026", "Train ticket Stockholm - Malmö, 2 October 2026, seat 8.")]}]},
               {"required_calls": [{"name": "search_files", "args": {}}],
-               "final_must": ["\\b(2|two)\\b"], "final_must_not": ["(?i)\\b(three|four|3|4) (train )?tickets? to malm"]}),
+               "final_must": ["(?i)^\\W*(2|two)\\b"]}),
         {"id": "b13-web-and-files", "block": "B", "toolset": "web+files", "system": both_prompt,
          "tools": web_tools + files_tools, "gate": True,
          "messages": [u("My saved warranty for the Brisa T5 toaster: is it longer than the manufacturer's standard "
-                        "warranty listed online?")],
+                        "warranty listed online? Start your answer with yes or no.")],
          "fixtures": {"search_files": [{"when_any": ["(?i)brisa|warranty|toaster"], "files": [
              F("Brisa T5 extended warranty.pdf", "Documents/Receipts", "11 Jan 2026",
                "Extended warranty for Brisa T5 toaster: 3 years from purchase (11 January 2026).")]}],
@@ -196,7 +198,7 @@ def block_b(commit):
                    "All Brisa small appliances carry a standard 2-year manufacturer's warranty.")]}]},
          "check": {"required_calls": [{"name": "search_files", "args": {}}, {"name": "web_search", "args": {}}],
                    "any_order": True,
-                   "final_must": ["(?i)\\b(3|three)[ -]years?", "(?i)\\b(2|two)[ -]years?", "(?i)\\b(yes|longer)\\b"]}},
+                   "final_must": ["(?i)\\b(3|three)[ -]years?", "(?i)\\b(2|two)[ -]years?", "(?i)^\\W*yes\\b"]}},
         web("b14-no-tool-arithmetic", "What is 17 multiplied by 23?",
             {"web_search": []},
             {"max_calls": 0, "final_must": ["391"]}),
@@ -208,7 +210,7 @@ def block_b(commit):
                 R("Norrby indoor pools", "https://norrby.example.org/pools",
                   "Sundays: Centralbadet 09:00-17:00, Ekbadet 10:00-15:00, Strandbadet closed in winter.")]}]},
             {"required_calls": [{"name": "web_search", "args": {}}],
-             "final_must": ["(?i)centralbadet", "(?i)ekbadet", "(?i)strandbadet", "17[:.]?00|5 ?pm", "15[:.]?00|3 ?pm"]}),
+             "final_must": ["(?i)centralbadet", "(?i)ekbadet", "(?i)strandbadet", "(?i)17[:.]?00|5 ?pm", "(?i)15[:.]?00|3 ?pm"]}),
     ]
     for c in cases:
         c["check"].setdefault("max_rounds", 6)
@@ -221,7 +223,7 @@ DOC_SETS = {
     "4k": ["docs/ENGINE.md", "docs/FAMILY_GATE.md"],
     "8k": ["docs/RUNTIME_CONTROLS.md", "README.md", "App/CONTRACTS.md"],
     "16k": ["docs/OPENAI_SERVER.md", "docs/FAMILY_CONTRACT.md"],
-    "30k": ["docs/ENGINE.md", "docs/FAMILY_GATE.md", "docs/RUNTIME_CONTROLS.md", "README.md", "App/CONTRACTS.md",
+    "30k": ["docs/ENGINE.md", "docs/FAMILY_GATE.md", "docs/RUNTIME_CONTROLS.md", "README.md",
             "docs/OPENAI_SERVER.md", "docs/FAMILY_CONTRACT.md"],
 }
 NOT_IN = "NOT IN DOCUMENTS"
@@ -281,13 +283,14 @@ def block_d():
              "Add the two results together. Reply with only the number."], ["^\\s*99(\\.0+)?\\s*$"]),
         case("d03-running-list", ["Start a shopping list with milk and eggs.", "Add bread and remove eggs.",
              "Add apples, and add milk only if it is not already on the list.",
-             "Give the final list as a JSON array of lowercase strings, in the order the items were first added."],
+             "Give the final list as a JSON array of lowercase strings, in the order the items were first added. "
+             "Reply with only the JSON array."],
              [], kind="json-equals:[\"milk\",\"bread\",\"apples\"]"),
         case("d04-units", ["My room is 4.5 m by 3.2 m. What is its floor area?",
              "Flooring costs 250 kr per square metre. How much would it cost for the whole room?",
              "Reply with only the total cost in kr, as an integer."], ["^\\s*3[ ,. ]?600\\s*(kr)?\\s*$"]),
         case("d05-date", ["Today is Monday 23 November 2026.", "My deadline is 10 days from today. Which date is that?",
-             "Reply with only the weekday of the deadline."], ["^\\s*Thursday\\.?\\s*$"]),
+             "Reply with only the weekday of the deadline."], ["(?i)^\\s*thursday\\.?\\s*$"]),
         case("d06-one-sentence", ["From now on, answer every question in exactly one sentence.",
              "Why is the sky blue?", "And why are sunsets often red?"],
              ["(?i)scatter|atmosphere|longer (path|distance|way)|more (air|atmosphere)|travels? (further|farther)"],
@@ -362,11 +365,11 @@ def main():
         "version": "agent-acceptance-v1", "commit": commit,
         "gate": {"A": GATE_A, "B": [c["id"] for c in blocks["b"]],
                  "C": [c["id"] for c in blocks["c"] if c["gate"]], "D": [], "E": [],
-                 "profiles": ["product-default"], "seeds": [1]},
+                 "profiles": ["product-default"], "seeds": [1], "warmups": 0},
         "full": {"A": [c["id"] for c in screen], "B": [c["id"] for c in blocks["b"]],
                  "C": [c["id"] for c in blocks["c"]], "D": [c["id"] for c in blocks["d"]],
                  "E": [c["id"] for c in blocks["e"]],
-                 "profiles": ["product-default", "effort-low"], "seeds": [1, 2, 3]},
+                 "profiles": ["product-default", "effort-low"], "seeds": [1, 2, 3], "warmups": 1},
     }
     with open(os.path.join(a.out, "tiers.json"), "w", encoding="utf-8") as f:
         json.dump(tiers, f, indent=1)
