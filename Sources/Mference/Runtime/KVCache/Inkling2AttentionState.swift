@@ -255,7 +255,7 @@ public final class Inkling2AttentionState {
         }
         let header: [UInt64] = [Self.magic, Self.version, UInt64(position), UInt64(configuration.window),
                                 includeGlobalRows ? 1 : 0, sequence, UInt64(needed), 0]
-        header.withUnsafeBytes { memcpy(region.base, $0.baseAddress!, Self.headerBytes) }
+        header.withUnsafeBytes { _ = memcpy(region.base, $0.baseAddress!, Self.headerBytes) }
         var offset = Self.headerBytes
         memcpy(region.base + offset, tailBuffer.contents(), tailBuffer.length)
         offset += tailBuffer.length
