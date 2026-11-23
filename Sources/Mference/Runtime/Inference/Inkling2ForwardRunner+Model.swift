@@ -123,7 +123,8 @@ extension Inkling2RunnerWeights {
         }
         let store: Inkling2ExpertStore
         do {
-            store = try Inkling2ExpertStore(device: model.device, shape: shape, layers: specs, plan: plan)
+            store = try Inkling2ExpertStore(device: model.device, shape: shape, layers: specs, plan: plan,
+                                            readMode: .forHost(physicalMemory: physicalMemory))
         } catch {
             throw Inkling2ModelBindingError.experts("\(error)")
         }

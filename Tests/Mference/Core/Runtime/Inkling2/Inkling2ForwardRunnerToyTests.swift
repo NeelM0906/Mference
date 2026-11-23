@@ -202,14 +202,19 @@ struct Inkling2ForwardRunnerToyTests {
         #expect(runner.continuationPosition == 3)
     }
 
-    /// The runner on K2's expert store, planned as for a 32 GB host (layers
-    /// 6-17 resident, the other 12 staged through two slabs, decode visits
-    /// included), against the same runner on fixed pools: the same kernels
-    /// read the same bytes in the same order, so every visit output and
-    /// every logit must match bit for bit. The toy's expert layers are
-    /// written to temporary files for the store to read.
-    @Test(.fullTier)
-    func expertStoreMatchesFixedPoolsBitForBit() async throws {
+    /// The runner on K2's expert store against the same runner on fixed
+    /// pools: the same kernels read the same bytes in the same order, so
+    /// every visit output and every logit must match bit for bit. Planned as
+    /// for a 32 GB host (layers 6-17 resident, the other 12 staged through two
+    /// slabs) and for a 24 GB host (every layer staged, the looped ones
+    /// included). Prefill visits of a staged layer read the slab ring; decode
+    /// visits read the routes back and decode from the layer's slot cache,
+    /// and on the looped staged layers the passes route to experts the pass
+    /// before did not use (llama.cpp issue 32710 computed later passes with
+    /// the first pass's experts). The toy's expert layers are written to
+    /// temporary files for the store to read.
+    @Test(.fullTier, arguments: [32, 24])
+    func expertStoreMatchesFixedPoolsBitForBit(hostGigabytes: Int) async throws {
         let context = try MetalContext()
         let toy = try Inkling2RunnerToy(device: context.device)
         let c = Inkling2RunnerToy.config
@@ -232,12 +237,15 @@ struct Inkling2ForwardRunnerToyTests {
                 downScales: nvfp4 ? (toy.expertScales, info.scaleOffset + c.numExperts * 4) : nil))
         }
         let plan = Inkling2ExpertResidencyPlan.make(layerBytes: specs.map(\.file.bytes), loopedLayers: 6..<18,
-                                                    physicalMemory: 32 << 30)
-        #expect(plan.placements.filter { $0 == .staged }.count == 12)
+                                                    physicalMemory: UInt64(hostGigabytes) << 30)
+        let stagedLayers = plan.placements.filter { $0 == .staged }.count
+        #expect(stagedLayers == (hostGigabytes == 32 ? 12 : 24))
         var stored = toy.runnerWeights
-        stored.experts = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan)
+        stored.experts = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                                 readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30))
 
-        func run(_ weights: Inkling2RunnerWeights) async throws -> (logits: [[UInt16]], outputs: [Float]) {
+        func run(_ weights: Inkling2RunnerWeights) async throws
+            -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], cache: Inkling2ForwardRunner.DecodeCacheStats) {
             let runner = try Inkling2ForwardRunner(weights: weights, context: context,
                                                    maxContext: 64, maxChunkTokens: 4)
             let device = context.device
@@ -259,14 +267,46 @@ struct Inkling2ForwardRunnerToyTests {
                 logits.append(Array(UnsafeBufferPointer(start: p, count: c.vocabPadded)))
                 position += chunk.count
             }
-            return (logits, Inkling2BufferMatrix.floats(outputs, offset: 0, count: 48 * rows * d))
+            let traced = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * c.topK)
+            return (logits, Inkling2BufferMatrix.floats(outputs, offset: 0, count: 48 * rows * d),
+                    Array(UnsafeBufferPointer(start: traced, count: 48 * rows * c.topK)), runner.decodeCacheStats)
         }
         let fixed = try await run(toy.runnerWeights)
         let staged = try await run(stored)
         #expect(staged.logits == fixed.logits)
         #expect(staged.outputs == fixed.outputs)
-        print("inkling2 toy expert store: \(plan.placements.filter { $0 == .resident }.count) resident, "
-              + "\(plan.placements.filter { $0 == .staged }.count) staged layers; bit-identical: "
+        #expect(staged.routes == fixed.routes)
+        // Every decode step's staged visits went through the slot caches.
+        let decodeSteps = Self.shortSteps.filter(\.decode).count
+        /// The stored layer of visit `v`: prelude 0-5, three passes of 6-17, coda 18-23.
+        func layer(visit v: Int) -> Int { v < 6 ? v : v < 42 ? 6 + (v - 6) % 12 : v - 24 }
+        #expect(fixed.cache.visits == 0)
+        #expect(staged.cache.visits == decodeSteps * (0..<48).filter { plan.placements[layer(visit: $0)] == .staged }.count)
+        #expect(staged.cache.hits + staged.cache.misses == staged.cache.visits * c.topK)
+        // On the looped layers, a later pass of a decode step routes to
+        // experts the pass before it did not use (so a cache keyed by stored
+        // layer has to load them).
+        let decodeRows = Self.shortSteps.reduce(into: (position: 0, rows: [Int]())) { acc, step in
+            if step.decode { acc.rows.append(acc.position) }
+            acc.position += step.tokens.count
+        }.rows
+        func routed(_ visit: Int, _ row: Int) -> Set<UInt32> {
+            Set(staged.routes[((visit * rows) + row) * c.topK ..< ((visit * rows) + row + 1) * c.topK])
+        }
+        var newExperts = 0
+        for row in decodeRows {
+            for layer in 6..<18 {
+                for pass in 1..<3 {
+                    let now = 6 + pass * 12 + (layer - 6), before = now - 12
+                    newExperts += routed(now, row).subtracting(routed(before, row)).count
+                }
+            }
+        }
+        #expect(newExperts > 0)
+        print("inkling2 toy expert store at \(hostGigabytes) GB: \(plan.placements.filter { $0 == .resident }.count) "
+              + "resident, \(stagedLayers) staged layers; decode slot cache \(staged.cache.hits) hits, "
+              + "\(staged.cache.misses) misses over \(staged.cache.visits) visits; experts new to a later pass on "
+              + "the looped layers: \(newExperts); bit-identical: "
               + "\(staged.logits == fixed.logits && staged.outputs == fixed.outputs)")
     }
 }

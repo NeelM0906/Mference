@@ -14,19 +14,38 @@ protocol Inkling2ExpertSource: AnyObject {
     var boundExpertBytes: Int { get }
     func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool
     func endVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws
+    /// Whether a decode visit of `layer` needs the router's ids on the CPU
+    /// first: K2's staged layers decode from slot caches the CPU fills. Such
+    /// a visit uses `beginDecodeVisit` / `endDecodeVisit` instead of
+    /// `beginVisit` / `endVisit`.
+    func decodeNeedsRoutes(layer: Int) -> Bool
+    /// With every earlier command buffer completed and the visit's routed ids
+    /// read back: the slots holding those experts and the ids naming them.
+    func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding
+    /// After the encoder that reads `binding`: its slots stay the command
+    /// buffer's until it completes.
+    func endDecodeVisit(_ binding: Inkling2DecodeBinding, commandBuffer: MTLCommandBuffer)
     /// Releases visits begun and not ended (their command buffer is lost).
     func abandonOpenVisits() throws
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
 
-/// The runner reads a staged layer through the store's slab ring at decode
-/// too, never through `decodePool`: that pool is the layer file mapped whole,
-/// and binding a mapped buffer makes Metal page all of it in (measured,
-/// `Inkling2MappedBindingProbe`: 1 GiB read for a 4-byte kernel read), which
-/// for the 12 staged layers of a 32 GB host is 8.9 GB. A staged decode visit
-/// pays the layer's stage (about 29 ms NVFP4, 54 ms Q8_0 from the file cache)
-/// until K2's bounded decode path lands.
+extension Inkling2ExpertSource {
+    func decodeNeedsRoutes(layer: Int) -> Bool { false }
+    func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
+        throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
+    }
+    func endDecodeVisit(_ binding: Inkling2DecodeBinding, commandBuffer: MTLCommandBuffer) {}
+}
+
+/// The runner never binds `decodePool`: for a staged layer that pool is the
+/// layer file mapped whole, and binding a mapped buffer makes Metal page all
+/// of it in (measured, `Inkling2MappedBindingProbe`: 1 GiB read for a 4-byte
+/// kernel read), which for the 12 staged layers of a 32 GB host is 8.9 GB.
+/// Prefill visits of a staged layer read the store's slab ring; decode visits
+/// read back the routed ids and decode from the layer's slot cache
+/// (`prepareDecodeVisit`), reading only the experts that miss.
 extension Inkling2ExpertStore: Inkling2ExpertSource {
     var boundExpertBytes: Int { plan.residentBytes + plan.stagingBytes }
     func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool {
@@ -34,6 +53,10 @@ extension Inkling2ExpertStore: Inkling2ExpertSource {
     }
     func endVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws {
         try endPrefillVisit(layer: layer, commandBuffer: commandBuffer)
+    }
+    func decodeNeedsRoutes(layer: Int) -> Bool { isStaged(layer: layer) }
+    func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
+        try prepareDecodeVisit(layer: layer, expertIDs: expertIDs)
     }
     var stagingFailure: String? { staging?.error.map { "\($0)" } }
 }
@@ -201,6 +224,18 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// Set once the expert source can no longer be trusted (a staging or
     /// abandon failure); every later chunk refuses until the model reloads.
     private var expertsFailed: String?
+    /// Staged decode visits so far (slot-cache hits and misses, CPU time in
+    /// `beginDecodeVisit`), for diagnostics. With the
+    /// `MFERENCE_INKLING2_DECODE_CACHE_LOG` diagnostic set, each visit is
+    /// also printed to stderr.
+    struct DecodeCacheStats: Equatable {
+        var visits = 0
+        var hits = 0
+        var misses = 0
+        var seconds: Double = 0
+    }
+    private(set) var decodeCacheStats = DecodeCacheStats()
+    private let logsDecodeCache = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_CACHE_LOG"] != nil
 
     /// Diagnostic and golden hook: while set, every chunk copies each
     /// visit's output, the running block sum (FP32 `[48][rows][d]`), and the
@@ -501,6 +536,18 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             body(enc)
             enc.endEncoding()
         }
+        /// Commits what is encoded, waits for every buffer (a staged decode
+        /// visit reads the router's ids back and refills slots only after
+        /// every earlier command completed), and returns the next buffer.
+        func split() throws -> MTLCommandBuffer {
+            try nextBuffer()
+            committed.forEach { $0.waitUntilCompleted() }
+            if let failed = committed.first(where: { $0.status != .completed }) {
+                throw Inkling2ForwardRunnerError.commandFailed(
+                    failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
+            }
+            return cb
+        }
         let topK = moeShape.topK
         if let trace = visitTrace {
             precondition(start + t <= trace.rows && trace.outputs.length >= 48 * trace.rows * d * 4
@@ -534,7 +581,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             // Prelude.
             for layer in 0..<Self.coreStart {
                 cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
-                                      cur: cur, blocks: &blocks, bank: nil, slots: &slots)
+                                      cur: cur, blocks: &blocks, bank: nil, slots: &slots, split: split)
                 record(cur)
             }
             let preludeCur = cur
@@ -560,7 +607,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 for layer in Self.coreStart..<Self.coreEnd {
                     let slot = Inkling2VisitPlan.slot(layer: layer, pass: pass)
                     cur = try encodeVisit(cb, layer: layer, slot: slot, tokens: t, start: start,
-                                          cur: cur, blocks: &blocks, bank: bank, slots: &slots)
+                                          cur: cur, blocks: &blocks, bank: bank, slots: &slots, split: split)
                     record(cur)
                 }
                 // Keep each command buffer to about a third of the visits.
@@ -572,7 +619,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             // Coda.
             for layer in Self.coreEnd..<24 {
                 cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
-                                      cur: cur, blocks: &blocks, bank: nil, slots: &slots)
+                                      cur: cur, blocks: &blocks, bank: nil, slots: &slots, split: split)
                 record(cur)
             }
 
@@ -634,8 +681,13 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
 
     /// Encodes one layer visit over the chunk and returns the arena slot of
     /// the new running sum. `blocks` gains the visit's input at a block start.
-    private func encodeVisit(_ cb: MTLCommandBuffer, layer: Int, slot: Int, tokens t: Int, start: Int,
-                             cur: Int, blocks: inout [Int], bank: [Int]?, slots: inout Slots) throws -> Int {
+    /// `split` commits the buffer and returns the next one; a staged decode
+    /// visit calls it after the router and encodes the rest of the visit
+    /// into the new buffer.
+    private func encodeVisit(_ commandBuffer: MTLCommandBuffer, layer: Int, slot: Int, tokens t: Int, start: Int,
+                             cur: Int, blocks: inout [Int], bank: [Int]?, slots: inout Slots,
+                             split: () throws -> MTLCommandBuffer) throws -> Int {
+        var cb = commandBuffer
         let s = scratch
         let d = Self.d
         let lw = w.layers[layer]
@@ -801,20 +853,47 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                              ids: s.moeScratch.ids, routeWeights: s.moeScratch.routeWeights,
                              tokens: t, routeScale: w.routeScale)
         }
-        // A staged layer's command buffer waits here for its slab and
-        // releases it after the experts' encoder.
-        let pool = try w.experts.beginVisit(layer: layer, commandBuffer: cb)
-        encode { enc in
-            if t == 1 {
-                moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, ids: s.moeScratch.ids,
-                                 routeWeights: s.moeScratch.routeWeights, pool: pool,
-                                 activation: s.decodeActivation, out: s.moeOut)
-            } else {
-                moe.encodePrefill(enc, hidden: s.moeInHalf, hiddenStride: d, pool: pool,
-                                  scratch: s.moeScratch, tokens: t, out: s.moeOut, outStride: d)
+        if t == 1, w.experts.decodeNeedsRoutes(layer: layer) {
+            // A staged layer's decode visit: read the router's ids back, load
+            // the experts that miss into the layer's slots, decode from the
+            // slots. The slots are this command buffer's until it completes.
+            cb = try split()
+            let routed = s.moeScratch.ids.contents().bindMemory(to: UInt32.self, capacity: moeShape.topK)
+            let ids = (0..<moeShape.topK).map { Int(routed[$0]) }
+            let started = DispatchTime.now().uptimeNanoseconds
+            let binding = try w.experts.beginDecodeVisit(layer: layer, expertIDs: ids)
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+            decodeCacheStats.visits += 1
+            decodeCacheStats.hits += binding.hits
+            decodeCacheStats.misses += binding.misses
+            decodeCacheStats.seconds += seconds
+            if logsDecodeCache {
+                FileHandle.standardError.write(Data(String(
+                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d prepare %.3f ms\n",
+                    start, layer, binding.hits, binding.misses, seconds * 1000).utf8))
             }
+            encode { enc in
+                moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, binding: binding,
+                                 routeWeights: s.moeScratch.routeWeights, activation: s.decodeActivation,
+                                 out: s.moeOut)
+            }
+            w.experts.endDecodeVisit(binding, commandBuffer: cb)
+        } else {
+            // A staged layer's command buffer waits here for its slab and
+            // releases it after the experts' encoder.
+            let pool = try w.experts.beginVisit(layer: layer, commandBuffer: cb)
+            encode { enc in
+                if t == 1 {
+                    moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, ids: s.moeScratch.ids,
+                                     routeWeights: s.moeScratch.routeWeights, pool: pool,
+                                     activation: s.decodeActivation, out: s.moeOut)
+                } else {
+                    moe.encodePrefill(enc, hidden: s.moeInHalf, hiddenStride: d, pool: pool,
+                                      scratch: s.moeScratch, tokens: t, out: s.moeOut, outStride: d)
+                }
+            }
+            try w.experts.endVisit(layer: layer, commandBuffer: cb)
         }
-        try w.experts.endVisit(layer: layer, commandBuffer: cb)
 
         // 9. Post-MoE convolution with the residual, its tail.
         let next = slots.take()
