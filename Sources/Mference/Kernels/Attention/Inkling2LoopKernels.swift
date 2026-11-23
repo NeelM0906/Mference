@@ -116,18 +116,26 @@ public final class Inkling2MessageGateKernels {
 
     /// The gate for one row and up to four controllers in two dispatches (the
     /// many-row path takes about ten for three controllers). `z` is FP32
-    /// scratch of `4 * rank` floats. An output may alias its own `x` only when
-    /// no other controller in the call reads that `x` or that message.
+    /// scratch of `controllers.count * rank` floats, 16-byte aligned. An output
+    /// may alias its own `x` only; it may not overlap any other row of the call.
+    /// Not byte-identical to the many-row path (the down product sums
+    /// `inv_x (W_x . x) + inv_m (W_m . m)` per simdgroup); agreement is within
+    /// FP32 rounding.
     public func encodeDecode(commandBuffer: MTLCommandBuffer, weights: MTLBuffer, activations: MTLBuffer,
                              z: Inkling2BufferRef, controllers: [DecodeController],
                              width: Int = Inkling2AttentionShape.hidden, rank: Int = 64,
                              eps: Float = Inkling2AttentionShape.rmsEps) {
         precondition((1...4).contains(controllers.count) && width % 128 == 0 && rank % 8 == 0 && rank <= 128)
+        precondition(z.offset % 16 == 0 && z.buffer.length - z.offset >= controllers.count * rank * 4)
+        func overlaps(_ a: Int, _ b: Int) -> Bool { a < b + width && b < a + width }
         for (i, c) in controllers.enumerated() {
             precondition([c.down, c.forget, c.gain].allSatisfy { $0 % 16 == 0 })
             precondition([c.x, c.message, c.output].allSatisfy { $0 % 4 == 0 })
+            precondition(!overlaps(c.output, c.message), "controller \(i) output overwrites its message")
             for (j, other) in controllers.enumerated() where j != i {
-                precondition(c.output != other.x && c.output != other.message, "controller \(i) output overwrites controller \(j) input")
+                precondition(!overlaps(c.output, other.x) && !overlaps(c.output, other.message)
+                             && !overlaps(c.output, other.output),
+                             "controller \(i) output overlaps controller \(j) rows")
             }
         }
         var bytes = [UInt8](repeating: 0, count: 16 + 4 * 40)

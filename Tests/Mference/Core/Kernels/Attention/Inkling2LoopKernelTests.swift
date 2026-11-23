@@ -135,7 +135,8 @@ import MferenceValidationSupport
         var rng = SeedTree(0x6d00).key("ink2-gate-decode")
         let width = 2304, rank = 64
         let sharedX = S.random(width, &rng, -3, 3), moeX = S.random(width, &rng, -3, 3)
-        let messages = (0..<4).map { _ in S.random(width, &rng, -3, 3) }
+        // Controller 2's message is tiny (mean square ~3e-7), so eps (1e-6) decides its norm.
+        let messages = (0..<4).map { c in S.random(width, &rng, c == 2 ? -1e-3 : -3, c == 2 ? 1e-3 : 3) }
         // Activations: [shared x | moe x | m0 | m1 | m2 | m3 | out0 | out1 | out2].
         let acts = S.buffer(ctx.device, floats: sharedX + moeX + messages.flatMap { $0 } + [Float](repeating: 0, count: 3 * width))
         var weights: [Float] = []
