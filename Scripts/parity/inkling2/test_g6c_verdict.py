@@ -3,6 +3,8 @@
 unittest on a synthetic world (no model, no program files):
 python3 -I Scripts/parity/inkling2/test_g6c_verdict.py"""
 
+import contextlib
+import io
 import json
 import math
 import os
@@ -223,9 +225,16 @@ class RebasedTests(unittest.TestCase):
     def test_missing_quality_prompt_is_incomplete(self):
         w = World(self.tmp)
         ntq.DEFAULT = [World.MID, World.LONG, "absent"]
-        state, _, missing = gv.rebased_state(w.run())
+        rb = w.run()
+        state, _, missing = gv.rebased_state(rb)
         self.assertEqual(state, "incomplete")
         self.assertIn("d", missing)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gv.print_rebased(rb)
+        line = next(l for l in out.getvalue().splitlines() if l.startswith("(d)"))
+        self.assertIn("incomplete (missing absent", line)
+        self.assertNotIn("FAIL", line)
 
 
     def test_truncated_runner_output_fails(self):

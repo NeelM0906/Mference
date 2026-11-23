@@ -513,7 +513,8 @@ def print_rebased(rb):
         print(f"(d) quality ({d['measure']}, {d['positions']} positions, {', '.join(d['prompts'])}"
               + (f"; missing {', '.join(d['missing'])}" if d["missing"] else "") + f"): {pairs}; "
               + f"llama.cpp Metal - CPU {mc['mean']:+.4f} [{mc['ci95'][0]:+.4f}, {mc['ci95'][1]:+.4f}]: "
-              + ("pass" if d["pass"] else "FAIL")
+              + (f"incomplete (missing {', '.join(d['missing'])}; the rule needs all its prompts)" if d["missing"]
+                 else "pass" if d["pass"] else "FAIL")
               + f" (mean >= {QUALITY_MEAN_MIN}, lower bound >= llama.cpp's own)")
         print("    positions judged per prompt: " + ", ".join(f"{k} {v['judged']}/{v['natural']}" for k, v in d["per_prompt"].items())
               + ("; FAIL, not every natural position judged: " + "; ".join(d["incomplete_positions"])
