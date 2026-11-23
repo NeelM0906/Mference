@@ -191,6 +191,10 @@ LLAMA_MODES = ("llamaExperts", "llamaCPU")
 QUALITY_MARGIN = 0.01  # nats
 
 
+def fmt4(x):
+    return f"{x:.4g}" if finite(x) else str(x)
+
+
 def pair(ref_dir, cand_dir, pid):
     """compare_goldens' log-prob record of cand against ref for one prompt, or None."""
     ga, gb = cg.load(ref_dir, pid, "golden.json"), cg.load(cand_dir, pid, "golden.json")
@@ -214,7 +218,7 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
             else:
                 got = {"mean_kl": l["mean_kl_top20_approx"], "p95_kl": l["p95_kl_top20_approx"],
                        "max_dlp": l["max_abs_dlogprob_top1"]}
-                fails = {k: f"{got[k]:.4g} > {b}" for k, b in EXACT_BOUNDS.items() if not within(got[k], b)}
+                fails = {k: f"{fmt4(got[k])} > {b}" for k, b in EXACT_BOUNDS.items() if not within(got[k], b)}
                 m02 = l["top1_at_margin"]["0.2"]
                 if m02["positions"] and m02["agree"] != m02["positions"]:
                     fails["top1_at_margin_0.2"] = f"{m02['agree']}/{m02['positions']}"
@@ -238,25 +242,39 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
                 break
         # (c1) the runner within 2 x today's bounds of tf CPU; (c2) no farther than fp32 is
         l = pair(cpu, cand, pid)
-        if l is not None:
+        if l is None:
+            out["c1"][pid] = {"pass": False, "fails": {"missing": "runner output"}}
+        else:
             got = metrics(l)
             fails = {}
             for k, (v, n) in meas_g[pid].items():
                 floor = max(FLOORS[k], 2 / n) if k in ("top1", "top1_m02") and n else FLOORS[k]
                 bound = 2 * max(1.5 * v, floor)
                 if not within(got[k][0], bound):
-                    fails[k] = f"{got[k][0]:.4g} > {bound:.4g}"
+                    fails[k] = f"{fmt4(got[k][0])} > {fmt4(bound)}"
             out["c1"][pid] = {"pass": not fails, "fails": fails}
             le = pair(cpu, os.path.join(fp32, "tf"), pid) if fp32 and os.path.isdir(os.path.join(fp32, "tf", pid)) else None
             if le is not None:
                 ge = metrics(le)
                 fails = {}
                 for k in got:
-                    floor = FLOORS[k]
+                    n = got[k][1]
+                    floor = max(FLOORS[k], 2 / n) if k in ("top1", "top1_m02") and n else FLOORS[k]
                     bound = max(1.1 * ge[k][0], floor) if finite(ge[k][0]) else float("nan")
                     if not within(got[k][0], bound):
-                        fails[k] = f"{got[k][0]:.4g} > {bound:.4g} (fp32 {ge[k][0]:.4g})"
+                        fails[k] = f"{fmt4(got[k][0])} > {fmt4(bound)} (fp32 {fmt4(ge[k][0])})"
                 out["c2"][pid] = {"pass": not fails, "fails": fails}
+    # (a), trace prompts outside the teacher-forced set (trace01, trace03): expert sets only
+    for pid in TRACE_GOLDENS:
+        if pid in out["a"] or not root or not tdir:
+            continue
+        ref = os.path.join(root, pid, "fp32", "traces")
+        if os.path.isdir(os.path.join(ref, pid)) and os.path.isdir(os.path.join(tdir, pid)):
+            t = cg.trace_metrics(ref, tdir, pid)
+            ex = t["mean_expert_set_agreement"] if t else None
+            ok = ex is not None and ex >= EXPERT_AGREEMENT_MIN
+            out["a"][pid] = {"pass": ok, "fails": {} if ok else {"expert_sets": f"{ex} < {EXPERT_AGREEMENT_MIN}"},
+                             "expert_set_agreement": ex}
     # (d) quality: the true next token's log-probability, runner against both llama.cpp runs
     import next_token_quality as ntq
     rows, used, missing = ntq.collect([cand, metal, cpu], goldens, ntq.DEFAULT)
@@ -378,8 +396,17 @@ def main():
           + ("" if tdir else " (traces unchecked)"))
     root = opt("--precision-root") or os.path.join(os.path.dirname(goldens), "results", "k4", "precision")
     if "--no-rebased" not in args:
-        report["rebased_draft"] = rebased(goldens, cand, tdir, root if os.path.isdir(root) else None, meas_g, expected)
-        print_rebased(report["rebased_draft"])
+        # report only: nothing in the draft may change today's verdict, exit code or JSON
+        try:
+            report["rebased_draft"] = rebased(goldens, cand, tdir, root if os.path.isdir(root) else None,
+                                              meas_g, expected)
+            print_rebased(report["rebased_draft"])
+        except BaseException as e:  # SystemExit from next_token_quality included
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            report["rebased_draft"] = {"skipped": f"{type(e).__name__}: {e}"}
+            print(f"\nRe-based tier draft section skipped (report only; the verdict above stands): "
+                  f"{type(e).__name__}: {e}")
     if out_json:
         json.dump(report, open(out_json, "w"), indent=1, default=str)
     sys.exit(0 if report["gate_pass"] else (3 if logprob_gate and tr_ok and not tdir else 1))
