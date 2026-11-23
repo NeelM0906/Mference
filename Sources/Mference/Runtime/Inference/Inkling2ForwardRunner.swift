@@ -304,9 +304,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     var positionLogits: PositionLogits?
 
     /// The most routed-expert bytes the runner lets its expert source make
-    /// resident: 40% of the host's memory. 12.8 GB on 32 GB, where K2's plan
-    /// binds 9.07 GB (layers 6-17 resident plus two slabs) and every layer
-    /// resident (15.8 GB) is refused; every layer fits from 40 GB up.
+    /// resident: 40% of the host's memory. 13.7 GB on 32 GB, where K2's plan
+    /// binds just under it (layers 6-17 resident, 6.9 GB, plus three staging
+    /// slabs sized to what is left, decision 6) and every layer resident
+    /// (15.8 GB) is refused; every layer fits from 40 GB up. The plan uses
+    /// the same formula (`Inkling2ExpertResidencyPlan.expertBudget`).
     static func expertBudget(physicalMemory: UInt64) -> Int { Int(physicalMemory / 5 * 2) }
 
     init(weights: Inkling2RunnerWeights, context: MetalContext, maxContext: Int, maxChunkTokens: Int,
@@ -532,9 +534,18 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count, startPosition: startPosition,
                                               chunkTokens: min(config.chunkTokens, maxChunkTokens))
         defer {
-            // Still set: the chunk it prefetched for never ran (cancelled
-            // between chunks, or a throw); give its slab back now.
-            if prefetchesNextChunk { try? w.experts.cancelPrefetch() }
+            // Still set: the chunk after the one that set it never ran
+            // (cancelled between chunks, or that chunk threw); give the
+            // prefetched slab back now. A prefetch left by a last chunk's
+            // early throw stays until the next prefill takes it or a decode
+            // visit, abandon or recovery releases it.
+            if prefetchesNextChunk {
+                do {
+                    try w.experts.cancelPrefetch()
+                } catch {
+                    expertsFailed = "releasing an unused prefetched staging read failed: \(error)"
+                }
+            }
             prefetchesNextChunk = false
         }
         for (i, span) in spans.enumerated() {

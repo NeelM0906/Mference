@@ -24,7 +24,7 @@ import MferenceValidationSupport
         #expect(plan.stagingSlabs == 3)
         #expect(plan.residentBytes + plan.stagingBytes <= budget)
         #expect(plan.stagingBytes > 6_700_000_000)                    // about 6.84 GB: 3 x 2.28 GB
-        #expect(plan.decodeSlots == .fill(slabBytes: (budget - plan.residentBytes) / 3 / 16_384 * 16_384))
+        #expect(plan.decodeSlots == .fill(slabBytes: (budget - plan.residentBytes) / 3 / Int(getpagesize()) * Int(getpagesize())))
         // The slots: at least 88 per staged layer, the slabs within the cap.
         let strides = Dictionary(uniqueKeysWithValues: [0, 1, 2, 3, 4, 5, 18, 19, 20, 21, 22, 23].map {
             ($0, $0 >= 20 ? 8_470_528 : 4_489_216)
@@ -48,7 +48,7 @@ import MferenceValidationSupport
                                                         physicalMemory: memory)
             let budget = Inkling2ExpertResidencyPlan.expertBudget(physicalMemory: memory)
             #expect(plan.stagingSlabs == 3 && plan.decodeMissReadMode == nil, "\(gigabytes) GB")
-            #expect(plan.decodeSlots == .fill(slabBytes: (budget - plan.residentBytes) / 3 / 16_384 * 16_384))
+            #expect(plan.decodeSlots == .fill(slabBytes: (budget - plan.residentBytes) / 3 / Int(getpagesize()) * Int(getpagesize())))
             #expect(plan.residentBytes + plan.stagingBytes <= budget, "\(gigabytes) GB")
             #expect(Inkling2StagedReadMode.forHost(physicalMemory: memory) == .uncached)
             #expect(Inkling2StagedReadMode.decodeMissForHost(physicalMemory: memory) == nil)
@@ -73,7 +73,8 @@ import MferenceValidationSupport
         let strides = Dictionary(uniqueKeysWithValues: [0, 1, 2, 3, 4, 5, 18, 19, 20, 21, 22, 23].map {
             ($0, $0 >= 20 ? 8_470_528 : 4_489_216)
         })
-        let cap = 2_282_000_000 / 16_384 * 16_384
+        let page = Int(getpagesize())
+        let cap = 2_282_000_000 / page * page
         let packed = Inkling2DecodeSlots.pack(.fill(slabBytes: cap), strides: strides, experts: 128, slabs: 3)
         #expect(packed.slabBytes <= cap && packed.placed.count == 12)
         let least = packed.placed.values.map(\.slots).min()!
@@ -81,8 +82,8 @@ import MferenceValidationSupport
         for slab in 0..<3 {
             var end = 0
             for (layer, place) in packed.placed.filter({ $0.value.slab == slab }).sorted(by: { $0.value.offset < $1.value.offset }) {
-                #expect(place.offset == end && place.offset % 16_384 == 0)
-                end = place.offset + (place.slots * strides[layer]! + 16_383) / 16_384 * 16_384
+                #expect(place.offset == end && place.offset % page == 0)
+                end = place.offset + (place.slots * strides[layer]! + page - 1) / page * page
             }
             #expect(end <= cap)
         }
@@ -551,6 +552,9 @@ import MferenceValidationSupport
         }
         let staged = files[1]!.bytes + files[2]!.bytes + files[3]!.bytes
         #expect(try chunk(prefetch: true) == expected)
+        store.drainStaging()
+        // The prefetch was read: this chunk's three layers plus the next chunk's layer 1.
+        #expect(store.stagingBytesRead == staged + files[1]!.bytes)
         #expect(try chunk(prefetch: false) == expected)       // its layer-1 visit took the prefetched read
         store.drainStaging()
         #expect(store.stagingError == nil && store.stagingBytesRead == 2 * staged)
@@ -565,11 +569,14 @@ import MferenceValidationSupport
         decodeBuffer.waitUntilCompleted()
         // An abandon releases one, and so does a cancel (the chunk it was for
         // never ran); the next chunk runs normally either way.
+        let ring = try #require(store.staging)
         try store.prefetchFirstStagedVisit()
         try store.abandonOpenVisits()
+        #expect(ring.released.signaledValue == ring.lastSequence)
         #expect(try chunk(prefetch: false) == expected)
         try store.prefetchFirstStagedVisit()
         try store.cancelPrefetch()
+        #expect(ring.released.signaledValue == ring.lastSequence)
         #expect(try chunk(prefetch: false) == expected)
         store.drainStaging()
         #expect(store.stagingError == nil)

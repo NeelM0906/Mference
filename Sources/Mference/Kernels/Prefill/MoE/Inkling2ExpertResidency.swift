@@ -544,8 +544,9 @@ struct Inkling2DecodeBinding {
 ///
 /// Prefill slab fills read by `readMode`: uncached (`F_NOCACHE`) by default
 /// below 48 GB, so whole staged layers are not held a second time in the
-/// file cache. Decode misses read by `decodeMissReadMode` when it is set:
-/// cached by default below 48 GB (option D), one expert at a time.
+/// file cache. Decode misses read by `decodeMissReadMode` when it is set,
+/// otherwise like the slab fills (uncached by default; decision 6 retired
+/// option D's cached decode misses).
 ///
 /// Slot ownership: a decode visit's slots belong to its command buffer from
 /// `prepareDecodeVisit` until `endDecodeVisit`'s signal; the store waits for
@@ -754,9 +755,9 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                 mapped[layer] = try pool(spec, buffer: buffer, offset: shift)
             }
         }
-        // Equal slot counts: each staged layer's slots, page-rounded, packed
-        // largest first onto the slab with the fewest bytes so far; the slabs
-        // grow to the fullest slab.
+        // `.perLayer` / `.fill`: each staged layer's slots (equal counts, then
+        // `.fill`'s top-up), page-rounded, packed largest first onto the slab
+        // with the fewest bytes so far; the slabs grow to the fullest slab.
         let slabCount = max(2, plan.stagingSlabs)
         let (placed, minimumSlabBytes) = Inkling2DecodeSlots.pack(
             decodeSlots, strides: Dictionary(uniqueKeysWithValues: stagedLayers.map { ($0, layers[$0].expertStride) }),

@@ -247,8 +247,11 @@ struct Inkling2ForwardRunnerToyTests {
         let stagedLayers = plan.placements.filter { $0 == .staged }.count
         #expect(stagedLayers == (hostGigabytes == 32 ? 12 : 24))
         var stored = toy.runnerWeights
+        // The toy's layers are small, so the plan's `.fill` would hold every
+        // expert; 24 slots a layer keep the caches evicting.
         stored.experts = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
-                                                 readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30))
+                                                 readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
+                                                 decodeSlots: .perLayer(24))
 
         func run(_ weights: Inkling2RunnerWeights) async throws
             -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], cache: Inkling2ForwardRunner.DecodeCacheStats) {
