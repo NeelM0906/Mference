@@ -50,6 +50,9 @@ public final class WeekAskModel {
     @ObservationIgnored private var snapshotEventIDs: Set<String> = []
     /// Events Block added: they do not make an answer out of date.
     @ObservationIgnored private var ownEvents: [String: CalendarEvent] = [:]
+    /// A change check came while Block was writing: it runs once Block's
+    /// event is known to be its own.
+    @ObservationIgnored private var checkAfterBlock = false
     @ObservationIgnored private var task: Task<WeekAnswer, any Error>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var lastBlock: DateInterval?
@@ -275,12 +278,15 @@ public final class WeekAskModel {
     /// EventKit or the to-dos changed: an answer worked out before is
     /// marked out of date when what it read is no longer the same.
     public func calendarChanged() async {
+        // Block's own event is not registered until its write returns.
+        guard blocking.isEmpty else { checkAfterBlock = true; return }
         guard let week, let fingerprint, !answers.isEmpty, !isStale else { return }
         let mine = generation
         // A newer question (or Clear) may have answered from a newer read
         // during the wait: this check is about answers that are gone.
         guard let events = try? await calendar.events(in: week), mine == generation,
               week == self.week, fingerprint == self.fingerprint else { return }
+        guard blocking.isEmpty else { checkAfterBlock = true; return }
         let now = WeekSnapshot(interval: week, now: calendar.currentTime, calendar: calendar.calendar,
                                events: events, todos: calendar.todos)
         if Self.fingerprint(now, ignoring: ignoredOwnEvents) != fingerprint { isStale = true }
@@ -337,17 +343,22 @@ public final class WeekAskModel {
     public func block(_ openTime: DateInterval) async {
         guard blocked[openTime] == nil, !blocking.contains(openTime) else { return }
         blocking.insert(openTime)
-        defer { blocking.remove(openTime) }
         let interval = blockInterval(for: openTime)
-        guard let event = await calendar.addEvent(title: Self.blockTitle, start: interval.start, end: interval.end) else {
+        if let event = await calendar.addEvent(title: Self.blockTitle, start: interval.start, end: interval.end) {
+            ownEvents[event.id] = event
+            blocked[openTime] = event
+            lastBlock = openTime
+            notice = WeekAskNotice(text: "Added \(Self.blockTitle) to Calendar, \(text.shortWeekday(interval.start)) "
+                + "\(text.range(interval.start, interval.end)).", canUndo: true)
+        } else {
             notice = WeekAskNotice(text: calendar.errorMessage ?? "The event could not be added.", canUndo: false)
-            return
         }
-        ownEvents[event.id] = event
-        blocked[openTime] = event
-        lastBlock = openTime
-        notice = WeekAskNotice(text: "Added \(Self.blockTitle) to Calendar, \(text.shortWeekday(interval.start)) "
-            + "\(text.range(interval.start, interval.end)).", canUndo: true)
+        blocking.remove(openTime)
+        // A change that came during the write is checked now.
+        if blocking.isEmpty, checkAfterBlock {
+            checkAfterBlock = false
+            await calendarChanged()
+        }
     }
 
     /// Removes the event the last Block added.

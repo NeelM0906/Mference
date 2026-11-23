@@ -240,6 +240,33 @@ import Testing
         #expect(!ask.highlightedOpenTimes.isEmpty)
     }
 
+    @Test @MainActor func aChangeNoticeDuringBlockIsCheckedOnceTheBlockIsKnown() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
+        await ask.ask("When am I free for 2 hours?")
+        let slot = try #require(ask.highlightedOpenTimes.first)
+        // The grid reload after Block's save is slow; Calendar's change
+        // notice for that save arrives before Block has returned.
+        await service.delayNextRead(by: .milliseconds(200))
+        let block = Task { await ask.block(slot) }
+        for _ in 0..<200 where await service.isNextReadDelayed { try await Task.sleep(for: .milliseconds(5)) }
+        await ask.calendarChanged()
+        await block.value
+        #expect(ask.blocked[slot] != nil)
+        #expect(!ask.isStale)
+        // A real change during a Block still counts once the Block is in.
+        await service.delayNextRead(by: .milliseconds(200))
+        let second = DateInterval(start: CalendarFixtures.date(18, 9), end: CalendarFixtures.date(18, 10))
+        let again = Task { await ask.block(second) }
+        for _ in 0..<200 where await service.isNextReadDelayed { try await Task.sleep(for: .milliseconds(5)) }
+        _ = try await service.add(ProposedEvent(title: "Dentist", start: CalendarFixtures.date(16, 15),
+                                                end: CalendarFixtures.date(16, 16), source: ItemSource(kind: .manual, label: "x")))
+        await ask.calendarChanged()
+        #expect(!ask.isStale)
+        await again.value
+        #expect(ask.isStale)
+    }
+
     @Test @MainActor func movingABlockedEventMakesAnswersStale() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
         let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
