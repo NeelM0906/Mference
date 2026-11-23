@@ -28,6 +28,11 @@ def logprobs(p, shift):
     return [x - z for x in logits]
 
 
+def dump(obj, path):
+    with open(path, "w") as f:
+        json.dump(obj, f)
+
+
 def write_run(d, pid, ids, shift=0.0, next_shift=0.0):
     """ink-golden's layout: <d>/<pid>/golden.json and logprobs.json, one row per
     position, top 20, the true next token's log-probability (offset by
@@ -42,9 +47,8 @@ def write_run(d, pid, ids, shift=0.0, next_shift=0.0):
             row["next"] = ids[p + 1]
             row["next_logprob"] = lp[ids[p + 1]] + next_shift
         rows.append(row)
-    json.dump({"prompt_ids": ids, "generated_ids": [], "logprobs_file": "logprobs.json"},
-              open(os.path.join(d, pid, "golden.json"), "w"))
-    json.dump(rows, open(os.path.join(d, pid, "logprobs.json"), "w"))
+    dump({"prompt_ids": ids, "generated_ids": [], "logprobs_file": "logprobs.json"}, os.path.join(d, pid, "golden.json"))
+    dump(rows, os.path.join(d, pid, "logprobs.json"))
 
 
 def write_trace(d, pid, experts, margins=None):
@@ -57,10 +61,10 @@ def write_trace(d, pid, experts, margins=None):
         if margins is not None:
             rec["margins"] = margins[v]
         visits.append(rec)
-    json.dump({"hidden_shape": [nv, nt, 2], "hidden_file": "h.f32", "visits": visits},
-              open(os.path.join(d, pid, "trace.json"), "w"))
-    open(os.path.join(d, pid, "h.f32"), "wb").write(b"\x00\x00\x80\x3f" * (nv * nt * 2))
-    json.dump({"prompt_ids": list(range(nt)), "generated_ids": []}, open(os.path.join(d, pid, "golden.json"), "w"))
+    dump({"hidden_shape": [nv, nt, 2], "hidden_file": "h.f32", "visits": visits}, os.path.join(d, pid, "trace.json"))
+    with open(os.path.join(d, pid, "h.f32"), "wb") as f:
+        f.write(b"\x00\x00\x80\x3f" * (nv * nt * 2))
+    dump({"prompt_ids": list(range(nt)), "generated_ids": []}, os.path.join(d, pid, "golden.json"))
 
 
 def experts_with(flips, visits=4, tokens=25):
@@ -134,7 +138,37 @@ class RebasedTests(unittest.TestCase):
         self.assertEqual(sorted(rb["a"]["prompts"]), sorted([World.SHORT, World.MID]))
         self.assertNotIn(World.LONG, rb["c2"]["prompts"])
         self.assertEqual(sorted(rb["c1"]["prompts"]), sorted([World.SHORT, World.MID, World.LONG]))
-        self.assertEqual(rb["a"]["prompts"][World.SHORT]["flip_margins"], "not recorded")
+        self.assertEqual(rb["a"]["prompts"][World.SHORT]["flip_margins"], {"flips": 0, "source": "no flips", "max": None})
+        self.assertEqual(rb["a"]["rederivation_loosens"], [])
+
+    def test_flips_without_margins_make_a_incomplete(self):
+        w = World(self.tmp)
+        write_trace(w.tdir, World.SHORT, experts_with(1))
+        rb = w.run()
+        self.assertEqual(rb["a"]["prompts"][World.SHORT]["flip_margins"], "not checkable")
+        self.assertEqual(gv.rebased_state(rb)[:2], ("incomplete", []))
+        # with the reference's margins recorded, the same flip is judged
+        write_trace(os.path.join(w.root, World.SHORT, "fp32", "traces"), World.SHORT, experts_with(0),
+                    [[0.001] * 25 for _ in range(4)])
+        rb = w.run()
+        self.assertEqual(gv.rebased_state(rb)[0], "pass")
+        self.assertEqual(rb["a"]["prompts"][World.SHORT]["flip_margins"]["source"], "fp32")
+
+    def test_expert_sets_checked_on_covered_prompts_with_traces(self):
+        w = World(self.tmp)
+        write_trace(os.path.join(w.root, World.MID, "fp32", "traces"), World.MID, experts_with(0))
+        write_trace(w.tdir, World.MID, experts_with(5))
+        rb = w.run()
+        self.assertIn("expert_sets", rb["a"]["prompts"][World.MID]["fails"])
+        self.assertEqual(gv.rebased_state(rb)[0], "fail")
+
+    def test_rederivation_is_reported_never_gated(self):
+        rb = World(self.tmp, cand_shift=0.01).run()
+        worst = rb["a"]["measured_worst"]
+        expect = [k for k, b in gv.EXACT_BOUNDS.items() if 3 * worst[k] > b]
+        self.assertEqual(rb["a"]["rederivation_loosens"], expect)
+        for k, b in gv.EXACT_BOUNDS.items():
+            self.assertEqual(rb["a"]["rederived"][k], max(3 * worst[k], b))
 
     def test_b_picks_the_mode_by_length(self):
         w = World(self.tmp)
@@ -150,6 +184,13 @@ class RebasedTests(unittest.TestCase):
         rb = World(self.tmp, cand_shift=0.08).run()
         self.assertFalse(rb["a"]["prompts"][World.MID]["pass"])
         self.assertIn("mean_kl", rb["a"]["prompts"][World.MID]["fails"])
+        self.assertTrue(rb["c1"]["prompts"][World.LONG]["pass"])  # within 2x the addendum bounds
+        self.assertFalse(rb["c2"]["prompts"][World.MID]["pass"])   # but farther from tf CPU than fp32
+
+    def test_runner_far_from_tf_cpu_fails_c1(self):
+        rb = World(self.tmp, cand_shift=0.5).run()
+        self.assertFalse(rb["c1"]["prompts"][World.LONG]["pass"])
+        self.assertIn("c1", gv.rebased_state(rb)[1])
         self.assertEqual(gv.rebased_state(rb)[0], "fail")
 
     def test_missing_fp32_is_incomplete_not_pass(self):
@@ -187,6 +228,55 @@ class RebasedTests(unittest.TestCase):
         self.assertIn("d", missing)
 
 
+    def test_truncated_runner_output_fails(self):
+        w = World(self.tmp)
+        for pid in w.ids:
+            path = os.path.join(w.cand, pid, "logprobs.json")
+            with open(path) as f:
+                rows = json.load(f)
+            dump(rows[:2], path)
+        rb = w.run()
+        self.assertIn("positions", rb["a"]["prompts"][World.MID]["fails"])
+        self.assertIn("positions", rb["c1"]["prompts"][World.LONG]["fails"])
+        self.assertFalse(rb["d"]["pass"])
+        self.assertEqual(gv.rebased_state(rb)[0], "fail")
+
+    def test_b_fails_when_the_rounded_reference_drifts(self):
+        w = World(self.tmp)
+        write_run(os.path.join(w.root, World.MID, "llamaExperts", "tf"), World.MID, w.ids[World.MID], shift=0.3)
+        rb = w.run()
+        self.assertFalse(rb["b"]["prompts"][World.MID]["pass"])
+        self.assertIn("b", gv.rebased_state(rb)[1])
+
+    def test_a_covers_by_length(self):
+        gv.A_MAX_TOKENS, saved = 59, gv.A_MAX_TOKENS
+        try:
+            rb = World(self.tmp).run()
+        finally:
+            gv.A_MAX_TOKENS = saved
+        self.assertNotIn(World.MID, rb["a"]["prompts"])  # 60 tokens > 59
+        self.assertIn(World.SHORT, rb["a"]["prompts"])
+
+    def test_mismatched_trace_shape_fails_without_crashing(self):
+        w = World(self.tmp)
+        write_trace(w.tdir, World.SHORT, experts_with(0, visits=3))
+        rb = w.run()
+        self.assertIn("trace_shape", rb["a"]["prompts"][World.SHORT]["fails"])
+        self.assertEqual(gv.rebased_state(rb)[0], "fail")
+
+
+class VerdictTests(unittest.TestCase):
+    def test_exit_codes(self):
+        self.assertEqual(gv.verdict(False, "incomplete", ["a"], True)[1], 1)  # a failure wins
+        self.assertEqual(gv.verdict(True, "incomplete", ["a"], True)[1], 4)
+        self.assertEqual(gv.verdict(True, "pass", [], False)[1], 4)          # no traces: never pass
+        self.assertEqual(gv.verdict(True, "pass", [], True), ("PASS", 0))
+
+    def test_pooled_skips_prompts_without_positions(self):
+        empty = {"logprobs": {"positions": 0, "top1_agreement": None, "top1_at_margin": {"2.0": {"positions": 0, "agree": 0}}}}
+        self.assertFalse(gv.pooled([empty])["pass"])
+
+
 class ExpertRuleTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -202,21 +292,28 @@ class ExpertRuleTests(unittest.TestCase):
         return gv.expert_rule(self.root, "t", self.tdir)
 
     def test_two_percent_of_token_visits(self):
-        # 4 visits x 25 tokens = 100 token-visits
-        fails, ex, fm = self.judge(2)
+        # 4 visits x 25 tokens = 100 token-visits; no margins anywhere
+        fails, ex, fm, src = self.judge(2)
         self.assertEqual(fails, {})
         self.assertAlmostEqual(ex, 0.98)
-        self.assertIsNone(fm)
-        fails, ex, _ = self.judge(3)
+        self.assertEqual((fm, src), (None, None))  # flips, nothing to judge them by
+        fails, ex, _, _ = self.judge(3)
         self.assertIn("expert_sets", fails)
+        self.assertEqual(self.judge(0)[2:], ([], "no flips"))
 
-    def test_flip_margin_clause_where_recorded(self):
+    def test_flip_margin_clause(self):
         small = [[0.001] * 25 for _ in range(4)]
-        fails, _, fm = self.judge(1, small)
-        self.assertEqual((fails, fm), ({}, [0.001]))
+        fails, _, fm, src = self.judge(1, small)
+        self.assertEqual((fails, fm, src), ({}, [0.001], "fp32"))
         large = [[0.03] + [0.001] * 24] + [[0.001] * 25 for _ in range(3)]
-        fails, _, fm = self.judge(1, large)
+        fails, _, fm, _ = self.judge(1, large)
         self.assertIn("flip_margin", fails)
+
+    def test_runner_margins_when_fp32_has_none(self):
+        write_trace(os.path.join(self.root, "t", "fp32", "traces"), "t", experts_with(0))
+        write_trace(self.tdir, "t", experts_with(1), [[0.002] * 25 for _ in range(4)])
+        fails, _, fm, src = gv.expert_rule(self.root, "t", self.tdir)
+        self.assertEqual((fails, fm, src), ({}, [0.002], "runner"))
 
     def test_missing_trace_is_none(self):
         self.assertIsNone(gv.expert_rule(self.root, "t", self.tdir))
