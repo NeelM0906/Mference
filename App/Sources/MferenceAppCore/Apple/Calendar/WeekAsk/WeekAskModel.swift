@@ -43,6 +43,8 @@ public final class WeekAskModel {
     /// The week the answers are about.
     @ObservationIgnored private var week: DateInterval?
     @ObservationIgnored private var fingerprint: Int?
+    /// The schedule the thread was answered from.
+    @ObservationIgnored private var threadContext: WeekContext?
     /// The events the answers' snapshot held: a Focus block among them is
     /// part of what the answers read, so its edits and deletion count.
     @ObservationIgnored private var snapshotEventIDs: Set<String> = []
@@ -83,20 +85,13 @@ public final class WeekAskModel {
     public var current: WeekAnswer? { isStale ? nil : answers.last }
 
     /// The grid draws these as dashed open blocks.
-    public var highlightedOpenTimes: [DateInterval] { current?.facts.openTimes ?? [] }
+    public var highlightedOpenTimes: [DateInterval] { current?.openTimes ?? [] }
 
     /// The grid rings these events and fades the rest.
-    public var highlightedEventIDs: Set<String> { current?.facts.eventIDs ?? [] }
+    public var highlightedEventIDs: Set<String> { current?.eventIDs ?? [] }
 
-    /// The busiest days left, for the "Busiest left" badge.
-    public var highlightedDays: [Date] {
-        guard let current, case .compareDays = current.query else { return [] }
-        let mostBooked = current.facts.facts.compactMap { fact -> WeekDayLoad? in
-            if case .day(let load) = fact.kind, !load.isPast { load } else { nil }
-        }
-        let most = mostBooked.map(\.bookedMinutes).max() ?? 0
-        return most > 0 ? mostBooked.filter { $0.bookedMinutes == most }.map(\.day) : []
-    }
+    /// The day the person is looking at in Day view; the schedule says so.
+    private var focusDay: Date? { calendar.mode == .day ? calendar.selectedDate : nil }
 
     /// The person moved to another week (or picked a day in another week):
     /// answers about the old week go.
@@ -134,7 +129,7 @@ public final class WeekAskModel {
         notice = nil
         generation += 1
         let mine = generation
-        pending = WeekAskPending(question: question, step: .readingQuestion)
+        pending = WeekAskPending(question: question, step: .reading)
         pendingWeek = interval
         let snapshot: WeekSnapshot
         do {
@@ -149,12 +144,26 @@ public final class WeekAskModel {
             return
         }
         guard mine == generation else { return }
-        let previous = isStale ? nil : answers.last?.query
+        // A follow-up continues the thread while the calendar is as the
+        // thread read it; otherwise this question starts a new one.
+        let continuing = !answers.isEmpty && !isStale && week == interval
+            && Self.fingerprint(snapshot, ignoring: ignoredOwnEvents) == fingerprint
+        let history = continuing ? answers : []
+        let context: WeekContext
+        if continuing, let threadContext, threadContext.week.events == snapshot.events,
+           threadContext.week.todos == snapshot.todos, threadContext.focus == focusDay.map(snapshot.calendar.startOfDay) {
+            // The same schedule, word for word: the engine can reuse it.
+            context = threadContext
+        } else {
+            context = WeekContext(week: snapshot, focus: focusDay)
+        }
         let answerer = answerer
         let report: @Sendable (WeekAskStep) async -> Void = { [weak self] step in
             await self?.setStep(step, generation: mine)
         }
-        let task = Task { try await answerer.answer(question, in: snapshot, previous: previous, progress: report) }
+        let task = Task {
+            try await answerer.answer(question, context: context, history: history, progress: report)
+        }
         self.task = task
         do {
             let answer = try await task.value
@@ -166,10 +175,11 @@ public final class WeekAskModel {
                 self.task = nil
                 return
             }
-            if week != interval || isStale {
+            if !continuing {
                 answers = []
                 isStale = false
             }
+            threadContext = context
             week = interval
             snapshotEventIDs = Set(snapshot.events.map(\.id))
             fingerprint = Self.fingerprint(snapshot, ignoring: ignoredOwnEvents)
@@ -233,6 +243,7 @@ public final class WeekAskModel {
         answers = []
         week = nil
         fingerprint = nil
+        threadContext = nil
         snapshotEventIDs = []
         ownEvents = [:]
         isStale = false
@@ -252,17 +263,10 @@ public final class WeekAskModel {
     /// The chat's title ("Week of Sep 14 to 20").
     public var chatTitle: String { "Week of \(scopeLabel)" }
 
-    /// What the chat starts from: the week and every fact the answers used,
-    /// so the chat model reads the same calendar the answers did.
+    /// What the chat starts from: the schedule the answers read, so the chat
+    /// model reads the same calendar.
     public var chatContext: String {
-        var lines = ["About my calendar for \(text.weekRange(week ?? scope)), as Mference worked it out:"]
-        for answer in answers {
-            for fact in answer.facts.facts {
-                let line = "- " + fact.line.dropFirst(fact.id.count + 2)
-                if !lines.contains(line) { lines.append(line) }
-            }
-        }
-        return lines.joined(separator: "\n")
+        "My calendar for \(text.weekRange(week ?? scope)), as Mference read it:\n" + (threadContext?.plainText ?? "")
     }
 
     /// The questions and answers, oldest first.
@@ -319,11 +323,12 @@ public final class WeekAskModel {
 
     // MARK: Block
 
-    /// The block Block would add for an open time: the length asked for (at
-    /// least the whole block when it is shorter), from its start.
+    /// The block Block would add for an open time, from its start: the
+    /// latest length asked for in the thread (an hour when none), at most
+    /// the whole open block.
     public func blockInterval(for openTime: DateInterval) -> DateInterval {
-        guard case .freeTime(let request) = current?.query else { return openTime }
-        let length = min(openTime.duration, TimeInterval(request.minimumMinutes * 60))
+        let asked = answers.reversed().lazy.compactMap { WeekText.requestedMinutes(in: $0.question) }.first ?? 60
+        let length = min(openTime.duration, TimeInterval(asked * 60))
         return DateInterval(start: openTime.start, duration: length)
     }
 

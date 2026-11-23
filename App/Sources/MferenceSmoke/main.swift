@@ -17,6 +17,12 @@ import MferenceAppCore
 // App/Resources/SearXNG/runtime provides); it passes when the model searched
 // and the answer cites sources. The result's `web` field has the details.
 //
+// Ask about your week: add `--week-ask`. 20 questions over two fixed weeks
+// (`WeekAskCheckpoint`) through the app's prompt and engine path; each reply
+// is recorded as mode A shows it and with mode B's time warnings, and with
+// `--out` also as a week-ask JSONL log (read it with
+// App/Scripts/week_ask_report.py). Passes when every question got an answer.
+//
 // Warm decode: add `--warmup` to send a short request on the loaded model
 // first, so the main request's decode is warm; `--temperature 0` is greedy,
 // as the engine's own speed runs use (default: the checkpoint's sampling).
@@ -61,6 +67,8 @@ struct SmokeResult: Codable {
     var powerSourceAtEnd: String?
     /// `--web` runs: what the web answer searched, read and cited.
     var web: WebCheckpointOutcome?
+    /// `--week-ask` runs: one result per question.
+    var weekAsk: [WeekAskCheckpoint.Result]?
     /// `--warmup`: the short request sent first on the loaded model.
     var warmupCompletionTokens: Int?
     var warmupPrefillSeconds: Double?
@@ -99,6 +107,7 @@ var prompt = "Answer in one short sentence: what is the capital of France?"
 var maxTokens = 64
 var commit: String?
 var webMode = false
+var weekAskMode = false
 var warmup = false
 var temperature: Float?
 var promptGiven = false
@@ -110,6 +119,7 @@ while let argument = arguments.popFirst() {
         prompt = arguments.popFirst() ?? prompt
         promptGiven = true
     case "--web": webMode = true
+    case "--week-ask": weekAskMode = true
     case "--warmup": warmup = true
     case "--temperature": temperature = arguments.popFirst().flatMap(Float.init)
     case "--max-tokens": maxTokens = arguments.popFirst().flatMap(Int.init) ?? maxTokens
@@ -127,6 +137,7 @@ guard power == kIOPMACPowerKey else { fail("power source is '\(power)'; smoke ru
 
 let started = ContinuousClock.now
 let startedUTC = ISO8601DateFormatter().string(from: Date())
+let stamp = startedUTC.replacingOccurrences(of: ":", with: "")
 guard let swapBefore = swapUsedBytes() else { fail("cannot read vm.swapusage", code: 8) }
 let idle = IdleUnloadControl(delay: nil)
 let engine = EngineService.live(idleUnload: idle)
@@ -145,7 +156,18 @@ do {
     try await engine.load(model)
     let loadTime = loadStarted.duration(to: .now)
     result.loadSeconds = Double(loadTime.components.seconds) + Double(loadTime.components.attoseconds) / 1e18
-    if webMode {
+    if weekAskMode {
+        let log = outDirectory.map {
+            WeekAskLog(url: $0.appending(path: "week-ask-\(model.rawValue)-\(stamp).jsonl"), isEnabled: { true })
+        }
+        let results = await WeekAskCheckpoint.run(model: EngineWeekLanguageModel(engine: engine, model: model), log: log)
+        result.weekAsk = results
+        result.prompt = "week-ask: \(results.count) questions"
+        result.answer = results.map { "\($0.index). \($0.question) -> \($0.shown)" }.joined(separator: "\n")
+        let failed = results.filter { $0.error != nil }
+        result.passed = !results.isEmpty && failed.isEmpty
+        if !failed.isEmpty { result.error = "\(failed.count) of \(results.count) questions failed" }
+    } else if webMode {
         // In-memory settings: the run turns web search on (and offline mode
         // off) without touching the person's own settings.
         let settings = AppSettings(store: InMemorySettingsStore())
@@ -223,8 +245,8 @@ let json = (try? encoder.encode(result)) ?? Data()
 print(String(decoding: json, as: UTF8.self))
 if let outDirectory {
     try? FileManager.default.createDirectory(at: outDirectory, withIntermediateDirectories: true)
-    let stamp = startedUTC.replacingOccurrences(of: ":", with: "")
-    try? json.write(to: outDirectory.appending(path: "\(model.rawValue)\(webMode ? "-web" : "")-\(stamp).json"))
+    let kind = webMode ? "-web" : weekAskMode ? "-week-ask" : ""
+    try? json.write(to: outDirectory.appending(path: "\(model.rawValue)\(kind)-\(stamp).json"))
 }
 
 if swapAfter == nil { fail("cannot read vm.swapusage at the end", code: 8) }

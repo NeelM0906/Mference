@@ -1,27 +1,31 @@
 import Foundation
 
-/// What a model said back: text, tool calls, and whether it ran out of room.
+/// What a model said back, and whether it ran out of room.
 public struct WeekModelReply: Sendable, Hashable {
     public var content: String
-    public var toolCalls: [ToolCall]
     /// Stopped at the token limit: the text may be cut off.
     public var wasCut: Bool
+    /// For the log, when the model reports them.
+    public var promptTokens: Int?
+    public var completionTokens: Int?
 
-    public init(content: String, toolCalls: [ToolCall] = [], wasCut: Bool = false) {
+    public init(content: String, wasCut: Bool = false, promptTokens: Int? = nil, completionTokens: Int? = nil) {
         self.content = content
-        self.toolCalls = toolCalls
         self.wasCut = wasCut
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
     }
 }
 
-/// A model Ask about your week can use for its two small jobs (naming the
-/// question, wording the answer). Thinking is always off and temperature 0:
-/// the same week and question give the same answer.
+/// A model Ask about your week can use: it reads the schedule and the
+/// thread and answers. Thinking is always off and temperature 0, so the same
+/// week and question give the same answer.
 public protocol WeekLanguageModel: Sendable {
     /// Shown under the answer ("Quick 4B", "Deep 27B", "Apple on-device").
     var label: String { get }
-    func respond(instructions: String, prompt: String, tools: [ToolDefinition], maximumTokens: Int) async throws
-        -> WeekModelReply
+    /// `turns` is the system turn, then the thread (user, assistant, ...,
+    /// user).
+    func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply
 }
 
 /// An engine model, used only once it is resident (or about to be), so Ask
@@ -37,23 +41,18 @@ public struct EngineWeekLanguageModel: WeekLanguageModel {
 
     public var label: String { model.shortName }
 
-    public func respond(instructions: String, prompt: String, tools: [ToolDefinition], maximumTokens: Int)
-        async throws -> WeekModelReply {
-        let turns = [ChatTurn(role: .system, content: instructions), ChatTurn(role: .user, content: prompt)]
-        let options = GenerationOptions(thinking: false, maximumCompletionTokens: maximumTokens, tools: tools,
-                                        temperature: 0)
+    public func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply {
+        let options = GenerationOptions(thinking: false, maximumCompletionTokens: maximumTokens, temperature: 0)
         var content = ""
-        var calls: [ToolCall] = []
         for try await update in engine.generate(model: model, turns: turns, options: options) {
             switch update {
             case .content(let text): content += text
-            case .toolCall(let call): calls.append(call)
             case .completed(let summary):
                 try Task.checkCancellation()
                 return WeekModelReply(content: summary.content.isEmpty ? content : summary.content,
-                                      toolCalls: summary.toolCalls.isEmpty ? calls : summary.toolCalls,
-                                      wasCut: summary.finish == .length)
-            case .prepared, .reasoning: break
+                                      wasCut: summary.finish == .length, promptTokens: summary.promptTokens,
+                                      completionTokens: summary.completionTokens)
+            case .prepared, .reasoning, .toolCall: break
             }
         }
         try Task.checkCancellation()
@@ -61,8 +60,8 @@ public struct EngineWeekLanguageModel: WeekLanguageModel {
     }
 }
 
-/// Apple's on-device model, which answers in text only: the router asks it
-/// for the tool's JSON as plain text instead.
+/// Apple's on-device model, which takes instructions and one prompt: the
+/// thread is written out in order, earlier questions marked as such.
 public struct AssistantWeekLanguageModel: WeekLanguageModel {
     public let model: any AssistantTextModel
 
@@ -72,35 +71,24 @@ public struct AssistantWeekLanguageModel: WeekLanguageModel {
 
     public var label: String { model.kind.label }
 
-    public func respond(instructions: String, prompt: String, tools: [ToolDefinition], maximumTokens: Int)
-        async throws -> WeekModelReply {
-        // A text-only model gets the tool's whole contract in the prompt.
-        let suffix = tools.first.map { tool in
-            "\n\nThe call \(tool.name): \(tool.description)\nIts arguments, as JSON Schema: "
-                + Self.json(tool.parameters)
-                + "\nReply with only the JSON object of the \(tool.name) arguments."
-        } ?? ""
-        let text = try await model.complete(AssistantRequest(instructions: instructions, prompt: prompt + suffix,
-                                                             maximumTokens: maximumTokens, temperature: 0))
-        return WeekModelReply(content: text)
-    }
-
-    /// `value` as compact JSON with sorted keys.
-    static func json(_ value: ToolJSON) -> String {
-        func plain(_ value: ToolJSON) -> Any {
-            switch value {
-            case .null: NSNull()
-            case .bool(let flag): flag
-            case .integer(let number): number
-            case .number(let number): number
-            case .string(let text): text
-            case .array(let items): items.map(plain)
-            case .object(let fields): fields.mapValues(plain)
+    public func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply {
+        let instructions = turns.filter { $0.role == .system }.compactMap(\.content).joined(separator: "\n\n")
+        let thread = turns.filter { $0.role != .system }
+        var parts: [String] = []
+        for (index, turn) in thread.enumerated() {
+            let content = turn.content ?? ""
+            switch turn.role {
+            case .assistant: parts.append("Your answer: " + content)
+            case .user where index < thread.count - 1:
+                parts.append(content.replacingOccurrences(of: WeekAnswerer.questionLabel,
+                                                          with: "Earlier question: "))
+            default: parts.append(content)
             }
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: plain(value), options: [.sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else { return "{}" }
-        return text
+        let text = try await model.complete(AssistantRequest(instructions: instructions,
+                                                             prompt: parts.joined(separator: "\n"),
+                                                             maximumTokens: maximumTokens, temperature: 0))
+        return WeekModelReply(content: text)
     }
 }
 

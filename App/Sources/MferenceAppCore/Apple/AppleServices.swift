@@ -47,8 +47,11 @@ public final class AppleServices {
                                                context: container.mainContext),
                              calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
-                             weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: WeekModelPicker(
-                                 engine: engine, appleModel: FoundationTextModel(), useAppleModel: useAppleModel))))
+                             weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
+                                 picker: WeekModelPicker(engine: engine, appleModel: FoundationTextModel(),
+                                                         useAppleModel: useAppleModel),
+                                 review: { WeekAnswerReview.current() }, format: { WeekScheduleFormat.current() },
+                                 log: .live())))
     }
 
     /// Previews, snapshots and tests: in-memory calendar, mail and planner, a

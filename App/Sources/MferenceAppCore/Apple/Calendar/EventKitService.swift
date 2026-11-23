@@ -173,7 +173,16 @@ public actor EventKitService: CalendarServicing {
                              isAllDay: event.isAllDay,
                              calendarName: event.calendar?.title ?? "Calendar",
                              calendarColor: event.calendar?.color.flatMap(hex),
-                             location: event.location)
+                             location: event.location,
+                             isUserCalendar: event.calendar.map {
+                                 isUserCalendar(type: $0.type, allowsContentModifications: $0.allowsContentModifications)
+                             } ?? true)
+    }
+
+    /// A calendar the person adds events to: not subscribed (holidays), not
+    /// Birthdays, not read-only.
+    static func isUserCalendar(type: EKCalendarType, allowsContentModifications: Bool) -> Bool {
+        type != .subscription && type != .birthday && allowsContentModifications
     }
 
     static func hex(_ color: NSColor) -> UInt32? {

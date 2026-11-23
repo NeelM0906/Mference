@@ -410,21 +410,11 @@ struct TimeGrid: View {
     private func dayLabel(_ day: Date) -> some View {
         let calendar = model.layout.calendar
         let today = model.isToday(day)
-        let busiest = ask?.highlightedDays.contains { calendar.isDate($0, inSameDayAs: day) } ?? false
         return Button { Task { await model.open(day, in: .day) } } label: {
             HStack(spacing: MFSpacing.xs) {
                 Text(CalendarText.weekday(day, calendar: calendar)).font(MFFont.caption)
                 Text("\(calendar.component(.day, from: day))").font(MFFont.caption.weight(.bold))
                     .foregroundStyle(today ? MFColor.onInk : MFColor.ink)
-                if busiest {
-                    Text("Busiest left")
-                        .font(MFFont.micro)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .foregroundStyle(MFColor.accentStrong)
-                        .padding(.horizontal, MFSpacing.xs)
-                        .background(Capsule().fill(MFColor.accentFill))
-                }
             }
             .foregroundStyle(today ? MFColor.onInk : MFColor.secondary)
             .padding(.horizontal, today ? MFSpacing.m : MFSpacing.xs)

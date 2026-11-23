@@ -13,8 +13,21 @@ struct WeekAskPanel: View {
     var continueInChat: (() -> Void)?
     @FocusState private var focused: Bool
 
-    static let suggestions = ["When am I free for 2 hours?", "What's my busiest day?", "What's due this week?",
-                              "Anything overlapping?"]
+    /// The chips while nothing is asked: about the selected day in Day view,
+    /// about the week otherwise.
+    private var suggestions: [String] {
+        guard calendar.mode == .day else {
+            return ["When am I free for 2 hours?", "What's my busiest day?", "What's due this week?",
+                    "Anything overlapping?"]
+        }
+        let word = ask.text.dayWord(calendar.selectedDate)
+        if word == "today" {
+            return ["What's on today?", "Am I free today?", "What's tomorrow like?", "What's due this week?"]
+        }
+        // "tomorrow" reads without "on"; a weekday needs it.
+        let when = word == "tomorrow" ? word : "on \(word)"
+        return ["What's on \(word)?", "Am I free \(when)?", "What's due this week?", "What's my busiest day?"]
+    }
 
     private var isIdle: Bool { ask.answers.isEmpty && ask.pending == nil }
 
@@ -23,7 +36,7 @@ struct WeekAskPanel: View {
             if !compact { header }
             if isIdle && !compact {
                 FlowLayout(spacing: MFSpacing.xs) {
-                    ForEach(Self.suggestions, id: \.self) { suggestion in
+                    ForEach(suggestions, id: \.self) { suggestion in
                         Button(suggestion) { Task { await ask.ask(suggestion) } }
                             .buttonStyle(ChipButtonStyle())
                     }
@@ -214,7 +227,8 @@ struct WeekAskPanel: View {
     private var placeholder: String {
         if ask.isFull { return "Continue in Chat to ask more" }
         if compact { return "Ask about this week" }
-        return ask.answers.isEmpty ? "When am I free for 2 hours?" : "Ask a follow-up"
+        guard ask.answers.isEmpty else { return "Ask a follow-up" }
+        return calendar.mode == .day ? "Ask about this day or week" : "When am I free for 2 hours?"
     }
 }
 
@@ -239,6 +253,12 @@ struct WeekAnswerView: View {
                 .foregroundStyle(MFColor.ink)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+            ForEach(answer.warnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if isStale {
                 Label("Your calendar changed since this answer. Ask again.", systemImage: "exclamationmark.circle")
                     .font(MFFont.caption)
@@ -246,12 +266,12 @@ struct WeekAnswerView: View {
             }
             VStack(alignment: .leading, spacing: MFSpacing.xs) {
                 ForEach(shownFacts) { fact in
-                    WeekFactRow(fact: fact, ask: ask, text: text, maximumMinutes: maximumMinutes)
+                    WeekFactRow(fact: fact, ask: ask, text: text)
                 }
             }
             .opacity(isStale ? 0.5 : 1)
-            if answer.facts.facts.count > Self.collapsedCount {
-                Button(showsAll ? "Show fewer" : "Show all \(answer.facts.facts.count)") { showsAll.toggle() }
+            if answer.rows.count > Self.collapsedCount {
+                Button(showsAll ? "Show fewer" : "Show all \(answer.rows.count)") { showsAll.toggle() }
                     .buttonStyle(.plain)
                     .font(MFFont.callout)
                     .foregroundStyle(MFColor.accent)
@@ -289,62 +309,35 @@ struct WeekAnswerView: View {
     static let collapsedCount = 3
 
     private var shownFacts: [WeekFact] {
-        showsAll ? answer.facts.facts : Array(answer.facts.facts.prefix(Self.collapsedCount))
+        showsAll ? answer.rows : Array(answer.rows.prefix(Self.collapsedCount))
     }
 
-    private var maximumMinutes: Int {
-        answer.facts.facts.compactMap { fact -> Int? in
-            if case .day(let load) = fact.kind { load.bookedMinutes } else { nil }
-        }.max() ?? 0
-    }
-
-    private var caption: String {
-        switch answer.source {
-        case .model(let label): "\(label) · checked against your calendar"
-        default: answer.source.caption
-        }
-    }
+    private var caption: String { answer.source.caption }
 
     private var howLines: [String] {
-        var lines = ["Question read as: \(WeekAnswerView.kindName(answer.query))."]
-        lines.append("Days, times and counts were worked out by Mference from your calendar, not by a model.")
+        var lines = ["The question was sent with your week's schedule: every event, open time and to-do, "
+            + "with open and booked time already worked out by Mference."]
         switch answer.source {
         case .model(let label):
-            lines.append("\(label) wrote the sentence. Every day, time and number in it was checked against those facts.")
-        case .fixed(.failedCheck(let label)):
-            lines.append("\(label)'s sentence named something your calendar doesn't hold, so Mference wrote this one.")
+            lines.append("\(label) wrote the answer from that schedule.")
+            if !answer.warnings.isEmpty {
+                lines.append("A note above means the answer names a time your calendar doesn't hold.")
+            }
         case .fixed(.noModel):
-            lines.append("No model could run, so Mference wrote the sentence.")
+            lines.append("No model could run, so Mference lists the week instead.")
         case .fixed(.modelFailed(let label)):
-            lines.append("\(label) could not answer, so Mference wrote the sentence.")
-        case .fixed(.noModelNeeded):
-            lines.append("No model was run for this.")
+            lines.append("\(label) couldn't answer, so Mference lists the week instead.")
         }
         return lines
     }
-
-    static func kindName(_ query: WeekQuery) -> String {
-        switch query {
-        case .freeTime(let request): "free time, at least \(request.minimumMinutes) minutes"
-            + (request.part.map { ", \($0.rawValue)s" } ?? "")
-        case .findEvent(let name): "find the event \u{201C}\(name)\u{201D}"
-        case .compareDays: "which day is busiest"
-        case .daySummary: "what's on one day"
-        case .todosDue: "to-dos due"
-        case .overlaps: "events that overlap"
-        case .outsideWeek: "another week"
-        case .other: "not about this week's calendar"
-        }
-    }
 }
 
-/// One row under an answer: an open block (with Block), a day's load, a
-/// to-do or an event.
+/// One row under an answer: an open block (with Block), an event or a
+/// to-do.
 struct WeekFactRow: View {
     var fact: WeekFact
     var ask: WeekAskModel
     var text: WeekText
-    var maximumMinutes: Int
 
     var body: some View {
         switch fact.kind {
@@ -373,34 +366,11 @@ struct WeekFactRow: View {
             .padding(.horizontal, MFSpacing.s)
             .padding(.vertical, MFSpacing.xs)
             .background(RoundedRectangle(cornerRadius: MFRadius.s).fill(MFColor.successFill))
-        case .day(let load):
-            HStack(spacing: MFSpacing.s) {
-                Text(text.shortWeekday(load.day))
-                    .font(MFFont.callout.weight(load.bookedMinutes == maximumMinutes && !load.isPast ? .semibold : .regular))
-                    .foregroundStyle(load.isPast ? MFColor.tertiary : MFColor.ink)
-                    .frame(width: 36, alignment: .leading)
-                GeometryReader { proxy in
-                    Capsule().fill(MFColor.fill)
-                        .overlay(alignment: .leading) {
-                            Capsule().fill(load.isPast ? MFColor.hairlineStrong : MFColor.accent)
-                                .frame(width: proxy.size.width * CGFloat(load.bookedMinutes) / CGFloat(max(maximumMinutes, 1)))
-                        }
-                }
-                .frame(height: 6)
-                Text("\(text.duration(minutes: load.bookedMinutes)) · \(load.eventCount)")
-                    .font(MFFont.caption)
-                    .foregroundStyle(MFColor.secondary)
-                    .frame(width: 92, alignment: .trailing)
-            }
-            .accessibilityElement(children: .combine)
         case .todo(let todo):
             row(todo.title, todo.due.map { text.dayWordCapitalized($0) } ?? "No date")
         case .event(let event):
             row(event.title, event.isAllDay ? "\(text.shortWeekday(event.start)) · all day"
                 : "\(text.shortWeekday(event.start)) · \(text.range(event.start, event.end))")
-        case .overlap(let first, let second, let shared):
-            row("\(first.title) and \(second.title)",
-                "\(text.shortWeekday(shared.start)) · \(text.range(shared.start, shared.end))")
         }
     }
 

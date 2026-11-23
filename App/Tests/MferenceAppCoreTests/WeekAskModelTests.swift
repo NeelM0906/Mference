@@ -2,9 +2,18 @@ import Foundation
 @testable import MferenceAppCore
 import Testing
 
-/// Ask about your week's lifecycle: in memory, one week, three questions,
-/// out of date when the calendar changes, Block with Undo, Stop.
+/// Ask about your week's lifecycle: in memory, one week, a thread of at most
+/// three questions, out of date when the calendar changes, Block with Undo,
+/// Stop.
 @Suite struct WeekAskModelTests {
+    static let fridayAnswer = "Friday 1:30 to 5 PM is open. [F8]"
+
+    /// A resident model that answers every question with `reply`.
+    static func engine(_ reply: String = fridayAnswer, delay: Duration = .zero) -> ScriptedEngineService {
+        ScriptedEngineService(status: WeekAnswererTests.deepResident,
+                              fallback: .init(content: reply, chunk: delay == .zero ? 6 : 2, delay: delay))
+    }
+
     @MainActor static func setUp(engine: ScriptedEngineService? = nil,
                                  service: InMemoryCalendarService = InMemoryCalendarService(events: CalendarFixtures.events))
         async -> (calendar: CalendarWeekModel, ask: WeekAskModel) {
@@ -15,28 +24,38 @@ import Testing
     }
 
     @Test @MainActor func answersStayForTheWeekUpToThree() async {
-        let (_, ask) = await Self.setUp()
+        let (_, ask) = await Self.setUp(engine: Self.engine())
         #expect(ask.scopeLabel == "Sep 14 to 20")
         ask.draft = "When am I free for 2 hours?"
         #expect(ask.canAsk)
         await ask.ask()
         #expect(ask.draft.isEmpty)
         #expect(ask.answers.count == 1)
-        #expect(ask.answers[0].source == .fixed(.noModel))
-        #expect(ask.highlightedOpenTimes.count == 8)
-        await ask.ask("What's my busiest day?")
-        #expect(ask.highlightedDays == [CalendarFixtures.date(18, 0)])
-        #expect(ask.highlightedOpenTimes.isEmpty)
-        await ask.ask("When is the contract call?")
-        #expect(ask.highlightedEventIDs == ["contract"])
+        #expect(ask.answers[0].source == .model(label: "Deep 27B"))
+        #expect(ask.highlightedOpenTimes == [DateInterval(start: CalendarFixtures.date(18, 13, 30),
+                                                          end: CalendarFixtures.date(18, 17))])
+        await ask.ask("only mornings")
+        await ask.ask("and on Friday?")
         #expect(ask.isFull)
         await ask.ask("What's due this week?")
         #expect(ask.answers.count == 3)
         #expect(ask.notice?.text.hasPrefix("Three questions is the limit") == true)
     }
 
+    @Test @MainActor func followUpsShareOneThreadAndOneSchedule() async {
+        let engine = Self.engine()
+        let (_, ask) = await Self.setUp(engine: engine)
+        await ask.ask("When am I free for 2 hours?")
+        await ask.ask("only mornings")
+        #expect(engine.requests.count == 2)
+        let second = engine.requests[1].turns
+        #expect(second.map(\.role) == [.system, .user, .assistant, .user])
+        #expect(second[2].content == "Friday 1:30 to 5 PM is open.")
+        #expect(second[1].content == engine.requests[0].turns[1].content)
+    }
+
     @Test @MainActor func anotherWeekClearsTheAnswersButAnotherViewDoesNot() async {
-        let (calendar, ask) = await Self.setUp()
+        let (calendar, ask) = await Self.setUp(engine: Self.engine())
         await ask.ask("What's my busiest day?")
         await calendar.show(.day)
         ask.scopeChanged()
@@ -51,17 +70,22 @@ import Testing
         #expect(ask.scopeLabel == "Sep 21 to 27")
     }
 
-    @Test @MainActor func dayViewStillAsksAboutTheWholeWeek() async {
-        let (calendar, ask) = await Self.setUp()
+    @Test @MainActor func dayViewSendsTheWholeWeekAndTheDayInFocus() async {
+        let engine = Self.engine()
+        let (calendar, ask) = await Self.setUp(engine: engine)
         await calendar.show(.day)
+        await calendar.select(CalendarFixtures.date(16, 0))
         #expect(!calendar.events.contains { $0.id == "contract" })
-        await ask.ask("What's my busiest day?")
-        #expect(ask.answers.last?.sentence == "Friday is your busiest day left, with 2 h 30 min booked.")
+        await ask.ask("What's on today?")
+        let schedule = engine.requests.first?.turns[1].content ?? ""
+        #expect(schedule.contains("Contract call, 1 to 1:30 PM [E8]"))
+        #expect(schedule.contains("Looking at: Wednesday Sep 16 (tomorrow)."))
     }
 
-    @Test @MainActor func aCalendarChangeMarksTheAnswerOutOfDate() async throws {
+    @Test @MainActor func aCalendarChangeMarksTheAnswerOutOfDateAndStartsANewThread() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
-        let (_, ask) = await Self.setUp(service: service)
+        let engine = Self.engine()
+        let (_, ask) = await Self.setUp(engine: engine, service: service)
         await ask.ask("When am I free for 2 hours?")
         await ask.calendarChanged()
         #expect(!ask.isStale)
@@ -71,23 +95,25 @@ import Testing
         #expect(ask.isStale)
         #expect(ask.current == nil)
         #expect(ask.highlightedOpenTimes.isEmpty)
-        // Asking again starts over with the new calendar.
+        // Asking again starts a new thread with the new schedule.
         await ask.ask("When am I free for 2 hours?")
         #expect(!ask.isStale)
         #expect(ask.answers.count == 1)
-        #expect(ask.highlightedOpenTimes.count == 7)
+        let turns = engine.requests[1].turns
+        #expect(turns.map(\.role) == [.system, .user])
+        #expect(turns[1].content?.contains("Dentist, 3 to 4 PM") == true)
     }
 
     @Test @MainActor func blockAddsTheEventItsOwnChangeIsNotStaleAndUndoRemovesIt() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
-        let (calendar, ask) = await Self.setUp(service: service)
+        let (calendar, ask) = await Self.setUp(engine: Self.engine(), service: service)
         await ask.ask("When am I free for 2 hours?")
-        let thursday = try #require(ask.highlightedOpenTimes.first { $0.start == CalendarFixtures.date(17, 12) })
-        #expect(ask.blockInterval(for: thursday) == DateInterval(start: CalendarFixtures.date(17, 12),
-                                                                end: CalendarFixtures.date(17, 14)))
-        await ask.block(thursday)
-        #expect(ask.notice == WeekAskNotice(text: "Added Focus block to Calendar, Thu 12 to 2 PM.", canUndo: true))
-        #expect(ask.blocked[thursday] != nil)
+        let friday = try #require(ask.highlightedOpenTimes.first)
+        #expect(ask.blockInterval(for: friday) == DateInterval(start: CalendarFixtures.date(18, 13, 30),
+                                                              end: CalendarFixtures.date(18, 15, 30)))
+        await ask.block(friday)
+        #expect(ask.notice == WeekAskNotice(text: "Added Focus block to Calendar, Fri 1:30 to 3:30 PM.", canUndo: true))
+        #expect(ask.blocked[friday] != nil)
         #expect(calendar.events.contains { $0.title == WeekAskModel.blockTitle })
         await ask.calendarChanged()
         #expect(!ask.isStale)
@@ -98,13 +124,21 @@ import Testing
         #expect(!remaining.contains { $0.title == WeekAskModel.blockTitle })
     }
 
+    @Test @MainActor func blockUsesTheLengthAskedForElseAnHour() async throws {
+        let (_, ask) = await Self.setUp(engine: Self.engine())
+        await ask.ask("Where can I fit a 1 hour 30 minutes review?")
+        let thursday = try #require(ask.highlightedOpenTimes.first)
+        #expect(ask.blockInterval(for: thursday).duration == 90 * 60)
+        ask.clear()
+        await ask.ask("Anything open Thursday?")
+        let open = try #require(ask.highlightedOpenTimes.first)
+        #expect(ask.blockInterval(for: open).duration == 60 * 60)
+    }
+
     @Test @MainActor func stopPutsTheQuestionBack() async throws {
-        let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident, replies: [
-            .init(content: "Today, 10 AM to 12 PM is first, and there are eight. [F1]", chunk: 2, delay: .milliseconds(50)),
-        ])
-        let (_, ask) = await Self.setUp(engine: engine)
+        let (_, ask) = await Self.setUp(engine: Self.engine(delay: .milliseconds(50)))
         let running = Task { await ask.ask("When am I free for 2 hours?") }
-        for _ in 0..<200 where ask.pending?.step != .wording { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<200 where ask.pending?.step != .answering { try await Task.sleep(for: .milliseconds(10)) }
         #expect(ask.pending?.question == "When am I free for 2 hours?")
         ask.stop()
         await running.value
@@ -114,10 +148,7 @@ import Testing
     }
 
     @Test @MainActor func leavingTheWeekDropsTheAnswerBeingWorkedOut() async throws {
-        let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident, replies: [
-            .init(content: "Today, 10 AM to 12 PM is first, and there are eight. [F1]", chunk: 2, delay: .milliseconds(50)),
-        ])
-        let (calendar, ask) = await Self.setUp(engine: engine)
+        let (calendar, ask) = await Self.setUp(engine: Self.engine(delay: .milliseconds(50)))
         let running = Task { await ask.ask("When am I free for 2 hours?") }
         for _ in 0..<200 where ask.pending == nil { try await Task.sleep(for: .milliseconds(10)) }
         await calendar.step(1)
@@ -130,12 +161,9 @@ import Testing
 
     @Test @MainActor func aChangeWhileAnsweringMarksTheNewAnswerOutOfDate() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
-        let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident, replies: [
-            .init(content: "Today, 10 AM to 12 PM is first, and there are eight. [F1]", chunk: 2, delay: .milliseconds(30)),
-        ])
-        let (_, ask) = await Self.setUp(engine: engine, service: service)
+        let (_, ask) = await Self.setUp(engine: Self.engine(delay: .milliseconds(30)), service: service)
         let running = Task { await ask.ask("When am I free for 2 hours?") }
-        for _ in 0..<200 where ask.pending?.step != .wording { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<200 where ask.pending?.step != .answering { try await Task.sleep(for: .milliseconds(10)) }
         _ = try await service.add(ProposedEvent(title: "Dentist", start: CalendarFixtures.date(16, 15),
                                                 end: CalendarFixtures.date(16, 16), source: ItemSource(kind: .manual, label: "x")))
         await running.value
@@ -146,7 +174,7 @@ import Testing
 
     @Test @MainActor func movingABlockedEventMakesAnswersStale() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
-        let (_, ask) = await Self.setUp(service: service)
+        let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
         await ask.ask("When am I free for 2 hours?")
         let slot = try #require(ask.highlightedOpenTimes.first)
         await ask.block(slot)
@@ -161,20 +189,20 @@ import Testing
 
     @Test @MainActor func deletingABlockALaterAnswerReadMakesItStale() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
-        let (_, ask) = await Self.setUp(service: service)
+        let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
         await ask.ask("When am I free for 2 hours?")
         let slot = try #require(ask.highlightedOpenTimes.first)
         await ask.block(slot)
         let added = try #require(ask.blocked[slot])
+        ask.clear()
         await ask.ask("When is the focus block?")
-        #expect(ask.answers.last?.facts.eventIDs.contains(added.id) == true)
         try await service.remove(added.reference)
         await ask.calendarChanged()
         #expect(ask.isStale)
     }
 
     @Test @MainActor func aQuestionIsPendingBeforeCalendarIsRead() async {
-        let (_, ask) = await Self.setUp()
+        let (_, ask) = await Self.setUp(engine: Self.engine())
         let running = Task { await ask.ask("When am I free for 2 hours?") }
         await Task.yield()
         ask.clear()
@@ -185,7 +213,7 @@ import Testing
 
     @Test @MainActor func twoQuickBlockClicksAddOneEvent() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
-        let (_, ask) = await Self.setUp(service: service)
+        let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
         await ask.ask("When am I free for 2 hours?")
         let slot = try #require(ask.highlightedOpenTimes.first)
         async let first: Void = ask.block(slot)
@@ -197,7 +225,7 @@ import Testing
     }
 
     @Test @MainActor func aToDoOutsideTheWeekDoesNotMakeAnswersStale() async {
-        let (calendar, ask) = await Self.setUp()
+        let (calendar, ask) = await Self.setUp(engine: Self.engine())
         await ask.ask("When am I free for 2 hours?")
         calendar.addTodo(text: "Renew the lease", due: CalendarFixtures.date(28, 0), dueChosen: true)
         await ask.calendarChanged()
@@ -207,14 +235,11 @@ import Testing
         #expect(ask.isStale)
     }
 
-    @Test @MainActor func aFailedModelStillAnswersFromTheCalendar() async {
-        let engine = ScriptedEngineService(status: WeekAnswererTests.deepResident,
-                                           replies: [.init(content: "", error: .busy)])
-        let (_, ask) = await Self.setUp(engine: engine)
-        await ask.ask("When am I free for 2 hours?")
-        #expect(ask.answers.last?.source == .fixed(.modelFailed(label: "Deep 27B")))
-        #expect(ask.highlightedOpenTimes.count == 8)
-        #expect(ask.notice == nil)
+    @Test @MainActor func withoutAModelTheWeekIsStillShown() async {
+        let (_, ask) = await Self.setUp()
+        await ask.ask("What's on this week?")
+        #expect(ask.answers.last?.source == .fixed(.noModel))
+        #expect(ask.highlightedEventIDs.contains("contract"))
     }
 
     @Test @MainActor func withoutCalendarAccessNothingIsAsked() async {
@@ -224,14 +249,13 @@ import Testing
         #expect(ask.notice?.text == "Allow Calendar access to ask about your week.")
     }
 
-    @Test @MainActor func continueInChatStartsAPrivateChatWithTheAnswers() async throws {
-        let (_, ask) = await Self.setUp()
-        await ask.ask("When is the contract call?")
-        await ask.ask("What's my busiest day?")
+    @Test @MainActor func continueInChatStartsAPrivateChatWithTheThread() async throws {
+        let (_, ask) = await Self.setUp(engine: Self.engine())
+        await ask.ask("When am I free for 2 hours?")
+        await ask.ask("only mornings")
         #expect(ask.chatTitle == "Week of Sep 14 to 20")
-        #expect(ask.chatContext.hasPrefix("About my calendar for Sep 14 to 20, as Mference worked it out:\n"
-            + "- Contract call, Friday Sep 18, 1 to 1:30 PM\n"))
-        #expect(!ask.chatContext.contains("E1:"))
+        #expect(ask.chatContext.hasPrefix("My calendar for Sep 14 to 20, as Mference read it:\nNow: Tuesday Sep 15"))
+        #expect(!ask.chatContext.contains("[F"))
 
         let container = try AppModelContainer.inMemory()
         let store = ConversationStore(container: container)
@@ -242,18 +266,15 @@ import Testing
         #expect(conversation.title == "Week of Sep 14 to 20")
         let stored = conversation.orderedMessages
         #expect(stored.map(\.role) == [.user, .assistant, .user, .assistant])
-        #expect(stored[0].content.hasPrefix("About my calendar"))
-        #expect(stored[0].content.hasSuffix("When is the contract call?"))
-        #expect(stored[1].content == "Contract call is Friday, 1 to 1:30 PM.")
+        #expect(stored[0].content.hasPrefix("My calendar for Sep 14 to 20"))
+        #expect(stored[0].content.hasSuffix("When am I free for 2 hours?"))
+        #expect(stored[1].content == "Friday 1:30 to 5 PM is open.")
         #expect(chat.isPrivate)
-        #expect(chat.messages.count == 4)
-        #expect(chat.draft.isEmpty)
-        // The answers stay in Calendar too: nothing there was moved.
         #expect(ask.answers.count == 2)
     }
 
     @Test @MainActor func clearEmptiesEverything() async {
-        let (_, ask) = await Self.setUp()
+        let (_, ask) = await Self.setUp(engine: Self.engine())
         await ask.ask("When am I free for 2 hours?")
         ask.clear()
         #expect(ask.answers.isEmpty)

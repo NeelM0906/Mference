@@ -53,7 +53,13 @@ import Testing
         let model = CalendarWeekModel(service: service, store: store, defaults: defaults, now: { fixedNow },
                                       syncsAutomatically: false)
         await model.load()
-        let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: .none))
+        let engine = ScriptedEngineService(status: EngineServiceStatus(phase: .ready, residentModel: .quick), replies: [
+            .init(content: "Here are the open times for the rest of the week. [F1, F2, F3]"),
+            .init(content: "Your busiest day left is the one with the most booked time below."),
+            .init(content: "Here is what is due this week. [T1]"),
+        ])
+        let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: WeekModelPicker(
+            engine: engine, appleModel: nil, useAppleModel: { false })))
         func render(_ name: String, _ scheme: ColorScheme = .light) throws {
             try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
                 .environment(model).environment(ask), name: name, colorScheme: scheme)
@@ -75,6 +81,10 @@ import Testing
         await ask.calendarChanged()
         #expect(ask.isStale)
         try render("04-calendar-ask-stale")
+        // Day view: the chips are about the selected day.
+        ask.clear()
+        await model.show(.day)
+        try render("04-calendar-ask-day")
     }
 
     @Test func shellSlotBuildsWithoutServices() {
