@@ -311,6 +311,15 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// the same formula (`Inkling2ExpertResidencyPlan.expertBudget`).
     static func expertBudget(physicalMemory: UInt64) -> Int { Int(physicalMemory / 5 * 2) }
 
+    /// The prefill chunks for `tokenCount` tokens: balanced
+    /// (`PrefillChunkPlanner.balancedSpans`), because every chunk sweeps the
+    /// staged layers whole below 48 GB, and a short tail chunk would leave
+    /// its sweep with no compute to hide behind.
+    static func prefillSpans(tokenCount: Int, startPosition: Int, chunkTokens: Int) -> [PrefillChunkSpan] {
+        PrefillChunkPlanner.balancedSpans(tokenCount: tokenCount, startPosition: startPosition,
+                                          chunkTokens: chunkTokens)
+    }
+
     init(weights: Inkling2RunnerWeights, context: MetalContext, maxContext: Int, maxChunkTokens: Int,
          physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) throws {
         try Self.validate(weights)
@@ -531,8 +540,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         guard logits.length >= w.vocabRows * 2 else {
             throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 logits buffer is too small")
         }
-        let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count, startPosition: startPosition,
-                                              chunkTokens: min(config.chunkTokens, maxChunkTokens))
+        let spans = Self.prefillSpans(tokenCount: tokens.count, startPosition: startPosition,
+                                      chunkTokens: min(config.chunkTokens, maxChunkTokens))
         defer {
             // Still set: the chunk after the one that set it never ran
             // (cancelled between chunks, or that chunk threw); give the
