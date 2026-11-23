@@ -38,6 +38,15 @@ enum Inkling2StagedReadMode: String, Equatable, Sendable {
     static var decodeMissOverride: Self? {
         ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_MISS_READS"].flatMap(Self.init(rawValue:))
     }
+
+    /// The decode-miss read mode for a host (coordinator decision, option D,
+    /// 2026-11-23): cached below 48 GB, where layers are staged. A miss reads
+    /// one expert (4.5 to 8.5 MB), so the file cache fills an expert at a
+    /// time with clean pages, not in whole-layer sweeps; prefill fills stay
+    /// uncached. Nil (the staged layers' mode) where nothing is staged.
+    static func decodeMissForHost(physicalMemory: UInt64) -> Self? {
+        physicalMemory < Inkling2ExpertResidencyPlan.allResidentMemory ? .cached : nil
+    }
 }
 
 /// How the staged layers' decode slots are laid out in the staging slabs.
@@ -53,10 +62,39 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
     case perLayer(Int)
 
     /// `.perLayer(n)` from the `MFERENCE_INKLING2_DECODE_SLOTS` experiment
-    /// toggle, otherwise `.evenBytes`.
-    static var fromEnvironment: Self {
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"].flatMap(Int.init).map { .perLayer($0) }
-            ?? .evenBytes
+    /// toggle (`0` for `.evenBytes`), if set.
+    static var fromEnvironment: Self? {
+        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"].flatMap(Int.init)
+            .map { $0 > 0 ? .perLayer($0) : .evenBytes }
+    }
+
+    /// The slots for a host (coordinator decision, option D, 2026-11-23): 48
+    /// per staged layer below 48 GB (82% hits and 4.6 ms of misses per token
+    /// in K2's replay of real routes; 3.35 GB of slab at 32 GB); even bytes
+    /// where nothing is staged.
+    static func forHost(physicalMemory: UInt64) -> Self {
+        physicalMemory < Inkling2ExpertResidencyPlan.allResidentMemory ? .perLayer(48) : .evenBytes
+    }
+
+    /// Where each staged layer's slots go for `.perLayer`: the same count
+    /// for every layer (capped at `experts`, at least 8), each layer's slots
+    /// page-rounded and placed largest first on the slab with the fewest
+    /// bytes so far. `slabBytes` is the fullest slab (0 for `.evenBytes`,
+    /// which uses the slabs as prefill sizes them).
+    static func pack(_ slots: Self, strides: [Int: Int], experts: Int, slabs: Int)
+        -> (placed: [Int: (slab: Int, offset: Int, slots: Int)], slabBytes: Int) {
+        guard case .perLayer(let requested) = slots, !strides.isEmpty else { return ([:], 0) }
+        let pageSize = Int(getpagesize())
+        let count = min(max(requested, 8), experts)
+        var used = [Int](repeating: 0, count: slabs)
+        var placed: [Int: (slab: Int, offset: Int, slots: Int)] = [:]
+        for layer in strides.keys.sorted(by: { strides[$0]! > strides[$1]! || (strides[$0]! == strides[$1]! && $0 < $1) }) {
+            let bytes = (count * strides[layer]! + pageSize - 1) / pageSize * pageSize
+            let slab = used.indices.min { used[$0] < used[$1] || (used[$0] == used[$1] && $0 < $1) }!
+            placed[layer] = (slab, used[slab], count)
+            used[slab] += bytes
+        }
+        return (placed, used.max() ?? 0)
     }
 }
 
@@ -65,11 +103,17 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
 /// are held first; the rest are staged through a ring of slabs.
 struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
     let placements: [Inkling2ExpertPlacement]
-    /// Staging slabs, each as large as the largest staged layer (0 when
-    /// nothing is staged). Two give the one-layer-ahead overlap.
+    /// Staging slabs (0 when nothing is staged), each as large as the
+    /// largest staged layer or, with `.perLayer` decode slots, as the slots
+    /// packed into it. Two give the one-layer-ahead overlap.
     let stagingSlabs: Int
     let residentBytes: Int
     let stagingBytes: Int
+    /// How the staged layers' decode slots are laid out in the slabs.
+    var decodeSlots: Inkling2DecodeSlots = .evenBytes
+    /// The read mode of decode-cache misses when it differs from the staged
+    /// layers' (nil: the same).
+    var decodeMissReadMode: Inkling2StagedReadMode? = nil
 
     /// Hosts of at least this much memory hold every layer.
     static let allResidentMemory: UInt64 = 48 << 30
@@ -77,9 +121,15 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
     /// looped layers and stage the rest.
     static let loopedResidentMemory: UInt64 = 30 << 30
 
-    /// `layerBytes[i]`: bytes of stored layer `i`'s expert file (128 x stride).
+    /// `layerBytes[i]`: bytes of stored layer `i`'s expert file
+    /// (`experts` blobs at the layer's stride). Decode slots and the
+    /// decode-miss read mode default to the host's
+    /// (`Inkling2DecodeSlots.forHost`, `Inkling2StagedReadMode.decodeMissForHost`),
+    /// unless the experiment toggles name others.
     static func make(layerBytes: [Int], loopedLayers: Range<Int>, physicalMemory: UInt64,
-                     stagingSlabs slabs: Int = 2) -> Inkling2ExpertResidencyPlan {
+                     stagingSlabs slabs: Int = 2, experts: Int = 128,
+                     decodeSlots: Inkling2DecodeSlots? = nil,
+                     decodeMissReadMode: Inkling2StagedReadMode?? = nil) -> Inkling2ExpertResidencyPlan {
         precondition(slabs >= 2, "one layer ahead needs two slabs")
         let placements: [Inkling2ExpertPlacement] = layerBytes.indices.map { layer in
             if physicalMemory >= allResidentMemory { return .resident }
@@ -87,12 +137,23 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
             return .staged
         }
         let resident = zip(placements, layerBytes).filter { $0.0 == .resident }.reduce(0) { $0 + $1.1 }
-        let largestStaged = zip(placements, layerBytes).filter { $0.0 == .staged }.map(\.1).max() ?? 0
+        let staged = placements.indices.filter { placements[$0] == .staged }
+        guard !staged.isEmpty else {
+            return Inkling2ExpertResidencyPlan(placements: placements, stagingSlabs: 0, residentBytes: resident,
+                                               stagingBytes: 0)
+        }
+        let slots = decodeSlots ?? Inkling2DecodeSlots.fromEnvironment ?? .forHost(physicalMemory: physicalMemory)
+        let missMode = decodeMissReadMode
+            ?? Inkling2StagedReadMode.decodeMissOverride.map { Optional($0) }
+            ?? Inkling2StagedReadMode.decodeMissForHost(physicalMemory: physicalMemory)
+        let strides = Dictionary(uniqueKeysWithValues: staged.map { ($0, layerBytes[$0] / experts) })
+        let packing = Inkling2DecodeSlots.pack(slots, strides: strides, experts: experts, slabs: slabs)
         let pageSize = Int(getpagesize())
-        let slabBytes = (largestStaged + pageSize - 1) / pageSize * pageSize
-        let staged = largestStaged == 0 ? 0 : slabs
-        return Inkling2ExpertResidencyPlan(placements: placements, stagingSlabs: staged,
-                                           residentBytes: resident, stagingBytes: staged * slabBytes)
+        let largest = staged.map { layerBytes[$0] }.max()!
+        let slabBytes = (max(largest, packing.slabBytes) + pageSize - 1) / pageSize * pageSize
+        return Inkling2ExpertResidencyPlan(placements: placements, stagingSlabs: slabs, residentBytes: resident,
+                                           stagingBytes: slabs * slabBytes, decodeSlots: slots,
+                                           decodeMissReadMode: missMode)
     }
 }
 
@@ -562,19 +623,18 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// How long the CPU waits for the GPU before reporting `timedOut`.
     var waitTimeoutMS: UInt64 = 120_000
 
-    /// `decodeSlots` lays out the decode slots (default: the experiment
-    /// toggle, else even bytes in the slabs as prefill sizes them);
-    /// `decodeMissReadMode` reads decode misses in their own mode (default:
-    /// the toggle, else `readMode`).
+    /// `decodeSlots` lays out the decode slots and `decodeMissReadMode`
+    /// reads decode misses in their own mode; both default to the plan's.
     init(device: MTLDevice, shape: Inkling2MoEShape, layers: [Inkling2ExpertLayerSpec],
          plan: Inkling2ExpertResidencyPlan, readMode: Inkling2StagedReadMode = .forHost(),
-         decodeSlots: Inkling2DecodeSlots = .fromEnvironment,
-         decodeMissReadMode: Inkling2StagedReadMode? = Inkling2StagedReadMode.decodeMissOverride) throws {
+         decodeSlots: Inkling2DecodeSlots? = nil,
+         decodeMissReadMode: Inkling2StagedReadMode?? = nil) throws {
         precondition(layers.count == plan.placements.count)
+        let decodeSlots = decodeSlots ?? plan.decodeSlots
         self.plan = plan
         self.shape = shape
         self.readMode = readMode
-        self.decodeMissReadMode = decodeMissReadMode
+        self.decodeMissReadMode = decodeMissReadMode ?? plan.decodeMissReadMode
         self.decodeSlotLayout = decodeSlots
         let pageSize = Int(getpagesize())
         guard let ones = device.makeBuffer(length: max(16, shape.experts * 4), options: .storageModeShared) else {
@@ -638,21 +698,9 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         // largest first onto the slab with the fewest bytes so far; the slabs
         // grow to the fullest slab.
         let slabCount = max(2, plan.stagingSlabs)
-        var placed: [Int: (slab: Int, offset: Int, slots: Int)] = [:]
-        var minimumSlabBytes = 0
-        if case .perLayer(let requested) = decodeSlots, !stagedLayers.isEmpty {
-            let count = min(max(requested, shape.topK), shape.experts)
-            var used = [Int](repeating: 0, count: slabCount)
-            let order = stagedLayers.sorted { layers[$0].expertStride > layers[$1].expertStride ||
-                (layers[$0].expertStride == layers[$1].expertStride && $0 < $1) }
-            for layer in order {
-                let bytes = (count * layers[layer].expertStride + pageSize - 1) / pageSize * pageSize
-                let slab = used.indices.min { used[$0] < used[$1] || (used[$0] == used[$1] && $0 < $1) }!
-                placed[layer] = (slab, used[slab], count)
-                used[slab] += bytes
-            }
-            minimumSlabBytes = used.max() ?? 0
-        }
+        let (placed, minimumSlabBytes) = Inkling2DecodeSlots.pack(
+            decodeSlots, strides: Dictionary(uniqueKeysWithValues: stagedLayers.map { ($0, layers[$0].expertStride) }),
+            experts: shape.experts, slabs: slabCount)
         let staging = stagedFiles.isEmpty ? nil
             : try Inkling2StagedExpertLayers(device: device, files: stagedFiles, slabs: slabCount,
                                              readMode: readMode, minimumSlabBytes: minimumSlabBytes)

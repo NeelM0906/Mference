@@ -18,7 +18,39 @@ import MferenceValidationSupport
         #expect(plan.placements.enumerated().allSatisfy { ($0.offset >= 6 && $0.offset < 18) == ($0.element == .resident) })
         #expect(plan.residentBytes == 12 * 128 * 4_489_216)          // 6.90 GB
         #expect(plan.stagingSlabs == 2)
-        #expect(plan.stagingBytes == 2 * 128 * 8_470_528)            // 2.17 GB, sized for a Q8_0 layer
+        // 48 decode slots per staged layer: each slab holds two Q8_0 layers'
+        // and four NVFP4 layers' slots (1.68 GB, more than a Q8_0 layer).
+        #expect(plan.stagingBytes == 2 * (2 * 48 * 8_470_528 + 4 * 48 * 4_489_216))     // 3.35 GB
+        // With even bytes the slabs are as prefill needs them.
+        let even = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
+                                                    physicalMemory: 32 << 30, decodeSlots: .evenBytes)
+        #expect(even.stagingBytes == 2 * 128 * 8_470_528)            // 2.17 GB, sized for a Q8_0 layer
+    }
+
+    /// Coordinator decision (option D, 2026-11-23): below 48 GB, where layers
+    /// are staged, 48 decode slots per staged layer and cached decode-miss
+    /// reads (prefill fills stay uncached); at 48 GB and up nothing is
+    /// staged and neither applies.
+    @Test func decodeDefaultsFollowTheHost() {
+        for gigabytes: UInt64 in [32, 47] {
+            let plan = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
+                                                        physicalMemory: gigabytes << 30)
+            #expect(plan.decodeSlots == .perLayer(48) && plan.decodeMissReadMode == .cached, "\(gigabytes) GB")
+            #expect(Inkling2StagedReadMode.forHost(physicalMemory: gigabytes << 30) == .uncached)
+            #expect(Inkling2DecodeSlots.forHost(physicalMemory: gigabytes << 30) == .perLayer(48))
+            #expect(Inkling2StagedReadMode.decodeMissForHost(physicalMemory: gigabytes << 30) == .cached)
+        }
+        let large = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
+                                                     physicalMemory: 48 << 30)
+        #expect(large.stagingBytes == 0 && large.decodeSlots == .evenBytes && large.decodeMissReadMode == nil)
+        #expect(Inkling2DecodeSlots.forHost(physicalMemory: 48 << 30) == .evenBytes)
+        #expect(Inkling2StagedReadMode.decodeMissForHost(physicalMemory: 48 << 30) == nil)
+        // Explicit choices win over the host's.
+        let chosen = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
+                                                      physicalMemory: 32 << 30, decodeSlots: .perLayer(84),
+                                                      decodeMissReadMode: .some(nil))
+        #expect(chosen.decodeSlots == .perLayer(84) && chosen.decodeMissReadMode == nil)
+        #expect(chosen.stagingBytes == 2 * (2 * 84 * 8_470_528 + 4 * 84 * 4_489_216))
     }
 
     @Test func largeHostsHoldEverythingAndSmallHostsStageEverything() {
