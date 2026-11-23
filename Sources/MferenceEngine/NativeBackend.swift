@@ -297,14 +297,15 @@ public actor NativeEngineModel: EngineModel {
 
     /// A model over `runner` and `tokenizer` with no weights, for model-free
     /// tests of the whole request path (render, generation loop, decoder,
-    /// events, usage) with a scripted runner. Prompt-prefix reuse is off, so
-    /// every request prefills its whole prompt, one token at a time (a
-    /// scripted runner has no chunked prefill). Not used in production.
+    /// events, usage) with a scripted runner. Prefill runs one token at a
+    /// time (a scripted runner has no chunked prefill); prompt-prefix reuse
+    /// is off unless a test asks for single-prefix. Not used in production.
     static func forTesting(descriptor: EngineModelDescriptor,
                            context: MetalContext,
                            tokenizer: MFTokenizer,
                            runner: any ContinuableLogitProducer,
-                           maxContext: Int) throws -> NativeEngineModel {
+                           maxContext: Int,
+                           promptCacheMode: EnginePromptCacheMode = .off) throws -> NativeEngineModel {
         NativeEngineModel(descriptor: descriptor,
                           context: context,
                           model: nil,
@@ -313,7 +314,7 @@ public actor NativeEngineModel: EngineModel {
                           scratch: try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize),
                           prefillConfig: .off,
                           maxContext: maxContext,
-                          promptCacheMode: .off,
+                          promptCacheMode: promptCacheMode,
                           promptCacheBytes: 0,
                           promptCacheDomain: PromptPrefixCacheDomain(
                               modelID: descriptor.id, sourceSnapshotHash: "test", runtimeProfileHash: "test",
@@ -478,6 +479,10 @@ public actor NativeEngineModel: EngineModel {
                 startsInThought: startsInThinking,
                 toolDefinitions: request.tools)
             : nil
+        // Inkling 2 only: a tool call the parser rejects, or one still open
+        // at the end, reaches the client as the model's text with
+        // `finish_reason: stop`, not as a failed request.
+        decoder?.inkling2MalformedToolCallsAsText = tokenizer.dialect == .inkling2
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
@@ -591,7 +596,14 @@ public actor NativeEngineModel: EngineModel {
             reason = .stop
         }
         try Task.checkCancellation()
-        if let prefixStates, let snapshotRunner {
+        if (decoder?.convertedInkling2MalformedToolCalls ?? 0) > 0 {
+            // A malformed Inkling 2 tool call sent as text: the KV holds the
+            // call's framing, a re-render of the reply does not, so this
+            // turn is not kept for prefix reuse (as when such a turn failed).
+            promptCache.invalidate()
+            runner.reset()
+            prefixStates?.didFail()
+        } else if let prefixStates, let snapshotRunner {
             prefixStates.didFinish(
                 entry: PromptPrefixCache.makeEntry(
                     domain: promptCacheDomain,
