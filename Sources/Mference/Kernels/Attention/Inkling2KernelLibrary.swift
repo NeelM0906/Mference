@@ -50,14 +50,34 @@ public final class Inkling2KernelLibrary: @unchecked Sendable {
     }
 
     public func pipeline(_ name: String) throws -> MTLComputePipelineState {
+        try pipeline(name, constants: [])
+    }
+
+    /// A pipeline specialised by function constants (cached per name and values).
+    public func pipeline(_ name: String, constants: [MetalFunctionConstant]) throws -> MTLComputePipelineState {
+        let key = ([name] + constants.sorted { $0.index < $1.index }.map { "\($0.index)=\($0.value)" })
+            .joined(separator: ",")
         lock.lock()
         defer { lock.unlock() }
-        if let cached = pipelines[name] { return cached }
-        guard let function = library.makeFunction(name: name) else {
-            throw MetalError.missingFunction(name)
+        if let cached = pipelines[key] { return cached }
+        let values = MTLFunctionConstantValues()
+        for constant in constants {
+            switch constant.value {
+            case .bool(let v):
+                var value = v
+                values.setConstantValue(&value, type: .bool, index: constant.index)
+            case .uint32(let v):
+                var value = v
+                values.setConstantValue(&value, type: .uint, index: constant.index)
+            case .float(let v):
+                var value = v
+                values.setConstantValue(&value, type: .float, index: constant.index)
+            }
         }
+        guard library.functionNames.contains(name) else { throw MetalError.missingFunction(name) }
+        let function = try library.makeFunction(name: name, constantValues: values)
         let state = try context.device.makeComputePipelineState(function: function)
-        pipelines[name] = state
+        pipelines[key] = state
         return state
     }
 }

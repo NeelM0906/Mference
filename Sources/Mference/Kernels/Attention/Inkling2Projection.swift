@@ -7,6 +7,18 @@ public enum Inkling2WeightFormat: UInt32, Sendable {
     case q8_0 = 0
     /// Plain BF16 rows (`attn_sink_proj`, `attn_k_conv_proj`, `attn_v_conv_proj`).
     case bf16 = 1
+    /// Plain F32 rows, decoded to half per tile on the half-input paths. (The
+    /// loop gates' F32 weights go through `encodeFloat`, which keeps FP32.)
+    case f32 = 2
+
+    /// Byte alignment the kernels' vector loads need for a segment's weight offset.
+    var offsetAlignment: Int {
+        switch self {
+        case .q8_0: return 2
+        case .bf16: return 8
+        case .f32: return 16
+        }
+    }
 }
 
 /// One weight of a stacked projection: `rows` rows starting at byte
@@ -32,8 +44,8 @@ public struct Inkling2ProjectionSegment: Sendable, Equatable {
     }
 }
 
-/// `out[t, outColumn + r] = sum_k x[t, k] W[r, k]` for up to eight Q8_0 or
-/// BF16 weights in one dispatch: half inputs, FP32 accumulation and output. Every
+/// `out[t, outColumn + r] = sum_k x[t, k] W[r, k]` for up to eight Q8_0,
+/// BF16 or F32 weights in one dispatch: half inputs, FP32 accumulation and output. Every
 /// projection of a layer visit that shares an input can be one segment list
 /// (query side: Q, relative states, sink, output gate; keys and their
 /// dynamic taps; values and theirs; or the output projection alone).
@@ -41,6 +53,8 @@ public final class Inkling2Projection {
     public enum Path: String, Sendable {
         /// 64 x 32 simdgroup tiles; any token count.
         case tiled
+        /// 64 x 64 simdgroup tiles (32 x 32 per simdgroup); any token count.
+        case tiled64
         /// Two weight rows per simdgroup; at most 8 tokens (decode).
         case rows
         /// Metal 4 `matmul2d`, 64 tokens x 32 rows; inputs a multiple of 64.
@@ -57,16 +71,20 @@ public final class Inkling2Projection {
     static let tensorTileTokens = 64
 
     private let tiled: MTLComputePipelineState
+    private let tiled64: MTLComputePipelineState
+    private let float64: MTLComputePipelineState
     /// Small-batch kernels for at most 1, 2, 4 and 8 tokens.
     private let rows: [(tokens: Int, state: MTLComputePipelineState)]
     private let tensor: MTLComputePipelineState?
-    /// Whether the many-token default is `.tensorOps` rather than `.tiled`.
+    /// Whether the many-token default is `.tensorOps` rather than a simdgroup kernel.
     public let prefersTensorOps: Bool
 
     /// `preferTensorOps` defaults to the device's Apple10 tensor support
     /// (the simdgroup kernel is faster on earlier GPUs).
     public init(library: Inkling2KernelLibrary, preferTensorOps: Bool? = nil) throws {
         tiled = try library.pipeline("inkling2_q8_stacked_mm")
+        tiled64 = try library.pipeline("inkling2_q8_stacked_mm64")
+        float64 = try library.pipeline("inkling2_f32_mm64")
         rows = try [1, 2, 4, 8].map { ($0, try library.pipeline("inkling2_q8_stacked_mv_t\($0)")) }
         tensor = try? library.pipeline("inkling2_q8_stacked_mm_tensorops")
         prefersTensorOps = tensor != nil && (preferTensorOps ?? library.context.device.supportsApple10TensorOps)
@@ -78,7 +96,10 @@ public final class Inkling2Projection {
     /// The path `encode` takes for `tokens` rows of `inputs` when none is forced.
     public func defaultPath(tokens: Int, inputs: Int) -> Path {
         if tokens <= Self.maxRowsPathTokens { return .rows }
-        return prefersTensorOps && inputs % 64 == 0 ? .tensorOps : .tiled
+        if prefersTensorOps && inputs % 64 == 0 { return .tensorOps }
+        // 64 x 64 tiles measured 6-8% faster than 64 x 32 at 512, 1,024 and 2,048
+        // rows (M1 Max); below 512 the 64 x 32 tile stays the default.
+        return tokens >= 512 ? .tiled64 : .tiled
     }
 
     /// Requires `inputs % 32 == 0`, inputs aligned to 4 halves (offsets and
@@ -103,10 +124,10 @@ public final class Inkling2Projection {
         for segment in segments {
             precondition(segment.rows > 0 && segment.weightOffset >= 0)
             precondition(segment.inputOffset % 4 == 0 && segment.inputStride % 4 == 0)
-            precondition(segment.weightOffset % (segment.format == .bf16 ? 8 : 2) == 0)
+            precondition(segment.weightOffset % segment.format.offsetAlignment == 0)
             table.append((segment, groups))
             switch path {
-            case .tiled: groups += (segment.rows + Self.tileRows - 1) / Self.tileRows
+            case .tiled, .tiled64: groups += (segment.rows + Self.tileRows - 1) / Self.tileRows
             case .rows: groups += (segment.rows + 1) / 2
             case .tensorOps: groups += (segment.rows + Self.tensorTileRows - 1) / Self.tensorTileRows
             }
@@ -116,6 +137,7 @@ public final class Inkling2Projection {
         let encoder = commandBuffer.makeComputeCommandEncoder()!
         switch path {
         case .tiled: encoder.setComputePipelineState(tiled)
+        case .tiled64: encoder.setComputePipelineState(tiled64)
         case .rows: encoder.setComputePipelineState(rows.first { tokens <= $0.tokens }!.state)
         case .tensorOps: encoder.setComputePipelineState(tensor!)
         }
@@ -128,6 +150,10 @@ public final class Inkling2Projection {
             encoder.dispatchThreadgroups(
                 MTLSize(width: (tokens + Self.tileTokens - 1) / Self.tileTokens, height: groups, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        case .tiled64:
+            encoder.dispatchThreadgroups(
+                MTLSize(width: (tokens + 63) / 64, height: groups, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         case .rows:
             encoder.dispatchThreadgroups(
                 MTLSize(width: (groups + 3) / 4, height: 1, depth: 1),
@@ -139,6 +165,38 @@ public final class Inkling2Projection {
         }
         encoder.endEncoding()
         return path
+    }
+
+    /// The FP32 product `out[t, outColumn + r] = sum_k x[t, k] W[r, k]` with
+    /// FP32 fragments: every segment `.f32`, `input` FP32 (segment offsets and
+    /// strides in floats, multiples of 4). For the loop gates' products, which
+    /// the vendor keeps in FP32.
+    public func encodeFloat(commandBuffer: MTLCommandBuffer,
+                            weights: MTLBuffer, input: MTLBuffer,
+                            output: MTLBuffer, outputOffset: Int = 0,
+                            tokens: Int, inputs: Int, outStride: Int,
+                            segments: [Inkling2ProjectionSegment]) {
+        precondition(tokens > 0 && inputs > 0 && inputs % 32 == 0)
+        precondition(!segments.isEmpty && segments.count <= Self.maxSegments)
+        precondition(outputOffset % MemoryLayout<Float>.stride == 0)
+        var groups = 0
+        var table: [(Inkling2ProjectionSegment, Int)] = []
+        for segment in segments {
+            precondition(segment.format == .f32 && segment.rows > 0 && segment.weightOffset % 16 == 0)
+            precondition(segment.inputOffset % 4 == 0 && segment.inputStride % 4 == 0)
+            table.append((segment, groups))
+            groups += (segment.rows + Self.tileRows - 1) / Self.tileRows
+        }
+        var params = Self.packParams(tokens: tokens, inputs: inputs, outStride: outStride, table: table)
+        let encoder = commandBuffer.makeComputeCommandEncoder()!
+        encoder.setComputePipelineState(float64)
+        params.withUnsafeMutableBytes { encoder.setBytes($0.baseAddress!, length: $0.count, index: 0) }
+        encoder.setBuffer(weights, offset: 0, index: 1)
+        encoder.setBuffer(input, offset: 0, index: 2)
+        encoder.setBuffer(output, offset: outputOffset, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: (tokens + 63) / 64, height: groups, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     /// `Inkling2ProjParams`: four uints, then eight 32-byte segments

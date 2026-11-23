@@ -28,9 +28,9 @@ enum Inkling2TestSupport {
     }
     static func halfRounded(_ values: [Float]) -> [Float] { values.map { Float(Float16($0)) } }
 
-    static func run(_ context: MetalContext, _ body: (MTLCommandBuffer) -> Void) {
+    static func run(_ context: MetalContext, _ body: (MTLCommandBuffer) throws -> Void) rethrows {
         let cb = context.queue.makeCommandBuffer()!
-        body(cb)
+        try body(cb)
         cb.commit()
         cb.waitUntilCompleted()
         #expect(cb.status == .completed, "command buffer: \(String(describing: cb.error))")
@@ -38,39 +38,42 @@ enum Inkling2TestSupport {
 }
 
 @Suite(.serialized) struct Inkling2ProjectionTests {
-    /// Three weights (Q8_0, BF16 like the sink projection, Q8_0), two inputs,
-    /// a padded output: partial row tiles (70, 24 rows), partial token tiles,
-    /// and columns outside every segment untouched.
+    /// Four weights (Q8_0, BF16 like the sink projection, Q8_0, F32), two
+    /// inputs, a padded output: partial row tiles (70, 24, 40 rows), partial
+    /// token tiles, and columns outside every segment untouched.
     @Test(arguments: [(37, 96, Inkling2Projection.Path.tiled), (64, 2304, .tiled),
                       (1, 2304, .rows), (2, 96, .rows), (3, 96, .rows), (8, 2304, .rows), (5, 2304, .tiled),
-                      (37, 2304, .tensorOps), (64, 128, .tensorOps)])
+                      (37, 2304, .tensorOps), (64, 128, .tensorOps),
+                      (37, 96, .tiled64), (130, 2304, .tiled64)])
     func stackedProjectionMatchesReference(tokens: Int, inputs: Int, path: Inkling2Projection.Path) throws {
         let ctx = try MetalContext()
         let library = try Inkling2KernelLibrary(context: ctx)
         let projection = try Inkling2Projection(library: library)
         if path == .tensorOps && !projection.supportsTensorOps { return }
         var rng = SeedTree(0x3a00 + UInt64(tokens * 7 + inputs)).key("ink2-proj")
-        let rows = [70, 24, 64]
+        let rows = [70, 24, 64, 40]
         let sinkValues = Inkling2Q8Ref.bf16Rounded(Inkling2TestSupport.random(rows[1] * inputs, &rng, -0.2, 0.2))
+        let f32Values = Inkling2TestSupport.random(rows[3] * inputs, &rng, -0.2, 0.2)
         let weights = [
             Inkling2Q8Ref.quantize(rows: rows[0], inputs: inputs,
                                    values: Inkling2TestSupport.random(rows[0] * inputs, &rng, -0.2, 0.2)),
             Inkling2Q8Ref.bf16(sinkValues),
             Inkling2Q8Ref.quantize(rows: rows[2], inputs: inputs,
                                    values: Inkling2TestSupport.random(rows[2] * inputs, &rng, -0.2, 0.2)),
+            Inkling2Q8Ref.f32(f32Values),
         ]
-        // Weight buffer: an 8-byte lead-in, then the three weights, each at an 8-byte boundary.
+        // Weight buffer: an 8-byte lead-in, then the weights, each at a 16-byte boundary.
         var blob = [UInt8](repeating: 0xAB, count: 8)
         var offsets: [Int] = []
         for w in weights {
-            while blob.count % 8 != 0 { blob.append(0xCD) }
+            while blob.count % 16 != 0 { blob.append(0xCD) }
             offsets.append(blob.count)
             blob += w
         }
         let x1 = Inkling2TestSupport.halfRounded(Inkling2TestSupport.random(tokens * inputs, &rng, -2, 2))
         let x2 = Inkling2TestSupport.halfRounded(Inkling2TestSupport.random(tokens * inputs, &rng, -2, 2))
         let inputBuffer = Inkling2TestSupport.buffer(ctx.device, halves: (x1 + x2).map { Float16($0) })
-        let outStride = rows.reduce(0, +) + 5
+        let outStride = rows.reduce(0, +) + 5     // columns 94 ..< 99 belong to no segment
         let sentinel: Float = -12345
         let out = Inkling2TestSupport.buffer(ctx.device, floats: [Float](repeating: sentinel, count: tokens * outStride))
         let segments = [
@@ -79,6 +82,8 @@ enum Inkling2TestSupport {
                                       format: .bf16),
             Inkling2ProjectionSegment(weightOffset: offsets[2], inputOffset: tokens * inputs, inputStride: inputs,
                                       rows: rows[2], outColumn: 94 + 5),
+            Inkling2ProjectionSegment(weightOffset: offsets[3], inputOffset: tokens * inputs, inputStride: inputs,
+                                      rows: rows[3], outColumn: 163, format: .f32),
         ]
         Inkling2TestSupport.run(ctx) { cb in
             let taken = projection.encode(commandBuffer: cb, weights: Inkling2TestSupport.buffer(ctx.device, bytes: blob),
@@ -90,7 +95,8 @@ enum Inkling2TestSupport {
         let reference = Inkling2Q8Ref.stackedProjection(
             [.init(input: x1, weight: weights[0], rows: rows[0]),
              .init(input: x1, weight: weights[1], rows: rows[1], format: .bf16),
-             .init(input: x2, weight: weights[2], rows: rows[2])], tokens: tokens, inputs: inputs)
+             .init(input: x2, weight: weights[2], rows: rows[2]),
+             .init(input: x2, weight: weights[3], rows: rows[3], format: .f32)], tokens: tokens, inputs: inputs)
         var actual = [Float](), expected = [Float]()
         for t in 0..<tokens {
             for c in 0..<outStride {
@@ -100,7 +106,7 @@ enum Inkling2TestSupport {
                     continue
                 }
                 actual.append(value)
-                expected.append(reference[t * 158 + (c < 94 ? c : c - 5)])
+                expected.append(reference[t * 198 + (c < 94 ? c : c - 5)])
             }
         }
         // Weights decode to half in the tiled paths (d*q rounded); FP32 in the rows path.
