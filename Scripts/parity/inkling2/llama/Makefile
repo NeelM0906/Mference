@@ -12,7 +12,7 @@
 #
 #   make -f Scripts/parity/inkling2/llama/Makefile LL=<checkout> OUT=<build dir> TAG=<bNNNNN> -j4 [targets]
 #
-# Targets: all (the tools below and BUILD_INFO.txt), llama-cli, llama-server,
+# Targets: all (every tool below and BUILD_INFO.txt), llama-cli, llama-server,
 # llama-bench, llama-completion, llama-eval-callback, llama-tokenize,
 # llama-gguf, ink-golden (Scripts/parity/inkling2/ink_golden.cpp).
 # The checkout must be clean and at the named tag (pin-check).
@@ -113,7 +113,7 @@ CLI_OBJ := $(addprefix $(OUT)/cli/,cli.o cli-client.o cli-context.o)
 CORE_OBJ := $(GGML_OBJ) $(LLAMA_OBJ) $(COMMON_OBJ) $(HTTPLIB_OBJ)
 
 TOOLS := $(OUT)/llama-cli $(OUT)/llama-server $(OUT)/llama-bench $(OUT)/llama-completion \
-         $(OUT)/llama-eval-callback $(OUT)/llama-tokenize $(OUT)/llama-gguf
+         $(OUT)/llama-eval-callback $(OUT)/llama-tokenize $(OUT)/llama-gguf $(OUT)/ink-golden
 
 all: $(TOOLS) $(OUT)/BUILD_INFO.txt
 llama-cli: $(OUT)/llama-cli
@@ -289,6 +289,6 @@ $(OUT)/BUILD_INFO.txt: $(TOOLS)
 	  echo "makefile sha256 $$(shasum -a 256 $(HERE)/Makefile | cut -d' ' -f1) embed_metal.sh sha256 $$(shasum -a 256 $(HERE)/embed_metal.sh | cut -d' ' -f1)"; \
 	  clang --version | head -1; sw_vers -productVersion | sed 's/^/macOS /'; \
 	  echo "CFLAGS $(CFLAGS) $(CPU_DEFS)"; echo "METAL_KINDS $(METAL_KINDS)"; \
-	  for b in $(TOOLS) $(OUT)/ink-golden; do [ -f $$b ] && shasum -a 256 $$b; done; true; } > $@
+	  for b in $(TOOLS); do [ -f $$b ] && shasum -a 256 $$b; done; true; } > $@
 
 .PHONY: all pin-check llama-cli llama-server llama-bench llama-completion llama-eval-callback llama-tokenize llama-gguf ink-golden
