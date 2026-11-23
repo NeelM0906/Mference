@@ -75,6 +75,35 @@ states after each visit (`l_out-<slot>`, `[48 x n_prompt x 2304]`) are with
 the program's results (`goldens/generate*/cpu/<trace>/hidden_after_visit.f32`),
 as is a third trace of the 300-token tool prompt (2.5 MB of JSON).
 
+## Using the CPU-only trace (G6a)
+
+Feed the runner `cpu/<trace>/golden.json` `prompt_ids` (no BOS) as one
+prefill. The hidden state after each layer visit is kept outside the
+repository (`goldens/generate*/cpu/<trace>/hidden_after_visit.f32`): raw
+IEEE-754 binary32, little-endian, no header, `[48 visits x n_prompt x 2304]`
+row-major, so visit `v`, position `t`, channel `c` is at byte
+`4 * ((v * n_prompt + t) * 2304 + c)`. Visit `v` is `trace.json`
+`visits[v]` (`layer` = physical layer, `slot` = cache slot): visits 0-5 are
+layers 0-5 in slots 0-5, 6-17 core pass 1 (layers 6-17, slots 6-17), 18-29
+pass 2 (slots 24-35), 30-41 pass 3 (slots 36-47), 42-47 layers 18-23 in slots
+18-23. Each record is the layer output `l_out-<slot>` (after the MoE
+residual add). What a visit reads (`src/models/inkling2-loop.cpp`,
+`inkling2.cpp`): its main input is the record of visit `v - 1`, except visit
+0 (the token embedding after the `token_embd_norm` RMS norm) and the first
+visits of core passes 2 and 3 (visits 18 and 30), which restart from the
+prelude output, visit 5's record. Every visit also reads the block list
+through `mix` (`attn_res_query`, `ffn_res_query`): the main inputs of the
+block-start visits so far (layers 0, 6, 12, 18 start a block), with each
+pass starting again from the prelude's list. In passes 2 and 3 the loop
+control also reads the previous pass's bank: the input of its layer-12 visit
+(visit 12 or 24) and its output (visit 17 or 29). All of these are records
+or the embedding, so a per-visit test can be fed entirely from the trace;
+feeding only record `v - 1` is wrong at visits 18 and 30 and leaves out the
+block and bank inputs. Expert ids per visit and
+position are in `trace.json` (compare as sets; weights sum to 8). The CPU-only
+run rounds the inputs of NVFP4 and Q8_0 products to Q8_0. The full
+definitions are in the program's goldens README ("Trace records").
+
 ## `noise/`: the reference against itself
 
 `compare_goldens.py` outputs: Metal vs Metal in a fresh process
