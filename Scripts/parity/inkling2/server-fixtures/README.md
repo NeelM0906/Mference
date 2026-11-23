@@ -22,6 +22,6 @@ tests that pin it), the request body the client sends, and what the server must 
 | `F02-stream-two-tool-calls.json` | 2, 3 | PARTIAL |
 | `F03-tool-results-back-with-thinking-in-history.json` | 4, 6 | PARTIAL |
 | `F04-malformed-tool-call-is-text-and-stop.json` | 5 | ABSENT (today: HTTP 500 or an in-band error frame) |
-| `F05-reasoning-effort.json` | 6 | PRESENT for the client's values, untested through the server |
+| `F05-reasoning-effort.json` | 6 | PRESENT for every template name after K1 hand-in 12, tested through the server |
 | `F06-sampling-defaults-seed-cap-eos.json` | 7 | PRESENT in parts |
 | `F07-startup-switches-and-context.json` | 1, 9, 10 | 1 and 9 PRESENT; 10 PARTIAL (Deep fixed at 32,768 in library mode) |

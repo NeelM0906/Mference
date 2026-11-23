@@ -116,13 +116,17 @@ extension MFTokenizer {
 
     /// Selects the family's installed source template for both ordinary and
     /// tool chat when the checkpoint and request call for it.
+    /// `inkling2Effort` is Inkling 2's own effort (its names beyond the four
+    /// shared ones); for that dialect it takes precedence over
+    /// `reasoningEffort`, and every other dialect ignores it.
     public func encodeChat(messages: [Message], tools: [FunctionDefinition] = [],
                            reasoningEffort: QwenReasoningEffort? = nil,
-                           preserveThinking: Bool = false) throws -> [Int32] {
+                           preserveThinking: Bool = false,
+                           inkling2Effort: Inkling2Effort? = nil) throws -> [Int32] {
         if dialect == .inkling2 {
             // One render for every Inkling 2 conversation: the vendor template.
             return try encodeInkling2Chat(messages: messages, tools: tools,
-                                          effort: reasoningEffort.map { .named($0.rawValue) })
+                                          effort: inkling2Effort ?? reasoningEffort.map { .named($0.rawValue) })
         }
         if usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
             // The source rejects developer turns. Do not silently rewrite their

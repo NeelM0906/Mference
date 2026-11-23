@@ -414,7 +414,8 @@ public actor ServerModelSession: ServerLoadedModel {
         do {
             promptIDs = try tokenizer.encodeChat(messages: request.messages, tools: request.tools,
                                                 reasoningEffort: request.reasoningEffort,
-                                                preserveThinking: request.preserveThinking)
+                                                preserveThinking: request.preserveThinking,
+                                                inkling2Effort: request.inkling2Effort)
         } catch {
             throw ServerRequestError.invalid(message: String(describing: error),
                                               param: "messages", code: "invalid_chat_template")
