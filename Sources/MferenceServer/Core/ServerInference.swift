@@ -507,6 +507,7 @@ public actor ServerModelSession: ServerLoadedModel {
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
             || tokenizer.dialect == .minicpm
+            || tokenizer.dialect == .inkling2
         let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
@@ -517,7 +518,10 @@ public actor ServerModelSession: ServerLoadedModel {
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
-        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort) {
+        // Inkling 2 always frames its thinking in blocks the template renders
+        // back, so its reasoning is reported like the source templates'.
+        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort)
+            || tokenizer.dialect == .inkling2 {
             decoder?.onReasoning = { text in
                 reasoning += text
                 onEvent(.reasoning(text))

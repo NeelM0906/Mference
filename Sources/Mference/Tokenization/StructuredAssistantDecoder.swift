@@ -35,6 +35,15 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var emittedCalls = 0
     private var failed = false
 
+    /// Inkling 2: where the generation is. Between blocks, in a
+    /// `<|message_model|>` header (a tool name may follow), or inside a
+    /// thinking, visible or tool-call block; every block ends at
+    /// `<|end_message|>`.
+    private enum Inkling2Block { case between, header, thinking, visible, toolCall }
+    private var inkling2Block: Inkling2Block = .between
+    private var inkling2Header = ""
+    private var inkling2CallHeader = ""
+
     public convenience init(tokenizer: MFTokenizer,
                             allowedTools: Set<String>,
                             idGenerator: @escaping @Sendable () -> String = {
@@ -88,6 +97,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw ToolCallParserError.malformed }
+        if tokenizer.dialect == .inkling2 {
+            return try consumeInkling2(tokenID: tokenID, delta: delta)
+        }
         if payloadTokenCounts != nil, tokenID >= 0,
            !tokenizer.stopTokenIDs.contains(tokenID),
            tokenID != tokenizer.thinkStartID, tokenID != tokenizer.thinkEndID,
@@ -100,6 +112,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         switch tokenizer.dialect {
         case .chatml: return try consumeChatML(tokenID: tokenID, delta: delta)
         case .minicpm: return try consumeMiniCPM(tokenID: tokenID, delta: delta)
+        case .inkling2: return try consumeInkling2(tokenID: tokenID, delta: delta)
         }
     }
 
@@ -239,6 +252,93 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         guard channel != .thought else { return [] }
         return delta.isEmpty ? [] : [.content(delta)]
+    }
+
+    /// Inkling 2 transitions. A turn is a list of blocks,
+    ///   `<|message_model|><|content_thinking|>…<|end_message|>`
+    ///   `<|message_model|><|content_text|>…<|end_message|>`
+    ///   `<|message_model|>NAME<|content_invoke_tool_json|>{"name":…,"args":…}<|end_message|>`
+    /// then `<|content_model_end_sampling|>`. Thinking goes to `onReasoning`;
+    /// text, tool-error and text-invoke blocks are visible (the vendor's
+    /// response template reads all three as content); a JSON block is a tool
+    /// call for `Inkling2ToolCallParser`. Header text is a tool name, never
+    /// content. Text outside any block is shown rather than dropped.
+    private func consumeInkling2(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        guard let t = tokenizer.inkling2Tokens else {
+            failed = true
+            throw ToolCallParserError.malformed
+        }
+        if inkling2Block == .toolCall {
+            if tokenID == t.endMessage {
+                let tokens = toolTokens ?? []
+                toolTokens = nil
+                inkling2Block = .between
+                inkling2Header = ""
+                let text = tokenizer.decode(tokens, skipSpecialTokens: false)
+                do {
+                    let call = try Inkling2ToolCallParser().parse(
+                        text, headerName: inkling2CallHeader,
+                        allowedTools: allowedTools, id: idGenerator())
+                    emittedCalls += 1
+                    return [.toolCall(call)]
+                } catch {
+                    failed = true
+                    throw error
+                }
+            }
+            var tokens = toolTokens ?? []
+            if tokenID >= 0 {
+                tokens.append(tokenID)
+            } else if !delta.isEmpty {
+                tokens += tokenizer.encode(delta, addBOS: false)
+            }
+            guard tokens.count * MemoryLayout<Int32>.size <= Inkling2ToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            toolTokens = tokens
+            return []
+        }
+        switch tokenID {
+        case t.messageModel:
+            inkling2Block = .header
+            inkling2Header = ""
+            return []
+        case t.contentThinking:
+            inkling2Block = .thinking
+            return []
+        case t.contentText, t.contentToolError, t.contentInvokeToolText:
+            inkling2Block = .visible
+            return []
+        case t.contentInvokeToolJSON:
+            inkling2Block = .toolCall
+            inkling2CallHeader = inkling2Header
+            toolTokens = []
+            return []
+        case t.endMessage:
+            // A header names only the block it opens.
+            inkling2Block = .between
+            inkling2Header = ""
+            return []
+        case _ where tokenizer.stopTokenIDs.contains(tokenID):
+            return []
+        default:
+            break
+        }
+        switch inkling2Block {
+        case .header:
+            inkling2Header += delta
+            return []
+        case .thinking:
+            if tokenID >= 0 { payloadCounts.reasoning += 1 }
+            if !delta.isEmpty { onReasoning?(delta) }
+            return []
+        case .visible, .between:
+            if tokenID >= 0 { payloadCounts.visible += 1 }
+            return delta.isEmpty ? [] : [.content(delta)]
+        case .toolCall:
+            return []
+        }
     }
 
     /// Release any withheld text. Every supported dialect frames tool calls

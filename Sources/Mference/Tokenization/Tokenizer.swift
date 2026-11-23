@@ -29,13 +29,19 @@ public enum MFTokenizerError: Error, CustomStringConvertible {
 /// Chat framing dialect, resolved from the loaded tokenizer's special tokens.
 ///
 /// `.minicpm` is detected by the `<function` special token beside
-/// `<|im_end|>`, `.chatml` by `<|im_end|>` alone (Qwen-style ChatML). A
-/// tokenizer with neither is refused.
+/// `<|im_end|>`, `.chatml` by `<|im_end|>` alone (Qwen-style ChatML), and
+/// `.inkling2` by `<|message_user|>` beside `<|content_invoke_tool_json|>`.
+/// A tokenizer with none of them is refused.
 public enum ChatDialect: String, Sendable {
     case chatml
     /// MiniCPM5: ChatML framing with `<s>` first, XML `<function …>` tool
     /// calls, `<tool_response>` results inside user turns, two EOS ids.
     case minicpm
+    /// Inkling 2: `<|message_ROLE|>…<|content_KIND|>…<|end_message|>` blocks,
+    /// thinking in `<|content_thinking|>` blocks, JSON tool calls after
+    /// `<|content_invoke_tool_json|>`, `<|content_model_end_sampling|>` as
+    /// EOS, rendered by the vendor template (see `Inkling2Chat.swift`).
+    case inkling2
 }
 
 /// Tokenizer wrapper for the supported model families (ChatML/Qwen, Maple
@@ -93,6 +99,12 @@ public struct MFTokenizer: @unchecked Sendable {
     @usableFromInline
     let tokenizer: any Tokenizer
 
+    /// Inkling 2 only: its special token ids, the `ignore_merges` encoder,
+    /// and the installed chat template's source (set by the folder loader).
+    let inkling2SpecialTokens: Inkling2SpecialTokens?
+    let inkling2Encoder: Inkling2TextEncoder?
+    var inkling2ChatTemplateSource: String?
+
     public static func load(from folder: URL) async throws -> MFTokenizer {
         try await load(from: folder, family: nil)
     }
@@ -148,6 +160,10 @@ public struct MFTokenizer: @unchecked Sendable {
                                                  tokenizerData: tokenizerData)
         var value = try MFTokenizer(tokenizer: underlying, family: family)
         value.localTokenizerFolder = folder.standardizedFileURL
+        if value.dialect == .inkling2 {
+            let template = folder.appendingPathComponent("chat_template.jinja")
+            value.inkling2ChatTemplateSource = try? String(contentsOf: template, encoding: .utf8)
+        }
         return value
     }
 
@@ -173,6 +189,9 @@ public struct MFTokenizer: @unchecked Sendable {
                 .minicpm
             } else if Self.specialTokenID(tokenizer, Self.imEndMark) != nil {
                 .chatml
+            } else if Self.specialTokenID(tokenizer, Self.inkling2MessageUser) != nil
+                        && Self.specialTokenID(tokenizer, Self.inkling2InvokeToolJSON) != nil {
+                .inkling2
             } else {
                 nil
             }
@@ -187,6 +206,15 @@ public struct MFTokenizer: @unchecked Sendable {
         let resolved = switch dialect {
         case .chatml: try Self.resolveChatMLTokens(tokenizer, family: family)
         case .minicpm: try Self.resolveMiniCPMTokens(tokenizer)
+        case .inkling2: try Self.resolveInkling2Tokens(tokenizer)
+        }
+        if dialect == .inkling2 {
+            let special = try Self.resolveInkling2SpecialTokens(tokenizer)
+            self.inkling2SpecialTokens = special
+            self.inkling2Encoder = try Inkling2TextEncoder(specials: Self.inkling2AddedTokens(tokenizer))
+        } else {
+            self.inkling2SpecialTokens = nil
+            self.inkling2Encoder = nil
         }
 
         self.dialect = dialect
@@ -330,11 +358,100 @@ public struct MFTokenizer: @unchecked Sendable {
             vocabSize: 130_560)
     }
 
+    /// Inkling 2 (`thinkingmachines/Inkling-2-Mini` `b85c3cf`): 60 added
+    /// tokens at ids 199,998 to 200,057. EOS (`generation_config.json`) and
+    /// end of turn are both `<|content_model_end_sampling|>` 200006, pad is
+    /// `<|endoftext|>` 199999; no BOS is ever added. The vocabulary has
+    /// 200,058 real tokens (the weights pad to 201,024 rows). Thinking opens
+    /// with `<|content_thinking|>` and, like every block, closes with
+    /// `<|end_message|>`, so there is no separate think-end id.
+    private static func resolveInkling2Tokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        let t = try resolveInkling2SpecialTokens(tokenizer)
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw MFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let endOfText = try id("<|endoftext|>")
+        let beginOfText = try id("<|begin_of_text|>")
+        return ResolvedSpecialTokens(
+            bosID: beginOfText,
+            bosPrefixID: nil,
+            eosID: t.endSampling,
+            padID: endOfText,
+            endOfTurnID: t.endSampling,
+            toolCallStartID: t.contentInvokeToolJSON,
+            toolCallEndID: t.endMessage,
+            toolResponseID: t.messageTool,
+            toolResponseEndID: t.endMessage,
+            channelStartID: t.contentThinking,
+            channelEndID: t.endMessage,
+            thinkStartID: t.contentThinking,
+            thinkEndID: nil,
+            stopTokenIDs: [t.endSampling],
+            vocabSize: 200_058)
+    }
+
+    static func resolveInkling2SpecialTokens(_ tokenizer: any Tokenizer) throws -> Inkling2SpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw MFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let tokens = Inkling2SpecialTokens(
+            messageUser: try id(inkling2MessageUser),
+            messageModel: try id(inkling2MessageModel),
+            messageSystem: try id(inkling2MessageSystem),
+            messageTool: try id(inkling2MessageTool),
+            contentText: try id(inkling2ContentText),
+            contentThinking: try id(inkling2ContentThinking),
+            contentToolError: try id(inkling2ContentToolError),
+            contentXML: try id(inkling2ContentXML),
+            contentInvokeToolJSON: try id(inkling2InvokeToolJSON),
+            contentInvokeToolText: try id(inkling2InvokeToolText),
+            endMessage: try id(inkling2EndMessage),
+            endSampling: try id(inkling2EndSampling))
+        // The dialect is this vocabulary (b85c3cf): its added-token block
+        // starts at 199,998, the EOS is 200006. Another layout is refused
+        // rather than half-recognized.
+        guard tokens.messageUser == 200_000, tokens.endSampling == 200_006,
+              tokens.endMessage == 200_010, tokens.contentInvokeToolJSON == 200_049 else {
+            throw MFTokenizerError.unsupportedForDialect(
+                "Inkling 2 framing tokens at unexpected ids; only the Inkling 2 Mini vocabulary is supported")
+        }
+        return tokens
+    }
+
+    /// Every added token of the Inkling 2 block (ids 199,998 to 200,057), by
+    /// text, for the encoder to match before splitting words.
+    static func inkling2AddedTokens(_ tokenizer: any Tokenizer) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for name in [inkling2MessageUser, inkling2MessageModel, inkling2MessageSystem, inkling2MessageTool,
+                     inkling2ContentText, inkling2ContentThinking, inkling2ContentToolError,
+                     inkling2ContentXML, inkling2InvokeToolJSON, inkling2InvokeToolText,
+                     inkling2EndMessage, inkling2EndSampling] {
+            if let id = specialTokenID(tokenizer, name) { result[name] = id }
+        }
+        for id in 199_998...200_057 {
+            if let text = tokenizer.convertIdToToken(id), text.hasPrefix("<|"), text.hasSuffix("|>"),
+               specialTokenID(tokenizer, text) == id {
+                result[text] = id
+            }
+        }
+        return result
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends the dialect's
-    /// BOS prefix where it has one (MiniCPM's `<s>`); ChatML has no BOS, so
-    /// `addBOS` is a no-op for that dialect.
+    /// BOS prefix where it has one (MiniCPM's `<s>`); ChatML and Inkling 2
+    /// have no BOS, so `addBOS` is a no-op for them. Inkling 2 encodes with
+    /// `ignore_merges`, as its reference tokenizer does (`Inkling2TextEncoder`).
     public func encode(_ text: String, addBOS: Bool = true) -> [Int32] {
-        let base = tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
+        let base = inkling2Encoder.map { $0.encode(text, tokenizer: tokenizer).map(Int32.init) }
+            ?? tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
         guard addBOS, let bosPrefixID else { return base }
         return [bosPrefixID] + base
     }
@@ -417,6 +534,8 @@ public struct MFTokenizer: @unchecked Sendable {
         case .minicpm:
             return try miniCPMRender(messages: messages, tools: [],
                                      thinking: Self.miniCPMDefaultThinking)
+        case .inkling2:
+            return try renderInkling2Chat(messages: messages)
         }
     }
 
@@ -445,6 +564,12 @@ public struct MFTokenizer: @unchecked Sendable {
                                reasoningEffort: QwenReasoningEffort? = nil,
                                preserveThinking: Bool = false,
                                addGenerationPrompt: Bool = true) throws -> [Int32] {
+        if dialect == .inkling2 {
+            // The vendor template has no generation prompt and keeps every
+            // turn's thinking; the Qwen effort names are template names too.
+            return try encodeInkling2Chat(messages: messages, tools: tools,
+                                          effort: reasoningEffort.map { .named($0.rawValue) })
+        }
         guard acceptsReasoningEffort || reasoningEffort == nil else {
             throw MFTokenizerError.unsupportedForDialect("reasoning_effort is not supported by this model")
         }
@@ -538,6 +663,8 @@ public struct MFTokenizer: @unchecked Sendable {
                 "\n\(Self.imStartMark)user\n\(userContent)\(Self.imEndMark)\n"
                     + "\(Self.imStartMark)assistant\n" + suffix,
                 addBOS: false)
+        case .inkling2:
+            return inkling2TextContinuation(userContent: userContent)
         }
     }
 
