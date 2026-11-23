@@ -88,18 +88,30 @@ struct Inkling2ToolArgumentsServerTests {
     }
 
     /// Every other dialect's history keeps no arguments text, so it parses and
-    /// renders exactly as before; Inkling 2's keeps the text the client sent.
+    /// renders exactly as before; Inkling 2's keeps the text the client sent,
+    /// in compact form, so a re-spaced echo compares equal to the call.
     @Test func onlyInklingKeepsTheArgumentsText() throws {
-        let raw = #"{"b":{"y":2,"x":1.0},"a":1}"#
-        let body: [String: Any] = ["model": "m", "messages": Self.history(arguments: raw)]
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self,
-                                               from: JSONSerialization.data(withJSONObject: body))
-        for dialect in [ChatDialect.chatml, .minicpm, .inkling2] {
-            let validated = try OpenAIRequestValidator.validate(request, modelID: "m", dialect: dialect)
-            let call = try #require(validated.messages.first { !$0.toolCalls.isEmpty }?.toolCalls.first)
-            #expect(call.argumentsText == (dialect == .inkling2 ? raw : nil), "\(dialect)")
-            let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(raw.utf8))
-            #expect(call.arguments == parsed, "\(dialect)")
+        let compact = #"{"b":{"y":2,"x":1.0},"a":1}"#
+        for raw in [compact, "{ \"b\": {\"y\": 2, \"x\": 1.0},\n \"a\": 1 }"] {
+            let body: [String: Any] = ["model": "m", "messages": Self.history(arguments: raw)]
+            let request = try JSONDecoder().decode(OpenAIChatRequest.self,
+                                                   from: JSONSerialization.data(withJSONObject: body))
+            for dialect in [ChatDialect.chatml, .minicpm, .inkling2] {
+                let validated = try OpenAIRequestValidator.validate(request, modelID: "m", dialect: dialect)
+                let call = try #require(validated.messages.first { !$0.toolCalls.isEmpty }?.toolCalls.first)
+                #expect(call.argumentsText == (dialect == .inkling2 ? compact : nil), "\(dialect)")
+                let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(raw.utf8))
+                #expect(call.arguments == parsed, "\(dialect)")
+            }
         }
+    }
+
+    /// A text the render would not use keeps none: an unpaired surrogate
+    /// escape the history validator accepts is rendered from the parsed
+    /// value, as before.
+    @Test func aTextTheRenderCannotUseIsNotKept() {
+        #expect(Inkling2ToolArguments.normalizedText(#"{"a":"\ud83d"}"#) == nil)
+        #expect(Inkling2ToolArguments.normalizedText("[1]") == nil)
+        #expect(Inkling2ToolArguments.normalizedText("{ \"a\" : 1.0 }") == #"{"a":1.0}"#)
     }
 }

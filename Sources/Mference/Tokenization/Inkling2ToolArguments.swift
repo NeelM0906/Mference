@@ -14,8 +14,18 @@ import Jinja
 /// re-rendered differently from what the model wrote. This parses the text
 /// itself, into the template's own value type.
 ///
-/// Only the Inkling 2 render and the Inkling 2 tool-call parser use it.
-enum Inkling2ToolArguments {
+/// Only the Inkling 2 render, the Inkling 2 tool-call parser and the
+/// server's Inkling 2 history validation use it.
+public enum Inkling2ToolArguments {
+    /// `text` as the compact text `compactText` writes, when it is one JSON
+    /// object a template value carries exactly; nil otherwise. The server
+    /// keeps a history call's arguments in this form, so two texts that render
+    /// the same compare equal (whitespace aside) and a text the render would
+    /// not use is not kept, as the tool-call parser does for a model's call.
+    public static func normalizedText(_ text: String) -> String? {
+        templateValue(text).flatMap { try? compactText($0) }
+    }
+
     /// The template value of `text` when it is one JSON object; nil when it is
     /// not, or holds what no `Jinja.Value` carries exactly: an integer outside
     /// `Int`, a number that is not finite, an unpaired surrogate escape, or
