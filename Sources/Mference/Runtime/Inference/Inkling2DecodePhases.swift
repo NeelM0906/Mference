@@ -5,6 +5,9 @@ import Metal
 /// The runner keeps it only while that variable is set (`tracesPhases`, read
 /// once at load), so a run without it records nothing and times nothing new.
 public struct Inkling2DecodePhaseStats: Sendable, Equatable {
+    /// One-token chunks, as the decode timeline counts them: a prefill whose
+    /// last chunk is one token adds one too (rare; balanced chunks differ by
+    /// at most one token).
     public var decodeSteps = 0
     /// The runner's time per step, from before the first buffer is encoded
     /// to after every buffer completed and the step's deferred visits were
@@ -15,7 +18,9 @@ public struct Inkling2DecodePhaseStats: Sendable, Equatable {
     /// Waits inside the store are in `slotLoadSeconds`, not here.
     public var blockedSeconds: Double = 0
     /// The GPU's own execution time, `gpuStartTime` to `gpuEndTime` per
-    /// command buffer, read after the buffers completed.
+    /// command buffer, read after the buffers completed. A deferred visit's
+    /// buffer waits on the GPU for its slot loads, and that wait can fall
+    /// inside the buffer's span, so with deferred visits this includes it.
     public var gpuBusySeconds: Double = 0
     /// The GPU's idle time between a step's consecutive buffers.
     public var gpuGapSeconds: Double = 0

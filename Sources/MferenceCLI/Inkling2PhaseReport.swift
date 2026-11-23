@@ -28,7 +28,8 @@ func inkling2PhaseReport(_ p: Inkling2DecodePhaseStats, decodeSeconds: Double) -
     lines += "  waits on the GPU:  " + ms(p.blockedSeconds) + " ms (" + per(p.blockedSeconds) + " ms/token)"
     lines += ", of which staged readbacks " + ms(p.readbackSeconds) + " ms\n"
     lines += "  gpu busy:          " + ms(p.gpuBusySeconds) + " ms (" + per(p.gpuBusySeconds) + " ms/token)"
-    lines += ", gaps " + ms(p.gpuGapSeconds) + " ms\n"
+    lines += ", gaps " + ms(p.gpuGapSeconds) + " ms"
+    lines += p.deferredVisits > 0 ? ", busy can include waits for deferred slot loads\n" : "\n"
     if p.stagedVisits > 0 {
         let place = p.deferredVisits == 0 ? "on the runner thread"
             : p.deferredVisits == p.stagedVisits ? "on the decode worker, overlapped with the GPU"

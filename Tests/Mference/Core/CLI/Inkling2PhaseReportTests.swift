@@ -38,6 +38,7 @@ import Mference
         #expect(text.contains("staged readbacks: deferred]"))
         #expect(text.contains("  cpu encode+commit: 80.0 ms (20.00 ms/token)\n"))
         #expect(text.contains("of which staged readbacks 0.0 ms"))
+        #expect(text.contains("  gpu busy:          100.0 ms (25.00 ms/token), gaps 10.0 ms, busy can include waits for deferred slot loads\n"))
         #expect(text.contains("on the decode worker, overlapped with the GPU, with the store's waits\n"))
         let mixed = inkling2PhaseReport(Self.stats(staged: 48, deferred: 12), decodeSeconds: 0.25)
         #expect(mixed.contains("staged readbacks: mixed (12 of 48 deferred)]"))
