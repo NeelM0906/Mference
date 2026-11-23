@@ -31,7 +31,7 @@ import MferenceValidationSupport
         }
         let reference = Inkling2LoopRef.depthMix(states: dense, queries: queries, queryCount: queryCount,
                                                  rows: rows, hidden: width)
-        #expect(RelError.compute(actual: S.readFloats(out, count: rows * queryCount * width), reference: reference) < 2e-5)
+        #expect(RelError.computeStrict(actual: S.readFloats(out, count: rows * queryCount * width), reference: reference) < 2e-5)
     }
 
     /// The FP32 product with partial row and token tiles (70 rows, 37 tokens).
@@ -122,7 +122,7 @@ import MferenceValidationSupport
             }
             let reference = Inkling2LoopRef.messageGate(x: xs[c], message: ms[c], down: downs[c], forget: forgets[c],
                                                         gain: gains[c], rows: rows, hidden: width, rank: rank)
-            #expect(RelError.compute(actual: S.readFloats(out, count: rows * width), reference: reference) < 1e-4)
+            #expect(RelError.computeStrict(actual: S.readFloats(out, count: rows * width), reference: reference) < 1e-4)
         }
     }
 
@@ -162,7 +162,7 @@ import MferenceValidationSupport
                                                         forget: refs[c].forget, gain: refs[c].gain,
                                                         rows: 1, hidden: width, rank: rank)
             let got = S.readFloats(acts, count: width, offset: controllers[c].output * 4)
-            #expect(RelError.compute(actual: got, reference: reference) < 1e-4, "controller \(c)")
+            #expect(RelError.computeStrict(actual: got, reference: reference) < 1e-4, "controller \(c)")
         }
     }
 }

@@ -116,7 +116,7 @@ import MferenceValidationSupport
             queryCount: total, startPosition: 0, window: global ? nil : window,
             logScale: global ? .init(floor: 8, alpha: 0.3) : nil)
         reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: slice(gateColumn, 3072))
-        #expect(RelError.compute(actual: got, reference: reference) < Tolerance.fp16ChainedReduction)
+        #expect(RelError.computeStrict(actual: got, reference: reference) < Tolerance.fp16ChainedReduction)
         #expect(state.position == total)
     }
 }

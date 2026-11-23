@@ -88,16 +88,16 @@ import MferenceValidationSupport
         #expect(clipped > rows * 4, "the key clip must be exercised")
         let vRef = Inkling2NormRef.unweightedRMS(vConvRef.output, rows: rows, heads: 8, width: 128)
 
-        #expect(RelError.compute(actual: S.readHalves(qOut, count: rows * 3072), reference: qRef) < 2e-3)
-        #expect(RelError.compute(actual: S.readFloats(relOut, count: rows * 384), reference: relRef) < 1e-5)
+        #expect(RelError.computeStrict(actual: S.readHalves(qOut, count: rows * 3072), reference: qRef) < 2e-3)
+        #expect(RelError.computeStrict(actual: S.readFloats(relOut, count: rows * 384), reference: relRef) < 1e-5)
         var kGot = [Float](), vGot = [Float]()
         for t in 0..<rows {
             let slot = (start + t) % capacity
             kGot += S.readHalves(kCache, count: 1024, offset: slot * 2048)
             vGot += S.readHalves(vCache, count: 1024, offset: slot * 2048)
         }
-        #expect(RelError.compute(actual: kGot, reference: kRef) < 2e-3)
-        #expect(RelError.compute(actual: vGot, reference: vRef) < 2e-3)
+        #expect(RelError.computeStrict(actual: kGot, reference: kRef) < 2e-3)
+        #expect(RelError.computeStrict(actual: vGot, reference: vRef) < 2e-3)
         let tailsGot = S.readFloats(tailBuffer, count: 6 * 1024)
         #expect(tailsGot == kConvRef.history + vConvRef.history)
     }
@@ -146,8 +146,8 @@ import MferenceValidationSupport
         let kExpected = Inkling2NormRef.l2Clip(kRef.output, rows: 1, heads: 8, width: 128, scale: nil,
                                                threshold: Inkling2RefShape.qkClip)
         let vExpected = Inkling2NormRef.unweightedRMS(vRef.output, rows: 1, heads: 8, width: 128)
-        #expect(RelError.compute(actual: S.readHalves(kCache, count: 1024, offset: 5 * 2048), reference: kExpected) < 2e-3)
-        #expect(RelError.compute(actual: S.readHalves(vCache, count: 1024, offset: 5 * 2048), reference: vExpected) < 2e-3)
+        #expect(RelError.computeStrict(actual: S.readHalves(kCache, count: 1024, offset: 5 * 2048), reference: kExpected) < 2e-3)
+        #expect(RelError.computeStrict(actual: S.readHalves(vCache, count: 1024, offset: 5 * 2048), reference: vExpected) < 2e-3)
         #expect(S.readFloats(tailBuffer, count: 6 * 1024) == kRef.history + vRef.history)
     }
 
@@ -168,7 +168,7 @@ import MferenceValidationSupport
                         residual: nil, output: .init(out), outputStride: channels, rows: 1, advanceTail: true)
         }
         let reference = Inkling2ShortConvRef.staticConv(x, weight: weight, history: tail, rows: 1, channels: channels)
-        #expect(RelError.compute(actual: S.readFloats(out, count: channels), reference: reference.output) < 1e-5)
+        #expect(RelError.computeStrict(actual: S.readFloats(out, count: channels), reference: reference.output) < 1e-5)
         #expect(S.readFloats(tailBuffer, count: 3 * channels) == reference.history)
     }
 
@@ -197,7 +197,7 @@ import MferenceValidationSupport
         }
         let reference = Inkling2ShortConvRef.staticConv(x, weight: weight, history: tail, rows: rows, channels: channels)
         let expected = zip(reference.output, residual).map { $0 + $1 }
-        #expect(RelError.compute(actual: S.readFloats(out, count: rows * channels), reference: expected) < 1e-5)
+        #expect(RelError.computeStrict(actual: S.readFloats(out, count: rows * channels), reference: expected) < 1e-5)
         #expect(S.readFloats(tailBuffer, count: 3 * channels) == reference.history)
     }
 
@@ -216,7 +216,7 @@ import MferenceValidationSupport
         }
         let dense = (0..<rows).flatMap { t in x[(t * stride)..<(t * stride + width)] }
         let reference = Inkling2NormRef.weightedRMS(dense, rows: rows, width: width, weight: weight)
-        #expect(RelError.compute(actual: S.readHalves(out, count: rows * width), reference: reference) < 2e-3)
+        #expect(RelError.computeStrict(actual: S.readHalves(out, count: rows * width), reference: reference) < 2e-3)
     }
 
     struct DecodeCase: Sendable {
@@ -291,7 +291,7 @@ import MferenceValidationSupport
                                                     queryCount: 1, startPosition: c.position,
                                                     relExtent: c.relExtent, window: window, logScale: logScale)
         if c.gate { reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: gate) }
-        #expect(RelError.compute(actual: S.readHalves(decodeOut, count: 3072), reference: reference) < Tolerance.fp16Reduction)
-        #expect(RelError.compute(actual: S.readHalves(prefillOut, count: 3072), reference: reference) < Tolerance.fp16Reduction)
+        #expect(RelError.computeStrict(actual: S.readHalves(decodeOut, count: 3072), reference: reference) < Tolerance.fp16Reduction)
+        #expect(RelError.computeStrict(actual: S.readHalves(prefillOut, count: 3072), reference: reference) < Tolerance.fp16Reduction)
     }
 }

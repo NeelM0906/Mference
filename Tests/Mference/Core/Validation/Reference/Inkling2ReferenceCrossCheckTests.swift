@@ -14,7 +14,7 @@ import MferenceValidationSupport
     }
 
     static func close(_ a: [Float], _ b: [Float], _ tolerance: Float = 1e-5) -> Bool {
-        RelError.compute(actual: a, reference: b) < tolerance
+        RelError.computeStrict(actual: a, reference: b) < tolerance
     }
 
     @Test func clipsNormsAndLogScaleAgree() {
