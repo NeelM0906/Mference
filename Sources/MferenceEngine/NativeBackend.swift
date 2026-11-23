@@ -117,7 +117,8 @@ public actor NativeEngineModel: EngineModel {
     /// the weights' Metal buffers, the expert cache, and the KV with it.
     private struct Loaded {
         let context: MetalContext
-        let model: Model
+        /// Nil only for `forTesting`, which has no weights.
+        let model: Model?
         let tokenizer: MFTokenizer
         let runner: any ContinuableLogitProducer
         let scratch: RawCompletionScratch
@@ -242,7 +243,7 @@ public actor NativeEngineModel: EngineModel {
 
     private init(descriptor: EngineModelDescriptor,
                  context: MetalContext,
-                 model: Model,
+                 model: Model?,
                  tokenizer: MFTokenizer,
                  runner: any ContinuableLogitProducer,
                  scratch: RawCompletionScratch,
@@ -292,6 +293,33 @@ public actor NativeEngineModel: EngineModel {
                              prefixStates: prefixStates,
                              snapshotRunner: snapshotRunner,
                              memoryGovernor: memoryGovernor)
+    }
+
+    /// A model over `runner` and `tokenizer` with no weights, for model-free
+    /// tests of the whole request path (render, generation loop, decoder,
+    /// events, usage) with a scripted runner. Prompt-prefix reuse is off, so
+    /// every request prefills its whole prompt, one token at a time (a
+    /// scripted runner has no chunked prefill). Not used in production.
+    static func forTesting(descriptor: EngineModelDescriptor,
+                           context: MetalContext,
+                           tokenizer: MFTokenizer,
+                           runner: any ContinuableLogitProducer,
+                           maxContext: Int) throws -> NativeEngineModel {
+        NativeEngineModel(descriptor: descriptor,
+                          context: context,
+                          model: nil,
+                          tokenizer: tokenizer,
+                          runner: runner,
+                          scratch: try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize),
+                          prefillConfig: .off,
+                          maxContext: maxContext,
+                          promptCacheMode: .off,
+                          promptCacheBytes: 0,
+                          promptCacheDomain: PromptPrefixCacheDomain(
+                              modelID: descriptor.id, sourceSnapshotHash: "test", runtimeProfileHash: "test",
+                              maximumContext: maxContext, kvStorage: "test", fp16RingEnabled: false,
+                              templateSHA256: "test"),
+                          onNotice: { _ in })
     }
 
     /// Points the governor's pressure events at an idle safe point on this
@@ -599,11 +627,13 @@ public actor NativeEngineModel: EngineModel {
                                visibleTokens: payload.flatMap { stopMatcher.isStopped ? nil : $0.visible }),
             timings: EngineTimings(prefillSeconds: result.prefillSeconds,
                                    decodeSeconds: result.decodeSeconds),
-            diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
-                result: result,
-                memory: .capture(model: model, producer: runner, scratch: scratch),
-                prefixCache: prefixStates.map {
-                    PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
-                }) : nil)
+            diagnostics: RuntimeDiagnostics.enabled ? model.map { model in
+                RuntimeDiagnostics(
+                    result: result,
+                    memory: .capture(model: model, producer: runner, scratch: scratch),
+                    prefixCache: prefixStates.map {
+                        PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
+                    })
+            } : nil)
     }
 }
