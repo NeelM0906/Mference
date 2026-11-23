@@ -82,8 +82,8 @@ at `goldens/generate4/cpu/trace01b/hidden_after_visit.f32`. Positions 0-4
 equal trace01 bit for bit (records and expert sets); position 5 is the
 position a runner reaches with one decode step, here computed inside the
 6-token batch (its "." log-prob is -0.285 here, -0.291 as a decode step in
-`goldens/generate/cpu/g01-capital`: the CPU backend's own batch-versus-decode
-difference).
+`goldens/generate/cpu/g01-capital`; same context, so most likely the CPU
+backend's batch-versus-decode difference, inferred rather than tested).
 
 ## Using the CPU-only trace (G6a)
 
@@ -129,6 +129,7 @@ every recorded position is compared on the same context):
 `tf-set{1,2}-metal-vs-tfcpu.json` (the Metal goldens vs CPU-only, every
 position), `tf-set{1,2}-metal-vs-tfmetal.json` (the Metal goldens vs Metal
 on the same context in one batch: llama.cpp's batch-versus-decode
+difference, and for `trace02`, whose golden was traced, a traced-versus-untraced
 difference) and `tf-metal-vs-tfcpu.json` (both batched: the backend split
 alone); tables `table-tf-*.md`. Run paths in the JSON are relative to the
 program's goldens directory.
