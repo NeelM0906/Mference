@@ -28,6 +28,7 @@ Nothing here is part of any product target, and nothing downloads anything.
 | `make_tf_prompts.py` | Teacher-forced prompts from a set of goldens: each log-prob golden's prompt ids plus its generated ids as one `"kind": "ids"` prompt (no re-tokenization), recorded at the golden's positions; compare with `compare_goldens.py --teacher-forced`. |
 | `noise_table.py` | The per-prompt and pooled noise tables (and per-trace rows) of the G6 proposal from `compare_goldens.py --json` outputs. |
 | `compare_goldens.py` | Agreement between two `generate` outputs: token identity, top-1 agreement, log-probability deltas, approximate KL over the top 20, hidden-state error and routed-expert agreement per layer visit. |
+| `gen_tool_args_golden_test.py` | Writes `Tests/Mference/Core/Tokenization/Inkling2ToolArgumentsGoldenTests.swift` from the tool-argument chat cases and their `ink-golden chat` renders (`Tests/Mference/Fixtures/Inkling2/chat_cases_tool_args.json`, `chat_goldens_tool_args.json`): the cases and renders are copied into the test, with both files' SHA-256. |
 | `ignore_merges_words.py` | The 337 vocabulary entries plain BPE merges split, from the GGUF header (tokens, merges) without touching tensor data. |
 | `inputs/` | The frozen inputs: tokenizer texts, chat cases, generation prompt sets 1-4 (`generate_prompts*.json`; a prompt may set `logprobs_last` to record only its last N positions; set 4 is `trace01b`, trace01's prompt ids plus its greedy token as one `ids` prompt, traced CPU-only by stage `cpu4`). |
 
