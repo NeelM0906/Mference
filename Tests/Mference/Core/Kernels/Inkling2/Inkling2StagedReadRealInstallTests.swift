@@ -19,7 +19,12 @@ import Testing
 ///   file cache);
 /// * `short-uncached`, `short-cached`: the runner's prefill of 16, 128 and
 ///   512 tokens (cached: after a warm-up prefill fills the file cache);
-/// * `chunk2048-uncached`: one 2,048-token chunk with the staging timeline.
+/// * `chunk2048-uncached`: one 2,048-token chunk with the staging timeline;
+/// * `long-decode`: the store's defaults (option D below 48 GB): a 64-token
+///   prompt, 1,024 greedy tokens with the slot cache, the staged files'
+///   file-cache pages and the host's free memory every 128 tokens, then a
+///   512-token prefill continuing the context (uncached slab fills, which
+///   empty the slot caches) and 16 more tokens, each one's misses and time.
 ///
 /// The install loads with the receipt's size checks, not full SHA-256: the
 /// hash would read every layer file through the file cache first and turn
@@ -51,6 +56,21 @@ struct Inkling2StagedReadRealInstallTests {
         var usage = xsw_usage()
         var size = MemoryLayout<xsw_usage>.size
         return sysctlbyname("vm.swapusage", &usage, &size, nil, 0) == 0 ? Double(usage.xsu_used) / 1_048_576 : -1
+    }
+
+    /// Host pages (GB): free, file-backed (the file cache), and compressed.
+    static func hostMemoryGB() -> (free: Double, fileBacked: Double, compressed: Double) {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard status == KERN_SUCCESS else { return (-1, -1, -1) }
+        let page = Double(getpagesize()) / 1e9
+        return (Double(stats.free_count) * page, Double(stats.external_page_count) * page,
+                Double(stats.compressor_page_count) * page)
     }
 
     /// The fraction of a layer file's pages in the file cache (`mincore` on
@@ -202,5 +222,75 @@ struct Inkling2StagedReadRealInstallTests {
             Self.log("in the file cache at the end: "
                      + staged.map { String(format: "%.0f%%", Self.cachedFraction($0.file) * 100) }.joined(separator: " "))
         }
+    }
+
+    @Test(.enabled(if: enabled && stage == "long-decode", "needs MFERENCE_INKLING2_GTURBO and the long-decode stage"))
+    func longDecodeThenPrefill() async throws {
+        let context = try MetalContext()
+        let (model, runner, store) = try Self.runner(context, mode: .forHost())
+        let c = model.config
+        let staged = try Self.stagedFiles(model)
+        Self.log("store: read mode \(store.readMode.rawValue), decode slots \(store.decodeSlotLayout), decode misses "
+                 + "\(store.decodeMissReadMode?.rawValue ?? "same"), slabs \(store.staging?.slabs.count ?? 0) x "
+                 + String(format: "%.2f GB, bound %.2f GB", Double(store.staging?.slabBytes ?? 0) / 1e9,
+                          Double(store.boundBytes) / 1e9))
+        let out = try #require(context.device.makeBuffer(length: c.vocabSize * 2, options: .storageModeShared))
+        let text = try await Self.promptTokens(model, count: 64 + 512)
+        func cachedMB() -> Double {
+            staged.reduce(0.0) { $0 + max(0, Self.cachedFraction($1.file)) * Double($1.file.bytes) / 1e6 }
+        }
+        func status(_ label: String) {
+            let m = Self.hostMemoryGB()
+            Self.log(String(format: "%@: staged files in the file cache %.0f MB; host free %.2f GB, file-backed %.2f GB, compressed %.2f GB; footprint %.2f GB; swap %.2f MB",
+                            label, cachedMB(), m.free, m.fileBacked, m.compressed, Self.footprintGB(), Self.swapMB()))
+        }
+        func argmax() -> Int32 {
+            let p = out.contents().bindMemory(to: Float16.self, capacity: c.unpaddedVocabSize)
+            var best = 0
+            for i in 1..<c.unpaddedVocabSize where p[i] > p[best] { best = i }
+            return Int32(best)
+        }
+        status("loaded")
+        _ = try await runner.prefillChunked(tokens: text[0..<64], startPosition: 0, outputMode: .logits,
+                                            config: .production(chunkTokens: 2048), into: out, onProgress: { _ in })
+        status("after the 64-token prompt")
+        var position = 64, token = argmax()
+        var window = (start: DispatchTime.now().uptimeNanoseconds, stats: runner.decodeCacheStats)
+        for step in 1...1024 {
+            try await runner.produce(token: token, position: position, into: out)
+            token = argmax()
+            position += 1
+            if step % 128 == 0 {
+                let now = DispatchTime.now().uptimeNanoseconds, stats = runner.decodeCacheStats
+                let hits = stats.hits - window.stats.hits, misses = stats.misses - window.stats.misses
+                Self.log(String(format: "tokens %d-%d: %.1f ms/token, hit rate %.1f%%, %.1f misses and %.1f ms of slot loads per token",
+                                step - 127, step, Double(now - window.start) / 1e6 / 128,
+                                100 * Double(hits) / Double(max(1, hits + misses)), Double(misses) / 128,
+                                (stats.seconds - window.stats.seconds) * 1000 / 128))
+                status("after \(step) tokens")
+                window = (now, stats)
+            }
+        }
+        // A follow-up turn: 512 tokens prefilled after the generation.
+        let started = DispatchTime.now().uptimeNanoseconds
+        _ = try await runner.prefillChunked(tokens: text[64..<576], startPosition: position, outputMode: .logits,
+                                            config: .production(chunkTokens: 2048), into: out, onProgress: { _ in })
+        Self.log(String(format: "512-token prefill after the generation: %.3f s", Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9))
+        status("after the 512-token prefill")
+        position += 512
+        token = argmax()
+        var after: [String] = []
+        for _ in 0..<16 {
+            let before = runner.decodeCacheStats, t0 = DispatchTime.now().uptimeNanoseconds
+            try await runner.produce(token: token, position: position, into: out)
+            let stats = runner.decodeCacheStats
+            after.append(String(format: "%.0f ms/%d misses/%.0f ms loads", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6,
+                                stats.misses - before.misses, (stats.seconds - before.seconds) * 1000))
+            token = argmax()
+            position += 1
+        }
+        Self.log("the 16 tokens after the prefill: " + after.joined(separator: ", "))
+        status("end")
+        #expect(store.stagingError == nil)
     }
 }
