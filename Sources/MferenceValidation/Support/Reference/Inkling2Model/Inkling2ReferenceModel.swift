@@ -43,7 +43,12 @@ public final class Inkling2ReferenceModel {
     /// widened, and the probabilities and V accumulation are FP32. Valid
     /// below 32 tokens: from 32 up ggml's BLAS backend takes the dense
     /// products with dequantized weights and unrounded inputs.
-    public enum Precision: Sendable { case fp32, metalRunner, llamaCPU }
+    /// `.llamaExperts` rounds only what llama.cpp rounds from 32 tokens up
+    /// on both its backends: the routed experts' input and activation to
+    /// Q8_0 blocks (the CPU's `MUL_MAT_ID` quantizes them to its
+    /// `vec_dot_type`) and the cached keys and values to FP16; the dense
+    /// products, attention and the head stay FP32.
+    public enum Precision: Sendable { case fp32, metalRunner, llamaCPU, llamaExperts }
     public var precision: Precision = .fp32
     /// The FP16 rounding sites of `.metalRunner`, so an experiment can put
     /// one back to FP32 (all by default; the other precisions ignore it).
@@ -271,6 +276,7 @@ public final class Inkling2ReferenceModel {
             case .fp32: return v
             case .metalRunner: return sites.contains(site) ? toHalf(v) : v
             case .llamaCPU: return Op.q8_0ActivationRound(v)
+            case .llamaExperts: return site == .expertInput ? Op.q8_0ActivationRound(v) : v
             }
         }
         /// The input of a BF16 product.
@@ -279,6 +285,7 @@ public final class Inkling2ReferenceModel {
             case .fp32: return v
             case .metalRunner: return sites.contains(.bf16Inputs) ? toHalf(v) : v
             case .llamaCPU: return v.map(Op.bf16Round)
+            case .llamaExperts: return v
             }
         }
         /// A cached key or value row, and a query.
@@ -286,7 +293,7 @@ public final class Inkling2ReferenceModel {
             switch precision {
             case .fp32: return v
             case .metalRunner: return sites.contains(.cache) ? toHalf(v) : v
-            case .llamaCPU: return toHalf(v)
+            case .llamaCPU, .llamaExperts: return toHalf(v)
             }
         }
         func queryIn(_ v: [Float]) -> [Float] {
@@ -297,7 +304,7 @@ public final class Inkling2ReferenceModel {
             case .fp32: return nil
             case .metalRunner:
                 return sites.contains(.expertActivation) ? { $0.map { Float(Float16($0)) } } : nil
-            case .llamaCPU: return { Op.q8_0ActivationRound($0) }
+            case .llamaCPU, .llamaExperts: return { Op.q8_0ActivationRound($0) }
             }
         }()
 

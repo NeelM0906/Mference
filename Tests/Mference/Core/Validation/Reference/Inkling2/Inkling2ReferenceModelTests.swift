@@ -234,6 +234,36 @@ struct Inkling2ReferenceModelTests {
         #expect(worst > 0 && worst < 0.05, "worst per-visit change \(worst)")
     }
 
+    /// `.llamaExperts` (Q8_0 at the experts' input and activation, FP16
+    /// cache, the rest FP32) moves each visit a little, teacher-forced on the
+    /// FP32 run as above, and is neither `.fp32` nor `.llamaCPU`.
+    @Test func llamaExpertsMovesEachVisitALittle() throws {
+        let tokens = Inkling2ToyCheckpoint.tokens(count: 6)
+        let exact = try toyModel()
+        exact.captureTrace = true
+        _ = exact.forward(tokens: tokens, logits: .none)
+        let reference = try #require(exact.lastTrace)
+        func forced(_ precision: Inkling2ReferenceModel.Precision) throws -> [[[Float]]] {
+            let model = try toyModel()
+            model.captureTrace = true
+            model.precision = precision
+            model.forcedRoutes = reference.routes.map { $0.map(\.experts) }
+            model.forcedVisitOutputs = reference.visitOutputs
+            _ = model.forward(tokens: tokens, logits: .none)
+            return try #require(model.lastTrace).visitOutputs
+        }
+        let experts = try forced(.llamaExperts)
+        var worst: Float = 0
+        for (got, want) in zip(experts, reference.visitOutputs) {
+            for (g, w) in zip(got, want) {
+                #expect(g.allSatisfy { $0.isFinite })
+                worst = max(worst, zip(g, w).map { abs($0 - $1) }.max()! / max(w.map(abs).max()!, 1e-6))
+            }
+        }
+        #expect(worst > 0 && worst < 0.05, "worst per-visit change \(worst)")
+        #expect(experts != (try forced(.llamaCPU)))
+    }
+
     /// `.metalRunner` with every FP16 site switched off is `.fp32` bit for
     /// bit, with all of them (the default) it rounds, and each site alone
     /// changes the result; the trace's router margins are the gap between

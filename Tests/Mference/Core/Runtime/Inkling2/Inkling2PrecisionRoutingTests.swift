@@ -14,7 +14,7 @@ import MferenceValidationSupport
 /// the CPU trace.
 ///
 /// Modes (`MFERENCE_INKLING2_PRECISION_MODES`, comma separated): `fp32`,
-/// `llamaCPU`, `metalRunner`, `metalRunner-<site>` (every FP16 site of
+/// `llamaCPU`, `llamaExperts`, `metalRunner`, `metalRunner-<site>` (every FP16 site of
 /// `.metalRunner` but that one: projectionInputs, bf16Inputs, queries,
 /// cache, attentionOutput, expertInput, expertActivation), and `margins`:
 /// the reference at `.llamaCPU` teacher-forced on the trace (its records and
@@ -25,8 +25,10 @@ import MferenceValidationSupport
 /// Loads the install, so it runs only with `MFERENCE_INKLING2_GTURBO`,
 /// `MFERENCE_INKLING2_GOLDENS_DIR` and `MFERENCE_INKLING2_PRECISION_OUT` set,
 /// and then only inside `model-hold.sh`. `MFERENCE_INKLING2_PRECISION_TRACE`
-/// (relative to the goldens folder) picks the trace, `generate2/cpu/trace02`
-/// by default; below 32 tokens only (`.llamaCPU`).
+/// (relative to the goldens folder) picks the prompt, `generate2/cpu/trace02`
+/// by default: any golden folder; without a `trace.json` (a teacher-forced
+/// prompt, `generate-tf/metal/<id>`) only the log-probs are written and
+/// `margins` is refused. `llamaCPU` and `margins` need fewer than 32 tokens.
 @Suite("Inkling2 precision and routing on the real install", .serialized)
 struct Inkling2PrecisionRoutingTests {
     static let environment = ProcessInfo.processInfo.environment
@@ -73,9 +75,13 @@ struct Inkling2PrecisionRoutingTests {
         let id = folder.lastPathComponent
         let ids = try JSONDecoder().decode(Golden.self, from: Data(contentsOf: folder.appendingPathComponent("golden.json")))
             .prompt_ids
-        let trace = try JSONDecoder().decode(Trace.self, from: Data(contentsOf: folder.appendingPathComponent("trace.json")))
+        let traceURL = folder.appendingPathComponent("trace.json")
+        let trace = FileManager.default.fileExists(atPath: traceURL.path)
+            ? try JSONDecoder().decode(Trace.self, from: Data(contentsOf: traceURL)) : nil
         let n = ids.count
-        try #require(n < 32, "\(n) tokens take ggml's BLAS path, which .llamaCPU does not model")
+        if modes.contains("llamaCPU") || modes.contains("margins") {
+            try #require(n < 32, "\(n) tokens take ggml's BLAS path, which .llamaCPU does not model")
+        }
 
         let device = try #require(MTLCreateSystemDefaultDevice())
         // `.pread`: the Model never opens an expert file; the reference maps them.
@@ -86,16 +92,17 @@ struct Inkling2PrecisionRoutingTests {
         let c = model.config
         let d = c.hiddenSize, vocab = c.unpaddedVocabSize
         let softcap = Double(c.finalLogitSoftcap)
-        try #require(trace.hidden_shape == [48, n, d] && trace.visits.count == 48)
+        if let trace { try #require(trace.hidden_shape == [48, n, d] && trace.visits.count == 48) }
         let schedule = Inkling2ReferenceConfig.mini.schedule
         let weights = try Inkling2ReferenceWeights(model: model)
-        let traceSets = trace.visits.map { $0.experts.map(Set.init) }
+        let traceSets = trace?.visits.map { $0.experts.map(Set.init) }
 
         for mode in modes {
             let reference = try Inkling2ReferenceModel(config: .mini, weights: weights)
             reference.captureTrace = true
             let started = Date()
             if mode == "margins" {
+                let golden = try #require(trace, "margins need the golden's trace"), sets = try #require(traceSets)
                 let hidden = try Data(contentsOf: folder.appendingPathComponent("hidden_after_visit.f32"))
                 let records = hidden.withUnsafeBytes { raw in
                     (0..<48).map { v in (0..<n).map { t in
@@ -103,11 +110,11 @@ struct Inkling2PrecisionRoutingTests {
                     } }
                 }
                 reference.precision = .llamaCPU
-                reference.forcedRoutes = trace.visits.map(\.experts)
+                reference.forcedRoutes = golden.visits.map(\.experts)
                 reference.forcedVisitOutputs = records
                 _ = reference.forward(tokens: ids, logits: .none)
                 let own = try #require(reference.lastTrace)
-                let differs = (0..<48).map { v in (0..<n).map { t in Set(own.ownRoutes[v][t].experts) != traceSets[v][t] } }
+                let differs = (0..<48).map { v in (0..<n).map { t in Set(own.ownRoutes[v][t].experts) != sets[v][t] } }
                 try FileManager.default.createDirectory(at: outURL.appendingPathComponent("margins"),
                                                         withIntermediateDirectories: true)
                 try write(Margins(trace: traceName, precision: "llamaCPU", margins: own.routeMargins,
@@ -125,6 +132,8 @@ struct Inkling2PrecisionRoutingTests {
                 reference.precision = .fp32
             } else if mode == "llamaCPU" {
                 reference.precision = .llamaCPU
+            } else if mode == "llamaExperts" {
+                reference.precision = .llamaExperts
             } else if mode == "metalRunner" {
                 reference.precision = .metalRunner
             } else if mode.hasPrefix("metalRunner-"), let site = Self.sites[String(mode.dropFirst("metalRunner-".count))] {
@@ -162,6 +171,11 @@ struct Inkling2PrecisionRoutingTests {
                                                     prefill_s: seconds, runner: "Inkling2ReferenceModel \(mode)"),
                       to: tfDir.appendingPathComponent("golden.json"))
 
+            guard let traceSets else {
+                print("inkling2 precision \(id) \(mode) (\(String(format: "%.0f", seconds)) s): "
+                      + "\(n) positions written, next \(argmax)")
+                continue
+            }
             // The running sums and expert sets, as the runner's traces.
             let traceDir = outURL.appendingPathComponent(mode).appendingPathComponent("traces")
                 .appendingPathComponent(id)
