@@ -7,6 +7,17 @@ public enum Inkling2WeightFormat: UInt32, Sendable {
     case q8_0 = 0
     /// Plain BF16 rows (`attn_sink_proj`, `attn_k_conv_proj`, `attn_v_conv_proj`).
     case bf16 = 1
+    /// Plain F32 rows (the loop gates' `loop_*_ctrl_down`), decoded to half per tile.
+    case f32 = 2
+
+    /// Byte alignment the kernels' vector loads need for a segment's weight offset.
+    var offsetAlignment: Int {
+        switch self {
+        case .q8_0: return 2
+        case .bf16: return 8
+        case .f32: return 16
+        }
+    }
 }
 
 /// One weight of a stacked projection: `rows` rows starting at byte
@@ -32,8 +43,8 @@ public struct Inkling2ProjectionSegment: Sendable, Equatable {
     }
 }
 
-/// `out[t, outColumn + r] = sum_k x[t, k] W[r, k]` for up to eight Q8_0 or
-/// BF16 weights in one dispatch: half inputs, FP32 accumulation and output. Every
+/// `out[t, outColumn + r] = sum_k x[t, k] W[r, k]` for up to eight Q8_0,
+/// BF16 or F32 weights in one dispatch: half inputs, FP32 accumulation and output. Every
 /// projection of a layer visit that shares an input can be one segment list
 /// (query side: Q, relative states, sink, output gate; keys and their
 /// dynamic taps; values and theirs; or the output projection alone).
@@ -103,7 +114,7 @@ public final class Inkling2Projection {
         for segment in segments {
             precondition(segment.rows > 0 && segment.weightOffset >= 0)
             precondition(segment.inputOffset % 4 == 0 && segment.inputStride % 4 == 0)
-            precondition(segment.weightOffset % (segment.format == .bf16 ? 8 : 2) == 0)
+            precondition(segment.weightOffset % segment.format.offsetAlignment == 0)
             table.append((segment, groups))
             switch path {
             case .tiled: groups += (segment.rows + Self.tileRows - 1) / Self.tileRows

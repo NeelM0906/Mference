@@ -38,8 +38,9 @@ static inline float ink2_row_sum(float v) {
 //
 // out[t, outColumn + r] = sum_k input[t, k] * W[r, k] for every segment, where
 // W is a GGUF Q8_0 weight (rows of K/32 blocks of {half d; int8 q[32]}, 34
-// bytes, value d*q) or a BF16 weight (rows of K bfloats; the file stores the
-// sink and dynamic-tap projections that way). Segments let every projection that shares a visit's
+// bytes, value d*q), a BF16 weight (rows of K bfloats; the file stores the
+// sink and dynamic-tap projections that way) or an F32 weight (the loop
+// gates' down projections). Segments let every projection that shares a visit's
 // inputs run as one dispatch: the query-side group (q, relative states, sink,
 // output gate), keys (+ dynamic taps) and values, each with its own input.
 // All segments read one weight buffer and one input buffer at their own
@@ -61,7 +62,7 @@ struct Inkling2ProjSegment {
     uint  rows;           // weight rows (output columns) of this segment
     uint  outColumn;      // first output column
     uint  tileStart;      // first tile (or row pair) of the segment along the grid
-    uint  format;         // 0 = GGUF Q8_0 blocks, 1 = BF16 rows
+    uint  format;         // 0 = GGUF Q8_0 blocks, 1 = BF16 rows, 2 = F32 rows
 };
 
 struct Inkling2ProjParams {
@@ -108,8 +109,8 @@ void inkling2_q8_stacked_mm(
     const short iy  = short(8 * (tiitg % 4));
 
     const uint blocks = p.inputs / 32u;
-    const bool bf16 = seg.format != 0u;
-    const uint rowBytes = bf16 ? p.inputs * 2u : blocks * 34u;
+    const uint format = seg.format;
+    const uint rowBytes = format == 2u ? p.inputs * 4u : format == 1u ? p.inputs * 2u : blocks * 34u;
     device const uchar* arow = weights + seg.weightOffset + ulong(r0 + uint(lr0)) * rowBytes;
     device const half* y = input + seg.inputOffset + ulong(t0 + uint(lr1)) * seg.inputStride + uint(iy);
 
@@ -123,7 +124,13 @@ void inkling2_q8_stacked_mm(
 
     for (uint kb = 0; kb < blocks; ++kb) {
         half w[16];
-        if (bf16) {
+        if (format == 2u) {
+            device const float4* src = (device const float4*)(arow + (kb * 32u + 16u * uint(il0)) * 4u);
+            for (short i = 0; i < 4; ++i) {
+                const half4 v = half4(src[i]);
+                w[4 * i] = v.x; w[4 * i + 1] = v.y; w[4 * i + 2] = v.z; w[4 * i + 3] = v.w;
+            }
+        } else if (format == 1u) {
             device const bfloat4* src = (device const bfloat4*)(arow + (kb * 32u + 16u * uint(il0)) * 2u);
             for (short i = 0; i < 4; ++i) {
                 const half4 v = half4(float4(src[i]));
@@ -222,8 +229,8 @@ template <short NT>
     if (r >= seg.rows) { return; }
     const bool second = r + 1u < seg.rows;
     const uint blocks = p.inputs / 32u;
-    const bool bf16 = seg.format != 0u;
-    const uint rowBytes = bf16 ? p.inputs * 2u : blocks * 34u;
+    const uint format = seg.format;
+    const uint rowBytes = format == 2u ? p.inputs * 4u : format == 1u ? p.inputs * 2u : blocks * 34u;
     device const uchar* row0 = weights + seg.weightOffset + ulong(r) * rowBytes;
     device const uchar* row1 = second ? row0 + rowBytes : row0;
     const uint tokens = min(p.tokens, uint(NT));
@@ -248,7 +255,12 @@ template <short NT>
             device const uchar* rowp = which == 0 ? row0 : row1;
             float d;
             float4 wa, wb;
-            if (bf16) {
+            if (format == 2u) {
+                device const float4* src = (device const float4*)(rowp + (b * 32u + 8u * part) * 4u);
+                d = 1.0f;
+                wa = src[0];
+                wb = src[1];
+            } else if (format == 1u) {
                 device const bfloat4* src = (device const bfloat4*)(rowp + (b * 32u + 8u * part) * 2u);
                 d = 1.0f;
                 wa = float4(src[0]);
@@ -918,6 +930,190 @@ void inkling2_attention_decode_merge(
 }
 
 // ============================================================================
+// Loop core: block attention residuals, cross-pass message retrieval and the
+// message gate.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Depth mix: the block attention residuals and the cross-pass message
+// retrieval. Per token, each state s_n (FP32 [rows][stride], up to 6) is
+// normalised with a weightless RMS norm; each learned query q_j (FP32
+// [queries][2304], up to 4) attends over them with scale 1/sqrt(2304);
+// out_j = sum_n softmax_n(q_j . s^_n / sqrt(D)) s^_n. One threadgroup of 256
+// per token; outputs FP32 [rows][outStride] with query j at column j * width.
+// ----------------------------------------------------------------------------
+
+struct Inkling2MixParams {
+    uint  rows;
+    uint  width;          // 2304
+    uint  stateCount;     // 1 ... 6
+    uint  queryCount;     // 1 ... 4
+    uint  stateStride[6]; // floats between rows of each state
+    uint  outStride;      // floats between output rows
+    float eps;
+};
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_depth_mix(
+    constant Inkling2MixParams& p [[buffer(0)]],
+    device const float* s0 [[buffer(1)]],
+    device const float* s1 [[buffer(2)]],
+    device const float* s2 [[buffer(3)]],
+    device const float* s3 [[buffer(4)]],
+    device const float* s4 [[buffer(5)]],
+    device const float* s5 [[buffer(6)]],
+    device const float* queries [[buffer(7)]],
+    device float*       out     [[buffer(8)]],
+    uint   row   [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    // partial sums: [sg][6 sumsq + 24 dots]
+    threadgroup float partial[8][30];
+    threadgroup float weights[4][6];
+    threadgroup float inv[6];
+    device const float* states[6] = {s0, s1, s2, s3, s4, s5};
+    const uint N = p.stateCount, Q = p.queryCount;
+    float acc[30];
+    for (short i = 0; i < 30; ++i) { acc[i] = 0.0f; }
+    for (uint i = tid; i < p.width; i += 256u) {
+        float qv[4];
+        for (uint j = 0; j < 4u; ++j) { qv[j] = j < Q ? queries[j * p.width + i] : 0.0f; }
+        for (uint n = 0; n < 6u; ++n) {
+            if (n >= N) { break; }
+            const float v = states[n][ulong(row) * p.stateStride[n] + i];
+            acc[n] = fma(v, v, acc[n]);
+            for (uint j = 0; j < 4u; ++j) { acc[6u + j * 6u + n] = fma(qv[j], v, acc[6u + j * 6u + n]); }
+        }
+    }
+    for (short i = 0; i < 30; ++i) {
+        const float total = simd_sum(acc[i]);
+        if (lane == 0) { partial[sgitg][i] = total; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sums[30];
+        for (short i = 0; i < 30; ++i) {
+            float t = 0.0f;
+            for (short s = 0; s < 8; ++s) { t += partial[s][i]; }
+            sums[i] = t;
+        }
+        const float scale = rsqrt(float(p.width));
+        for (uint n = 0; n < N; ++n) { inv[n] = rsqrt(sums[n] / float(p.width) + p.eps); }
+        for (uint j = 0; j < Q; ++j) {
+            float m = -INFINITY;
+            float sc[6];
+            for (uint n = 0; n < N; ++n) { sc[n] = sums[6u + j * 6u + n] * inv[n] * scale; m = max(m, sc[n]); }
+            float total = 0.0f;
+            for (uint n = 0; n < N; ++n) { sc[n] = exp(sc[n] - m); total += sc[n]; }
+            for (uint n = 0; n < N; ++n) { weights[j][n] = sc[n] / total; }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < p.width; i += 256u) {
+        float v[6];
+        for (uint n = 0; n < 6u; ++n) { v[n] = n < N ? states[n][ulong(row) * p.stateStride[n] + i] * inv[n] : 0.0f; }
+        for (uint j = 0; j < Q; ++j) {
+            float o = 0.0f;
+            for (uint n = 0; n < N; ++n) { o = fma(weights[j][n], v[n], o); }
+            out[ulong(row) * p.outStride + j * p.width + i] = o;
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Message gate, around two stacked projections (F32 weight segments):
+//   gate inputs:  h[t] = half([rms(x_c); rms(m_c)])   per controller c (width 2 * 2304)
+//   z = W_down h                 (projection, F32 down [64][4608] per controller)
+//   f, g = W_forget z, W_gain z  (projection, F32 [2304][64])
+//   out = (1 - tanh f) x + tanh g m
+// ----------------------------------------------------------------------------
+
+struct Inkling2GateInputParams {
+    uint  rows;
+    uint  width;           // 2304
+    uint  xStride;
+    uint  mStride;
+    uint  outStride;       // halves between rows of h (>= 2 * width)
+    float eps;
+};
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_gate_inputs(
+    constant Inkling2GateInputParams& p [[buffer(0)]],
+    device const float* x  [[buffer(1)]],
+    device const float* m  [[buffer(2)]],
+    device half*        h  [[buffer(3)]],
+    uint   row   [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float partial[8][2];
+    device const float* xr = x + ulong(row) * p.xStride;
+    device const float* mr = m + ulong(row) * p.mStride;
+    float ax = 0.0f, am = 0.0f;
+    for (uint i = tid; i < p.width; i += 256u) { ax = fma(xr[i], xr[i], ax); am = fma(mr[i], mr[i], am); }
+    ax = simd_sum(ax);
+    am = simd_sum(am);
+    if (lane == 0) { partial[sgitg][0] = ax; partial[sgitg][1] = am; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tx = 0.0f, tm = 0.0f;
+    for (short s = 0; s < 8; ++s) { tx += partial[s][0]; tm += partial[s][1]; }
+    const float ix = rsqrt(tx / float(p.width) + p.eps), im = rsqrt(tm / float(p.width) + p.eps);
+    device half* hr = h + ulong(row) * p.outStride;
+    for (uint i = tid; i < p.width; i += 256u) {
+        hr[i] = half(xr[i] * ix);
+        hr[p.width + i] = half(mr[i] * im);
+    }
+}
+
+struct Inkling2GateCombineParams {
+    uint rows;
+    uint width;        // 2304
+    uint rank;         // 64
+    uint xStride;
+    uint mStride;
+    uint zStride;      // floats between rows of the down projection output
+    uint zColumn;      // this controller's 64 columns
+    uint outStride;
+};
+
+// f = W_forget z, g = W_gain z in FP32 (the vendor keeps both in FP32),
+// out = (1 - tanh f) x + tanh g m. One threadgroup of 256 per token row;
+// `out` may alias `x`.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_gate_combine(
+    constant Inkling2GateCombineParams& p [[buffer(0)]],
+    device const float* x      [[buffer(1)]],
+    device const float* m      [[buffer(2)]],
+    device const float* z      [[buffer(3)]],
+    device const float* forget [[buffer(4)]],
+    device const float* gain   [[buffer(5)]],
+    device float*       out    [[buffer(6)]],
+    uint   row [[threadgroup_position_in_grid]],
+    ushort tid [[thread_index_in_threadgroup]])
+{
+    threadgroup float zs[128];
+    for (uint r = tid; r < p.rank; r += 256u) { zs[r] = z[ulong(row) * p.zStride + p.zColumn + r]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < p.width; i += 256u) {
+        device const float4* fr = (device const float4*)(forget + ulong(i) * p.rank);
+        device const float4* gr = (device const float4*)(gain + ulong(i) * p.rank);
+        threadgroup const float4* z4 = (threadgroup const float4*)zs;
+        float f = 0.0f, g = 0.0f;
+        for (uint r = 0; r < p.rank / 4u; ++r) {
+            f += dot(fr[r], z4[r]);
+            g += dot(gr[r], z4[r]);
+        }
+        const float xv = x[ulong(row) * p.xStride + i], mv = m[ulong(row) * p.mStride + i];
+        const float tf = tanh(clamp(f, -20.0f, 20.0f)), tg = tanh(clamp(g, -20.0f, 20.0f));
+        out[ulong(row) * p.outStride + i] = xv - tf * xv + tg * mv;
+    }
+}
+
+// ============================================================================
 // Metal 4 tensor-ops variants (matmul2d), for GPUs that build them. The Swift
 // side selects them only where `supportsApple10TensorOps` holds; everywhere
 // else the simdgroup kernels above run, and on GPUs without tensor support
@@ -965,8 +1161,8 @@ void inkling2_q8_stacked_mm_tensorops(
     auto acc = op.get_destination_cooperative_tensor<decltype(firstTileA), decltype(tileB), float>();
     for (int e = 0; e < acc.get_capacity(); ++e) { acc[e] = 0.0f; }
 
-    const bool bf16 = seg.format != 0u;
-    const uint rowBytes = bf16 ? p.inputs * 2u : (p.inputs / 32u) * 34u;
+    const uint format = seg.format;
+    const uint rowBytes = format == 2u ? p.inputs * 4u : format == 1u ? p.inputs * 2u : (p.inputs / 32u) * 34u;
     const uint lid = lid3.x, threads = threads3.x;
     for (uint k0 = 0; k0 < p.inputs; k0 += uint(TK)) {
         for (uint linear = lid; linear < uint(TN * TK); linear += threads) {
@@ -974,7 +1170,9 @@ void inkling2_q8_stacked_mm_tensorops(
             half w = 0.0h;
             if (r0 + n < seg.rows) {
                 device const uchar* row = weights + seg.weightOffset + ulong(r0 + n) * rowBytes;
-                if (bf16) {
+                if (format == 2u) {
+                    w = half(((device const float*)row)[k0 + k]);
+                } else if (format == 1u) {
                     w = half(float(((device const bfloat*)row)[k0 + k]));
                 } else {
                     device const uchar* blk = row + ((k0 + k) / 32u) * 34u;

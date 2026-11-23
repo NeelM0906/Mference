@@ -258,4 +258,55 @@ import Testing
         }
         print(String(format: "[ink2-kbench] input-norm T=%d best=%.3f ms", rows, n.best * 1e3))
     }
+
+    @Test(.enabled(if: enabled && only("loop"))) func loopOps() throws {
+        let ctx = try MetalContext()
+        let library = try Inkling2KernelLibrary(context: ctx)
+        let mix = try Inkling2DepthMix(library: library)
+        let gate = try Inkling2MessageGate(library: library)
+        let projection = try Inkling2Projection(library: library)
+        let rows = 2048, width = 2304, rank = 64
+        let states = (0..<6).map { Self.floatBuffer(ctx.device, rows * width, salt: $0) }
+        let queries = Self.floatBuffer(ctx.device, 4 * width, salt: 9, scale: 0.05)
+        let mixOut = ctx.device.makeBuffer(length: rows * 4 * width * 4, options: .storageModeShared)!
+        for (count, q) in [(6, 3), (6, 1), (2, 4)] {
+            let t = Self.time(ctx) { cb in
+                mix.encode(commandBuffer: cb, states: states.prefix(count).map { (.init($0), width) },
+                           queries: .init(queries), queryCount: q, output: .init(mixOut), outputStride: q * width, rows: rows)
+            }
+            print(String(format: "[ink2-kbench] depth-mix states=%d queries=%d T=%d best=%.3f ms %.2f us/token",
+                         count, q, rows, t.best * 1e3, t.best * 1e6 / Double(rows)))
+        }
+        // Three attention controllers of one loop visit: inputs, one down projection, combines.
+        let h = ctx.device.makeBuffer(length: 3 * rows * 2 * width * 2, options: .storageModeShared)!
+        let z = ctx.device.makeBuffer(length: rows * 3 * rank * 4, options: .storageModeShared)!
+        let down = Self.floatBuffer(ctx.device, 3 * rank * 2 * width, salt: 11, scale: 0.02)
+        let fg = Self.floatBuffer(ctx.device, width * rank, salt: 12, scale: 0.1)
+        let out = ctx.device.makeBuffer(length: rows * width * 4, options: .storageModeShared)!
+        let segments = (0..<3).map { c in
+            Inkling2ProjectionSegment(weightOffset: c * rank * 2 * width * 4, inputOffset: c * rows * 2 * width,
+                                      inputStride: 2 * width, rows: rank, outColumn: c * rank, format: .f32)
+        }
+        let tInputs = Self.time(ctx) { cb in
+            for c in 0..<3 {
+                gate.encodeInputs(commandBuffer: cb, x: .init(states[c]), xStride: width, message: .init(states[c + 3]),
+                                  messageStride: width, output: .init(h, offset: c * rows * 2 * width * 2),
+                                  outputStride: 2 * width, rows: rows)
+            }
+        }
+        let tDown = Self.time(ctx) { cb in
+            projection.encode(commandBuffer: cb, weights: down, input: h, output: z, tokens: rows, inputs: 2 * width,
+                              outStride: 3 * rank, segments: segments)
+        }
+        let tCombine = Self.time(ctx) { cb in
+            for c in 0..<3 {
+                gate.encodeCombine(commandBuffer: cb, x: .init(states[c]), xStride: width, message: .init(states[c + 3]),
+                                   messageStride: width, z: .init(z), zStride: 3 * rank, zColumn: c * rank,
+                                   forget: .init(fg), gain: .init(fg), output: .init(out), outputStride: width, rows: rows)
+            }
+        }
+        print(String(format: "[ink2-kbench] message-gate x3 T=%d inputs=%.3f ms down=%.3f ms combine=%.3f ms total=%.2f us/token",
+                     rows, tInputs.best * 1e3, tDown.best * 1e3, tCombine.best * 1e3,
+                     (tInputs.best + tDown.best + tCombine.best) * 1e6 / Double(rows)))
+    }
 }

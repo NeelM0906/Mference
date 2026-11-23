@@ -1,6 +1,6 @@
 import Foundation
 
-/// GGUF Q8_0 blocks, BF16 rows, and the stacked projection that reads them.
+/// GGUF Q8_0 blocks, BF16 and F32 rows, and the stacked projection that reads them.
 ///
 /// A Q8_0 block is 34 bytes: an IEEE half scale `d` and 32 signed bytes `q`;
 /// the value is `float(d) * q`. A weight with GGUF shape `{in, out}` is `out`
@@ -78,7 +78,23 @@ public enum Inkling2Q8Ref {
         }
     }
 
-    public enum Format: Sendable { case q8_0, bf16 }
+    /// F32 rows, little-endian.
+    public static func f32(_ values: [Float]) -> [UInt8] {
+        values.flatMap { value -> [UInt8] in
+            let bits = value.bitPattern
+            return (0..<4).map { UInt8(truncatingIfNeeded: bits >> (8 * UInt32($0))) }
+        }
+    }
+
+    public static func decodeF32(_ bytes: [UInt8], offset: Int, count: Int) -> [Float] {
+        (0..<count).map { i in
+            var bits: UInt32 = 0
+            for b in 0..<4 { bits |= UInt32(bytes[offset + 4 * i + b]) << (8 * UInt32(b)) }
+            return Float(bitPattern: bits)
+        }
+    }
+
+    public enum Format: Sendable { case q8_0, bf16, f32 }
 
     /// One segment of a stacked projection: `rows` output columns read
     /// `input` (`[tokens, inputs]`) through a Q8_0 or BF16 weight.
@@ -106,9 +122,12 @@ public enum Inkling2Q8Ref {
         var column = 0
         for segment in segments {
             precondition(segment.input.count == tokens * inputs)
-            let w = segment.format == .q8_0
-                ? dequantize(segment.weight, offset: segment.weightOffset, rows: segment.rows, inputs: inputs)
-                : decodeBF16(segment.weight, offset: segment.weightOffset, count: segment.rows * inputs)
+            let w: [Float]
+            switch segment.format {
+            case .q8_0: w = dequantize(segment.weight, offset: segment.weightOffset, rows: segment.rows, inputs: inputs)
+            case .bf16: w = decodeBF16(segment.weight, offset: segment.weightOffset, count: segment.rows * inputs)
+            case .f32: w = decodeF32(segment.weight, offset: segment.weightOffset, count: segment.rows * inputs)
+            }
             for t in 0..<tokens {
                 for r in 0..<segment.rows {
                     var acc = 0.0
