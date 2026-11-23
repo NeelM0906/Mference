@@ -77,7 +77,10 @@ class NormalizeTests(unittest.TestCase):
         self.assertIn("E1", ids("maple"))
         self.assertNotIn("T1", ids("maple"))
         for f in ("qwen36", "maple", "minicpm5"):
-            self.assertTrue({"P1", "P3", "U1", "R2", "L1", "L2", "S1", "S2"} <= set(ids(f)))
+            self.assertTrue({"P1", "P3", "K1", "K2", "U1", "R2", "L1", "L2", "S1", "S2"} <= set(ids(f)))
+        k2 = dict(g.cases("qwen36"))["K2"]({"K1": {"content": "A river", "reasoning": "think"}})
+        self.assertEqual(k2["messages"][-2], {"role": "assistant", "content": "A river", "reasoning_content": "think"})
+        self.assertEqual(dict(g.cases("qwen36"))["K1"]["max_completion_tokens"], 16)
 
 
 class CompareTests(unittest.TestCase):
