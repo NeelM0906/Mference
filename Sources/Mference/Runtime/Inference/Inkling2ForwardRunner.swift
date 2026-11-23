@@ -858,11 +858,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         // 2. Input norms to FP16. Without messages a sliding layer has one input.
         let distinct = lw.isGlobal || bank != nil
         let h = (0..<3).map { Inkling2BufferRef(s.h, offset: $0 * plane * 2) }
-        for j in 0..<(distinct ? 3 : 1) {
-            let weight = lw.isGlobal ? lw.inputNorms[j] : lw.attnNorm!
-            inputNorm.encode(commandBuffer: cb, x: inputs[j], xStride: d, weight: weight,
-                             output: h[j], outputStride: d, rows: t, eps: w.rmsEps)
-        }
+        // One dispatch for the visit's one or three inputs (K3 `encodeSet`: the same bytes as one
+        // `encode` per input; at one row the norm's latency is paid once).
+        inputNorm.encodeSet(commandBuffer: cb, (0..<(distinct ? 3 : 1)).map { j in
+            .init(x: inputs[j], weight: lw.isGlobal ? lw.inputNorms[j] : lw.attnNorm!, output: h[j])
+        }, xStride: d, outputStride: d, rows: t, eps: w.rmsEps)
         // Projection segments address the FP16 inputs in halves.
         let hq = 0, hk = distinct ? plane : 0, hv = distinct ? 2 * plane : 0
 
@@ -903,9 +903,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             keyTail: tails.keys, valueTail: tails.values,
             queries: .init(s.q), queryStride: Self.qWidth,
             relative: .init(s.rel), relativeStride: Self.relWidth,
-            cache: kv, rows: t, startPosition: start))
-        convTail.encode(commandBuffer: cb, x: .init(s.y), xStride: Self.yStride, rows: t, tails: tails.keys,
-                        runs: tails.keyValueRuns(keyColumn: Self.colK, valueColumn: Self.colV))
+            cache: kv, rows: t, startPosition: start, advanceTails: t == 1))
+        if t > 1 {      // one row: the epilogue advanced the K/V tails in place
+            convTail.encode(commandBuffer: cb, x: .init(s.y), xStride: Self.yStride, rows: t, tails: tails.keys,
+                            runs: tails.keyValueRuns(keyColumn: Self.colK, valueColumn: Self.colV))
+        }
 
         // 5. Attention with the relative bias, sink and output gate.
         let mask = state.mask(slot: slot)
@@ -936,9 +938,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         shortConv.encode(commandBuffer: cb, x: .init(s.o), xStride: d, weight: lw.attnPostConv,
                          tail: tails.attentionOutput,
                          residual: blockStart ? nil : s.arenaRef(cur), residualStride: d,
-                         output: s.arenaRef(sum), outputStride: d, rows: t)
-        convTail.encode(commandBuffer: cb, x: .init(s.o), xStride: d, rows: t, tails: tails.attentionOutput,
-                        runs: [.init(xColumn: 0, tailOffset: 0, channels: d)])
+                         output: s.arenaRef(sum), outputStride: d, rows: t, advanceTail: t == 1)
+        if t > 1 {      // one row: the convolution advanced its tail in place
+            convTail.encode(commandBuffer: cb, x: .init(s.o), xStride: d, rows: t, tails: tails.attentionOutput,
+                            runs: [.init(xColumn: 0, tailOffset: 0, channels: d)])
+        }
         if blockStart {
             blocks.append(cur)          // the visit's input joins the completed blocks
         } else {
@@ -1058,9 +1062,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let next = slots.take()
         shortConv.encode(commandBuffer: cb, x: .init(s.moeOut), xStride: d, weight: lw.ffnPostConv,
                          tail: tails.moeOutput, residual: s.arenaRef(sum), residualStride: d,
-                         output: s.arenaRef(next), outputStride: d, rows: t)
-        convTail.encode(commandBuffer: cb, x: .init(s.moeOut), xStride: d, rows: t, tails: tails.moeOutput,
-                        runs: [.init(xColumn: 0, tailOffset: 0, channels: d)])
+                         output: s.arenaRef(next), outputStride: d, rows: t, advanceTail: t == 1)
+        if t > 1 {      // one row: the convolution advanced its tail in place
+            convTail.encode(commandBuffer: cb, x: .init(s.moeOut), xStride: d, rows: t, tails: tails.moeOutput,
+                            runs: [.init(xColumn: 0, tailOffset: 0, channels: d)])
+        }
         slots.release(sum)
         return next
     }
