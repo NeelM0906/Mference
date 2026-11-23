@@ -31,6 +31,10 @@ struct Inkling2RunnerToy {
     let floats: MTLBuffer
     let experts: [MTLBuffer]
     let expertScales: MTLBuffer
+    /// Per stored layer: the experts' encoding, stride, and the byte offset
+    /// of the layer's gate-up scales in `expertScales` (down scales follow,
+    /// 128 floats later). Q8_0 layers' scales are ones.
+    let expertLayers: [(encoding: Inkling2MoEEncoding, stride: Int, scaleOffset: Int)]
     let runnerWeights: Inkling2RunnerWeights
     let referenceWeights: Inkling2ReferenceWeights
 
@@ -213,6 +217,10 @@ struct Inkling2RunnerToy {
         }
         let scaleBuffer = try scalePlan.make(device, "toy.expert-scales")
         expertScales = scaleBuffer
+        expertLayers = (0..<c.numLayers).map { layer in
+            let encoding: Inkling2MoEEncoding = layer < 20 ? .nvfp4 : .q8_0
+            return (encoding, layout(encoding).stride, scalesAt[layer])
+        }
         let layerBuffers = expertBuffers
 
         // MARK: Runner and reference views of the same bytes

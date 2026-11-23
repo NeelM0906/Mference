@@ -2,14 +2,41 @@ import Foundation
 import Metal
 import Mference
 
+/// Where the CPU reference reads one stored layer's routed experts: expert
+/// `e` at `offset + e * stride` in `buffer`, its gate-up rows at
+/// `gateUpOffset` and down rows at `downOffset` inside the blob, and the
+/// NVFP4 per-expert factors (nil on Q8_0 layers).
+public struct Inkling2ReferenceExpertLayer {
+    public let buffer: MTLBuffer
+    public let offset: Int
+    public let stride: Int
+    public let gateUpOffset: Int
+    public let downOffset: Int
+    public let gateUpScales: [Float]?
+    public let downScales: [Float]?
+
+    public init(buffer: MTLBuffer, offset: Int, stride: Int, gateUpOffset: Int, downOffset: Int,
+                gateUpScales: [Float]?, downScales: [Float]?) {
+        self.buffer = buffer
+        self.offset = offset
+        self.stride = stride
+        self.gateUpOffset = gateUpOffset
+        self.downOffset = downOffset
+        self.gateUpScales = gateUpScales
+        self.downScales = downScales
+    }
+}
+
 extension Inkling2ReferenceWeights {
     /// The CPU reference's view of a loaded `inkling2Loop` install: every
     /// matrix an `Inkling2BufferMatrix` over the install's own mapped bytes
     /// (the bytes the GPU runner reads), the vectors copied (norms, clips,
-    /// convolution taps, queries: at most 16K floats each); the experts over
+    /// convolution taps, queries: at most 16K floats each). The experts come
+    /// from `experts` when given (for example the runner's own resident
+    /// buffers, so the reference reads them without a second copy), else from
     /// each layer file mapped read-only (`inkling2MappedExpertLayer`), whose
     /// pages fault in only where the reference reads.
-    public init(model: Model) throws {
+    public init(model: Model, experts: ((Int) throws -> Inkling2ReferenceExpertLayer)? = nil) throws {
         let c = model.config
         let d = c.hiddenSize
         func view(_ t: TensorView, rows: Int, cols: Int,
@@ -35,16 +62,26 @@ extension Inkling2ReferenceWeights {
         var loops: [Inkling2ReferenceLoopWeights] = []
         for L in 0..<c.numLayers {
             let global = c.fullAttentionLayerMask[L] == 1
-            let slab = try model.inkling2MappedExpertLayer(L)
             let blob = layout.layers[L]
             let nvfp4 = blob.format == .nvfp4
-            let gateUpScales = nvfp4 ? vector(try model.inkling2ExpertGateUpScale(layer: L), c.numExperts) : []
-            let downScales = nvfp4 ? vector(try model.inkling2ExpertDownScale(layer: L), c.numExperts) : []
+            let source: Inkling2ReferenceExpertLayer
+            if let experts {
+                source = try experts(L)
+            } else {
+                let mapped = try model.inkling2MappedExpertLayer(L)
+                source = Inkling2ReferenceExpertLayer(
+                    buffer: mapped.buffer, offset: 0, stride: mapped.expertStride,
+                    gateUpOffset: Int(blob.gateUp.offset), downOffset: Int(blob.down.offset),
+                    gateUpScales: nvfp4 ? vector(try model.inkling2ExpertGateUpScale(layer: L), c.numExperts) : nil,
+                    downScales: nvfp4 ? vector(try model.inkling2ExpertDownScale(layer: L), c.numExperts) : nil)
+            }
+            precondition(nvfp4 == (source.gateUpScales != nil && source.downScales != nil),
+                         "layer \(L): NVFP4 layers need their expert scales, Q8_0 layers have none")
             func expert(_ e: Int, down: Bool) -> Inkling2BufferMatrix {
-                let at = e * slab.expertStride + Int(down ? blob.down.offset : blob.gateUp.offset)
+                let at = source.offset + e * source.stride + (down ? source.downOffset : source.gateUpOffset)
                 let format: Inkling2BufferMatrix.Format = nvfp4
-                    ? .nvfp4(scale: down ? downScales[e] : gateUpScales[e]) : .q8_0
-                return Inkling2BufferMatrix(buffer: slab.buffer, offset: at, rows: down ? d : 2 * ff,
+                    ? .nvfp4(scale: down ? source.downScales![e] : source.gateUpScales![e]) : .q8_0
+                return Inkling2BufferMatrix(buffer: source.buffer, offset: at, rows: down ? d : 2 * ff,
                                             cols: down ? ff : d, format: format)
             }
             let resQueries = L == 0 ? [] : rows(try model.inkling2AttnResQuery(layer: L), global ? 3 : 1)

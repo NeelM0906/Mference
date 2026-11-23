@@ -29,7 +29,11 @@ extension Inkling2RunnerWeights {
     /// whole 15.8 GB pool at load.
     ///
     /// The kernels are built for Inkling 2 Mini's shape, so the config must
-    /// be the baseline's.
+    /// be the baseline's. Each expert layer file is checked under the
+    /// model's integrity policy before the store reads it, and the plan's
+    /// expert bytes against `Inkling2ForwardRunner.expertBudget` before any
+    /// is read. The head writes logits before the softcap: the sampler of
+    /// every generation path applies `finalLogitSoftcap` itself.
     init(model: Model, physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) throws {
         let c = model.config
         try Self.checkShape(c)
@@ -81,6 +85,7 @@ extension Inkling2RunnerWeights {
         let expertLayout = try model.inkling2ExpertLayout()
         var specs: [Inkling2ExpertLayerSpec] = []
         for L in 0..<c.numLayers {
+            try model.inkling2VerifyExpertLayerFile(L)
             let blob = expertLayout.layers[L]
             let encoding: Inkling2MoEEncoding = blob.format == .nvfp4 ? .nvfp4 : .q8_0
             let stride = Int(blob.expertStride)
@@ -110,6 +115,12 @@ extension Inkling2RunnerWeights {
         let plan = Inkling2ExpertResidencyPlan.make(
             layerBytes: specs.map(\.file.bytes),
             loopedLayers: c.inkling2.loopCoreStart..<c.inkling2.loopCoreEnd, physicalMemory: physicalMemory)
+        let budget = Inkling2ForwardRunner.expertBudget(physicalMemory: physicalMemory)
+        guard plan.residentBytes + plan.stagingBytes <= budget else {
+            throw Inkling2ModelBindingError.unsupported(
+                "the experts' residency plan needs \((plan.residentBytes + plan.stagingBytes) >> 20) MiB; "
+                + "this host allows \(budget >> 20) MiB")
+        }
         let store: Inkling2ExpertStore
         do {
             store = try Inkling2ExpertStore(device: model.device, shape: shape, layers: specs, plan: plan)
@@ -175,7 +186,7 @@ extension Inkling2RunnerWeights {
             vocab: c.unpaddedVocabSize > 0 ? c.unpaddedVocabSize : c.vocabSize,
             gateRank: rank,
             routeScale: Float(c.routedScalingFactor),
-            finalLogitSoftcap: Float(c.finalLogitSoftcap),
+            finalLogitSoftcap: 0,
             rmsEps: Inkling2AttentionShape.rmsEps)
     }
 
@@ -224,6 +235,28 @@ extension Inkling2ForwardRunner {
 }
 
 extension Model {
+    /// The check `openLayerLocked` runs before a streamer reads a layer file,
+    /// for the Inkling 2 runner, whose expert store reads the files itself:
+    /// the file's SHA-256 under `.fullSha256` and `.trustedReceiptWhenValid`
+    /// (that reads the file once, through the page cache), its size under
+    /// `.sizeCheckTrustedReceipt`. Done once per layer.
+    func inkling2VerifyExpertLayerFile(_ layer: Int) throws {
+        if streamersQueue.sync(execute: { streamersBox.layerVerified[layer] }) { return }
+        let name = "packed_experts/" + packedExpertsLayout.layers[layer].file
+        let url = directoryURL.appendingPathComponent(name)
+        guard let entry = manifest.files[name] else { throw ModelError.missingFile(name: name) }
+        switch integrityPolicy {
+        case .fullSha256, .trustedReceiptWhenValid:
+            try Sha256Verifier.verifyFile(at: url, named: name, expectedHex: entry.sha256)
+        case .sizeCheckTrustedReceipt:
+            let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value
+            guard size == entry.size else {
+                throw ModelError.trustedReceiptInvalid(detail: "\(name) size \(size.map(String.init) ?? "?") != \(entry.size)")
+            }
+        }
+        streamersQueue.sync { streamersBox.layerVerified[layer] = true }
+    }
+
     /// Stored layer `layer`'s expert file mapped read-only for CPU reads (the
     /// whole-model CPU reference): expert `e` at `e * expertStride`, its
     /// gate-up then down rows as `inkling2ExpertLayout()` describes. Pages

@@ -1,23 +1,40 @@
 import Foundation
 import Metal
 
-/// Where each layer's routed experts come from. Prefill visits are begun and
-/// ended in visit order around the encoder that reads the pool (a staged
-/// layer waits there for its slab and releases it after); decode visits read
-/// `decodePool`. K2's `Inkling2ExpertStore` (resident and staged layers) for
-/// an install, `Inkling2FixedExperts` for buffers already in memory.
+/// Where each layer's routed experts come from. Every visit, prefill or
+/// decode, is begun and ended in visit order around the encoder that reads
+/// the pool: a staged layer waits there for its slab and releases it after.
+/// K2's `Inkling2ExpertStore` (resident and staged layers) for an install,
+/// `Inkling2FixedExperts` for buffers already in memory. A source only ever
+/// hands out pools over buffers it counts in `boundExpertBytes`.
 protocol Inkling2ExpertSource: AnyObject {
     var shape: Inkling2MoEShape { get }
-    func beginPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool
-    func endPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws
-    func decodePool(layer: Int) -> Inkling2ExpertPool
+    /// The expert bytes the source's pools can make resident: every buffer
+    /// it may bind (Metal pages a bound buffer in whole).
+    var boundExpertBytes: Int { get }
+    func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool
+    func endVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws
     /// Releases visits begun and not ended (their command buffer is lost).
     func abandonOpenVisits() throws
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
 
+/// The runner reads a staged layer through the store's slab ring at decode
+/// too, never through `decodePool`: that pool is the layer file mapped whole,
+/// and binding a mapped buffer makes Metal page all of it in (measured,
+/// `Inkling2MappedBindingProbe`: 1 GiB read for a 4-byte kernel read), which
+/// for the 12 staged layers of a 32 GB host is 8.9 GB. A staged decode visit
+/// pays the layer's stage (about 29 ms NVFP4, 54 ms Q8_0 from the file cache)
+/// until K2's bounded decode path lands.
 extension Inkling2ExpertStore: Inkling2ExpertSource {
+    var boundExpertBytes: Int { plan.residentBytes + plan.stagingBytes }
+    func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool {
+        try beginPrefillVisit(layer: layer, commandBuffer: commandBuffer)
+    }
+    func endVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws {
+        try endPrefillVisit(layer: layer, commandBuffer: commandBuffer)
+    }
     var stagingFailure: String? { staging?.error.map { "\($0)" } }
 }
 
@@ -34,9 +51,14 @@ final class Inkling2FixedExperts: Inkling2ExpertSource {
         self.shape = first.shape
     }
 
-    func beginPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool { pools[layer] }
-    func endPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws {}
-    func decodePool(layer: Int) -> Inkling2ExpertPool { pools[layer] }
+    var boundExpertBytes: Int {
+        var seen = Set<ObjectIdentifier>()
+        return pools.reduce(0) { total, pool in
+            seen.insert(ObjectIdentifier(pool.buffer)).inserted ? total + pool.buffer.length : total
+        }
+    }
+    func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool { pools[layer] }
+    func endVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws {}
     func abandonOpenVisits() throws {}
     var stagingFailure: String? { nil }
 }
@@ -140,6 +162,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     static let relWidth = Inkling2AttentionShape.relWidth
     static let heads = Inkling2AttentionShape.numQHeads
     static let blockSize = 6
+    /// Tokens the global layers' KV storage grows by: 2,048 binds 64 MiB for
+    /// the first chunk (8 visits x K and V x 2 KiB a token) where K3's
+    /// default 16,384 binds 512 MiB however short the prompt.
+    static let globalGrowthStep = 2_048
     static let coreStart = 6
     static let coreEnd = 18
     static let passes = 3
@@ -172,6 +198,9 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private let moeShape: Inkling2MoEShape
     private let scratch: Scratch
     private var chunkState = PrefillChunkCommitState()
+    /// Set once the expert source can no longer be trusted (a staging or
+    /// abandon failure); every later chunk refuses until the model reloads.
+    private var expertsFailed: String?
 
     /// Diagnostic and golden hook: while set, every chunk copies each
     /// visit's output, the running block sum (FP32 `[48][rows][d]`), and the
@@ -185,8 +214,21 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     }
     var visitTrace: VisitTrace?
 
-    init(weights: Inkling2RunnerWeights, context: MetalContext, maxContext: Int, maxChunkTokens: Int) throws {
+    /// The most routed-expert bytes the runner lets its expert source make
+    /// resident: 40% of the host's memory. 12.8 GB on 32 GB, where K2's plan
+    /// binds 9.07 GB (layers 6-17 resident plus two slabs) and every layer
+    /// resident (15.8 GB) is refused; every layer fits from 40 GB up.
+    static func expertBudget(physicalMemory: UInt64) -> Int { Int(physicalMemory / 5 * 2) }
+
+    init(weights: Inkling2RunnerWeights, context: MetalContext, maxContext: Int, maxChunkTokens: Int,
+         physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) throws {
         try Self.validate(weights)
+        let budget = Self.expertBudget(physicalMemory: physicalMemory)
+        guard weights.experts.boundExpertBytes <= budget else {
+            throw Inkling2ForwardRunnerError.invalidInput(
+                "Inkling 2 experts would make \(weights.experts.boundExpertBytes >> 20) MiB resident; "
+                + "this host allows \(budget >> 20) MiB")
+        }
         guard maxContext > 0, maxChunkTokens > 0 else {
             throw Inkling2ForwardRunnerError.invalidInput(
                 "Inkling 2 runner needs a positive context (\(maxContext)) and chunk (\(maxChunkTokens))")
@@ -207,7 +249,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         kernels = try Inkling2RunnerKernels(device: context.device)
         state = try Inkling2AttentionState(device: context.device,
                                            configuration: .init(maxContext: maxContext,
-                                                                maxChunkTokens: maxChunkTokens))
+                                                                maxChunkTokens: maxChunkTokens,
+                                                                globalGrowthStep: Self.globalGrowthStep))
         moeShape = weights.experts.shape
         scratch = try Scratch(device: context.device, tokens: maxChunkTokens, maxContext: maxContext,
                               moeShape: moeShape)
@@ -418,6 +461,9 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         if let logits, logits.length < w.vocabRows * 2 {
             throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 logits buffer is too small")
         }
+        if let failure = expertsFailed {
+            throw Inkling2ForwardRunnerError.commandFailed("Inkling 2 \(failure); reload the model")
+        }
         try state.ensureCapacity(tokens: start + t)
         chunkState.markDirty(startPosition: start, tokenCount: t)
 
@@ -553,14 +599,28 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 }
             }
         } catch {
-            // A visit begun and not ended would hold its slab forever.
-            try? w.experts.abandonOpenVisits()
+            // Commit first: the releases of the visits already ended are in
+            // the pending buffer, and abandoning waits for them. Then a
+            // visit begun and not ended gives its slab back.
+            if let open = pending {
+                open.commit()
+                committed.append(open)
+                pending = nil
+            }
+            do {
+                try w.experts.abandonOpenVisits()
+            } catch {
+                expertsFailed = "abandoning open expert visits failed: \(error)"
+            }
             finish()
             throw error
         }
         finish()
         if let failure = w.experts.stagingFailure {
-            throw Inkling2ForwardRunnerError.commandFailed("Inkling 2 expert staging failed: \(failure)")
+            expertsFailed = "expert staging failed: \(failure)"
+        }
+        if let failure = expertsFailed {
+            throw Inkling2ForwardRunnerError.commandFailed("Inkling 2 \(failure); reload the model")
         }
         if let failed = committed.first(where: { $0.status != .completed }) {
             throw Inkling2ForwardRunnerError.commandFailed(
@@ -740,22 +800,21 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                              bias: lw.routerBias.buffer, biasOffset: lw.routerBias.offset,
                              ids: s.moeScratch.ids, routeWeights: s.moeScratch.routeWeights,
                              tokens: t, routeScale: w.routeScale)
+        }
+        // A staged layer's command buffer waits here for its slab and
+        // releases it after the experts' encoder.
+        let pool = try w.experts.beginVisit(layer: layer, commandBuffer: cb)
+        encode { enc in
             if t == 1 {
                 moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, ids: s.moeScratch.ids,
-                                 routeWeights: s.moeScratch.routeWeights, pool: w.experts.decodePool(layer: layer),
+                                 routeWeights: s.moeScratch.routeWeights, pool: pool,
                                  activation: s.decodeActivation, out: s.moeOut)
-            }
-        }
-        if t > 1 {
-            // A staged layer's command buffer waits here for its slab and
-            // releases it after the experts' encoder.
-            let pool = try w.experts.beginPrefillVisit(layer: layer, commandBuffer: cb)
-            encode { enc in
+            } else {
                 moe.encodePrefill(enc, hidden: s.moeInHalf, hiddenStride: d, pool: pool,
                                   scratch: s.moeScratch, tokens: t, out: s.moeOut, outStride: d)
             }
-            try w.experts.endPrefillVisit(layer: layer, commandBuffer: cb)
         }
+        try w.experts.endVisit(layer: layer, commandBuffer: cb)
 
         // 9. Post-MoE convolution with the residual, its tail.
         let next = slots.take()

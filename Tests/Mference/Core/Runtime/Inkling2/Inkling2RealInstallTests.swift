@@ -33,9 +33,49 @@ struct Inkling2RealInstallTests {
         let model = try Model.load(directoryURL: url, device: context.device, expecting: .inkling2Mini)
         let c = model.config
         let d = c.hiddenSize, topK = c.topKExperts, rows = 8
-        let runner = try Inkling2ForwardRunner(weights: Inkling2RunnerWeights(model: model), context: context,
-                                               maxContext: 64, maxChunkTokens: 8)
-        let reference = try Inkling2ReferenceModel(config: .mini, weights: Inkling2ReferenceWeights(model: model))
+        var weights = try Inkling2RunnerWeights(model: model)
+        // Compared with the reference's capped logits; generation leaves the
+        // cap to the sampler.
+        weights.finalLogitSoftcap = Float(c.finalLogitSoftcap)
+        let runner = try Inkling2ForwardRunner(weights: weights, context: context, maxContext: 64, maxChunkTokens: 8)
+        // The reference reads the experts where the runner's store holds
+        // them: the resident layers' buffers (no second copy) and, for the
+        // staged layers, the store's read-only file mappings, which only the
+        // CPU touches here (the runner itself stages those layers).
+        let store = try #require(weights.experts as? Inkling2ExpertStore)
+        let referenceExperts: (Int) throws -> Inkling2ReferenceExpertLayer = { layer in
+            let pool = store.decodePool(layer: layer)
+            let n = pool.shape.experts
+            let nvfp4 = pool.encoding == .nvfp4
+            return Inkling2ReferenceExpertLayer(
+                buffer: pool.buffer, offset: pool.offset, stride: pool.expertStride,
+                gateUpOffset: pool.gateUpOffset, downOffset: pool.downOffset,
+                gateUpScales: nvfp4 ? Inkling2BufferMatrix.floats(pool.gateUpScales, offset: pool.gateUpScalesOffset,
+                                                                  count: n) : nil,
+                downScales: nvfp4 ? Inkling2BufferMatrix.floats(pool.downScales, offset: pool.downScalesOffset,
+                                                                count: n) : nil)
+        }
+        // The store's resident copies equal the files (first and last
+        // expert of each resident layer, read back with pread).
+        for layer in 0..<c.numLayers where store.plan.placements[layer] == .resident {
+            let pool = store.decodePool(layer: layer)
+            let path = url.appendingPathComponent("packed_experts")
+                .appendingPathComponent(model.packedExpertsLayout.layers[layer].file).path
+            let fd = open(path, O_RDONLY)
+            #expect(fd >= 0, "layer \(layer) file")
+            defer { close(fd) }
+            for e in [0, c.numExperts - 1] {
+                var bytes = [UInt8](repeating: 0, count: pool.expertStride)
+                let got = bytes.withUnsafeMutableBytes { pread(fd, $0.baseAddress!, pool.expertStride,
+                                                               off_t(e * pool.expertStride)) }
+                #expect(got == pool.expertStride)
+                let resident = UnsafeRawBufferPointer(start: pool.buffer.contents() + pool.offset + e * pool.expertStride,
+                                                      count: pool.expertStride)
+                #expect(resident.elementsEqual(bytes), "layer \(layer) expert \(e)")
+            }
+        }
+        let reference = try Inkling2ReferenceModel(
+            config: .mini, weights: Inkling2ReferenceWeights(model: model, experts: referenceExperts))
         reference.captureTrace = true
         reference.precision = .metalRunner
         let device = context.device

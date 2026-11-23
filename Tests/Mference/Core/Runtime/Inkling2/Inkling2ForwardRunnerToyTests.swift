@@ -177,6 +177,11 @@ struct Inkling2ForwardRunnerToyTests {
         #expect(refused { $0.gateRank = Inkling2RunnerKernels.maxGateRank + 1 })
         #expect(refused { $0.vocab = $0.vocabRows + 1 })
         #expect(refused { $0.layers.removeLast() })
+        // The toy's experts (about 0.9 GB) exceed what a 1 GiB host allows.
+        #expect(throws: Inkling2ForwardRunnerError.self) {
+            _ = try Inkling2ForwardRunner(weights: toy.runnerWeights, context: context, maxContext: 16,
+                                          maxChunkTokens: 2, physicalMemory: 1 << 30)
+        }
 
         let runner = try Inkling2ForwardRunner(weights: toy.runnerWeights, context: context,
                                                maxContext: 8, maxChunkTokens: 2)
@@ -192,5 +197,73 @@ struct Inkling2ForwardRunnerToyTests {
         #expect(runner.continuationPosition == 0)
         try await prefill([1, 2, 3])
         #expect(runner.continuationPosition == 3)
+    }
+
+    /// The runner on K2's expert store, planned as for a 32 GB host (layers
+    /// 6-17 resident, the other 12 staged through two slabs, decode visits
+    /// included), against the same runner on fixed pools: the same kernels
+    /// read the same bytes in the same order, so every visit output and
+    /// every logit must match bit for bit. The toy's expert layers are
+    /// written to temporary files for the store to read.
+    @Test(.fullTier)
+    func expertStoreMatchesFixedPoolsBitForBit() async throws {
+        let context = try MetalContext()
+        let toy = try Inkling2RunnerToy(device: context.device)
+        let c = Inkling2RunnerToy.config
+        let d = c.hiddenSize, rows = 8
+        let shape = Inkling2MoEShape(d: d, f: c.expertFF, experts: c.numExperts, topK: c.topK)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inkling2-store-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var specs: [Inkling2ExpertLayerSpec] = []
+        for (layer, info) in toy.expertLayers.enumerated() {
+            let bytes = c.numExperts * info.stride
+            let url = directory.appendingPathComponent("layer_\(layer).bin")
+            try Data(bytesNoCopy: toy.experts[layer].contents(), count: bytes, deallocator: .none).write(to: url)
+            let nvfp4 = info.encoding == .nvfp4
+            specs.append(Inkling2ExpertLayerSpec(
+                file: Inkling2ExpertLayerFile(path: url.path, offset: 0, bytes: bytes),
+                encoding: info.encoding, expertStride: info.stride,
+                gateUpScales: nvfp4 ? (toy.expertScales, info.scaleOffset) : nil,
+                downScales: nvfp4 ? (toy.expertScales, info.scaleOffset + c.numExperts * 4) : nil))
+        }
+        let plan = Inkling2ExpertResidencyPlan.make(layerBytes: specs.map(\.file.bytes), loopedLayers: 6..<18,
+                                                    physicalMemory: 32 << 30)
+        #expect(plan.placements.filter { $0 == .staged }.count == 12)
+        var stored = toy.runnerWeights
+        stored.experts = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan)
+
+        func run(_ weights: Inkling2RunnerWeights) async throws -> (logits: [[UInt16]], outputs: [Float]) {
+            let runner = try Inkling2ForwardRunner(weights: weights, context: context,
+                                                   maxContext: 64, maxChunkTokens: 4)
+            let device = context.device
+            let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
+            let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
+            let routes = try #require(device.makeBuffer(length: 48 * rows * c.topK * 4, options: .storageModeShared))
+            runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows)
+            var logits: [[UInt16]] = []
+            var position = 0
+            for (chunk, decode) in Self.shortSteps {
+                if decode {
+                    try await runner.produce(token: chunk[0], position: position, into: out)
+                } else {
+                    _ = try await runner.prefillChunked(tokens: chunk[...], startPosition: position,
+                                                        outputMode: .logits, config: .production(chunkTokens: 32),
+                                                        into: out, onProgress: { _ in })
+                }
+                let p = out.contents().bindMemory(to: UInt16.self, capacity: c.vocabPadded)
+                logits.append(Array(UnsafeBufferPointer(start: p, count: c.vocabPadded)))
+                position += chunk.count
+            }
+            return (logits, Inkling2BufferMatrix.floats(outputs, offset: 0, count: 48 * rows * d))
+        }
+        let fixed = try await run(toy.runnerWeights)
+        let staged = try await run(stored)
+        #expect(staged.logits == fixed.logits)
+        #expect(staged.outputs == fixed.outputs)
+        print("inkling2 toy expert store: \(plan.placements.filter { $0 == .resident }.count) resident, "
+              + "\(plan.placements.filter { $0 == .staged }.count) staged layers; bit-identical: "
+              + "\(staged.logits == fixed.logits && staged.outputs == fixed.outputs)")
     }
 }
