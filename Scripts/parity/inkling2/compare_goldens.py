@@ -132,11 +132,8 @@ def trace_metrics(da, db, pid):
     }
 
 
-def main():
-    da, db = sys.argv[1], sys.argv[2]
-    out_json = sys.argv[sys.argv.index("--json") + 1] if "--json" in sys.argv else None
-    # --teacher-forced: run B is make_tf_prompts.py's set run on run A's goldens
-    teacher_forced = "--teacher-forced" in sys.argv
+def compare(da, db, teacher_forced=False):
+    """The comparison of run B with run A as one dict (what --json writes)."""
     ia = json.load(open(os.path.join(da, "index.json")))
     result = {"a": da, "b": db, "prompts": []}
     for p in ia["prompts"]:
@@ -210,6 +207,14 @@ def main():
         "max_abs_dlogprob_top1": max((l["max_abs_dlogprob_top1"] for l in lps), default=None),
         "max_kl_top20_approx": max((l["max_kl_top20_approx"] for l in lps), default=None),
     }
+    return result
+
+
+def main():
+    da, db = sys.argv[1], sys.argv[2]
+    out_json = sys.argv[sys.argv.index("--json") + 1] if "--json" in sys.argv else None
+    # --teacher-forced: run B is make_tf_prompts.py's set run on run A's goldens
+    result = compare(da, db, teacher_forced="--teacher-forced" in sys.argv)
     txt = json.dumps(result, indent=1)
     if out_json:
         open(out_json, "w").write(txt)
