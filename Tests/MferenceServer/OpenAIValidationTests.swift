@@ -579,6 +579,36 @@ struct ServerArgumentTests {
         #expect(ServerModelSession.resolvedMaxContext(32_768, family: .qwen36) == 32_768)
     }
 
+    /// Inkling 2 Mini on a Mac under 48 GB (the residency plan stages layers)
+    /// runs at most 40,960 tokens, whatever `--max-context` asks; from 48 GB it has
+    /// its native 262,144. No other family is capped by the host.
+    @Test func inkling2ContextIsCappedUnderFortyEightGigabytes() {
+        let small: UInt64 = 32 << 30, big: UInt64 = 64 << 30
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .inkling2Loop, physicalMemory: small) == 40_960)
+        #expect(ServerModelSession.resolvedMaxContext(65_536, family: .inkling2Loop, physicalMemory: small) == 40_960)
+        #expect(ServerModelSession.resolvedMaxContext(16_384, family: .inkling2Loop, physicalMemory: small) == 16_384)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .inkling2Loop, physicalMemory: big) == 262_144)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .qwen36, physicalMemory: small) == 262_144)
+        #expect(ServerModelSession.resolvedMaxContext(100_000, family: .maple, physicalMemory: small) == 100_000)
+        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .inkling2Loop, physicalMemory: small) == 32_768)
+    }
+
+    /// The single-model server path resolves every existing family's context
+    /// exactly as before the Inkling 2 cap, at the default, explicit and
+    /// `max` settings, on every host size.
+    @Test func existingFamiliesResolveTheContextTheyHadBefore() {
+        let settings: [Int?] = [ServerArguments.defaultMaxContext, 4_096, 40_960, 131_072, 200_000, 262_144, nil]
+        for family in [ModelFamily.qwen36, .qwen38, .minicpm5, .maple] {
+            for gigabytes: UInt64 in [8, 16, 32, 47, 48, 64] {
+                for setting in settings {
+                    #expect(ServerModelSession.resolvedMaxContext(setting, family: family,
+                                                                  physicalMemory: gigabytes << 30)
+                            == setting ?? family.maximumContext)
+                }
+            }
+        }
+    }
+
     @Test(arguments: ["0", "-1", "262145", "1048576", "16k", "", "MAX"])
     func rejectsContextsNoModelCanUse(value: String) {
         #expect(throws: ServerArgumentError.self) {

@@ -240,9 +240,13 @@ public actor ServerModelSession: ServerLoadedModel {
         requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
     }
 
-    /// `--max-context max` (nil) is the model's native context.
-    static func resolvedMaxContext(_ requested: Int?, family: ModelFamily) -> Int {
-        requested ?? family.maximumContext
+    /// `--max-context max` (nil) is the model's native context; either is
+    /// lowered to the family's cap for this Mac's memory where it has one
+    /// (`ModelFamily.memoryContextCap`: Inkling 2 under 48 GB).
+    static func resolvedMaxContext(_ requested: Int?, family: ModelFamily,
+                                   physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let context = requested ?? family.maximumContext
+        return family.memoryContextCap(physicalMemory: physicalMemory).map { min(context, $0) } ?? context
     }
 
     public static func load(modelDirectory: URL,
