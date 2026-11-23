@@ -225,6 +225,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// the work across threadgroups. Prefill keeps the runner's kernels.
     private let depthMix: Inkling2DepthMix
     private let gateDecode: Inkling2MessageGateKernels
+    /// K3's one-token router (64 threadgroups for the logits, one simdgroup
+    /// for the selection) for decode rows; the prefill router runs one
+    /// threadgroup per token, about 0.21 ms a visit at one token.
+    private let decodeRouter: Inkling2DecodeRouter
     /// FP32 `[12][d]`, one decoded row's mix and gate rows: 0-2 the attention
     /// inputs' mix (q, k, v), 3-6 the four messages, 7-9 the gated q, k, v,
     /// 10 the MoE input's mix, 11 its gated form. K3's decode gate addresses
@@ -314,6 +318,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         decodeAttention = try Inkling2DecodeAttention(library: library)
         depthMix = try Inkling2DepthMix(library: library)
         gateDecode = try Inkling2MessageGateKernels(library: library)
+        decodeRouter = try Inkling2DecodeRouter(library: library)
         guard let io = context.device.makeBuffer(length: 12 * Self.d * 4, options: .storageModePrivate),
               let z = context.device.makeBuffer(length: 4 * 128 * 4, options: .storageModePrivate) else {
             throw Inkling2ForwardRunnerError.allocationFailed("Inkling 2 decode mix and gate rows")
@@ -393,6 +398,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let moeOut: MTLBuffer       // FP32 [T][d]
         let ids: MTLBuffer          // UInt32 [T]
         let finalRow: MTLBuffer     // FP32 [2][d]
+        let routerLogits: MTLBuffer // FP32 [experts], the one-token router's logits
         let partials: MTLBuffer
         let decodeActivation: MTLBuffer
         let moeScratch: Inkling2MoEPrefillScratch
@@ -426,6 +432,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             }
             ids = idsBuffer
             finalRow = try make(2 * d * 4, "final")
+            routerLogits = try make(moeShape.experts * 4, "router-logits")
             partials = try make(Inkling2DecodeAttention.partialsLength(keys: maxContext), "partials")
             decodeActivation = try make(moeShape.topK * moeShape.f * 2, "decode-activation")
             moeScratch = try Inkling2MoEPrefillScratch(device: device, shape: moeShape, maxTokens: tokens)
@@ -983,12 +990,24 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                                       weight: lw.ffnNorm.buffer, weightOffset: lw.ffnNorm.offset, eps: w.rmsEps,
                                       out: s.moeIn, outStride: d, outHalf: s.moeInHalf, halfStride: d,
                                       d: d, tokens: t)
-            // 8. Router and routed experts.
-            moe.encodeRouter(enc, shape: moeShape, x: s.moeIn, xStride: d,
-                             weight: lw.router.buffer, weightOffset: lw.router.offset,
-                             bias: lw.routerBias.buffer, biasOffset: lw.routerBias.offset,
-                             ids: s.moeScratch.ids, routeWeights: s.moeScratch.routeWeights,
-                             tokens: t, routeScale: w.routeScale)
+            // 8. Router and routed experts. One token takes K3's decode
+            //    router: the prefill router's selection line for line (ties to
+            //    the lower expert), its logits summed in another order, so the
+            //    weights agree within about 6e-7 and only an exact near-tie
+            //    between the 8th and 9th expert can resolve the other way.
+            if t == 1 {
+                decodeRouter.encode(encoder: enc, x: .init(s.moeIn), weight: lw.router, bias: lw.routerBias,
+                                    logits: .init(s.routerLogits), ids: .init(s.moeScratch.ids),
+                                    routeWeights: .init(s.moeScratch.routeWeights),
+                                    experts: moeShape.experts, width: d, topK: moeShape.topK,
+                                    routeScale: w.routeScale)
+            } else {
+                moe.encodeRouter(enc, shape: moeShape, x: s.moeIn, xStride: d,
+                                 weight: lw.router.buffer, weightOffset: lw.router.offset,
+                                 bias: lw.routerBias.buffer, biasOffset: lw.routerBias.offset,
+                                 ids: s.moeScratch.ids, routeWeights: s.moeScratch.routeWeights,
+                                 tokens: t, routeScale: w.routeScale)
+            }
         }
         if t == 1, w.experts.decodeNeedsRoutes(layer: layer) {
             // A staged layer's decode visit: read the router's ids back, load
