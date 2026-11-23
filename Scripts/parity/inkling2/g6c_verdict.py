@@ -41,7 +41,11 @@ not affect the verdict or the exit code): (a) the runner against K4's exact
 fp32 reference, (b) a llama.cpp-rounding reference against tf Metal under
 today's bounds, (c1) the runner within 2x today's bounds of tf CPU, (c2) the
 runner no farther from tf CPU than the fp32 reference (+10%), and (d) the
-next-token quality check (next_token_quality.py). --precision-root defaults to
+next-token quality check (next_token_quality.py): runner minus llama.cpp Metal
+and minus CPU, each with a mean of at least -0.005 nats and a 95% lower bound no
+lower than llama.cpp's own Metal-minus-CPU lower bound on the same positions
+(the first form, a lower bound of at least -0.01, is printed beside it as
+superseded: llama.cpp fails it against itself). --precision-root defaults to
 $INK/results/k4/precision.
 
 Exit: 0 the gate passes with traces checked; 1 the gate fails; 3 the
@@ -188,7 +192,8 @@ def traces(goldens, tdir):
 EXACT_BOUNDS = {"mean_kl": 0.0015, "p95_kl": 0.005, "max_dlp": 0.1}  # 5 x K4's trace02 runner-vs-fp32
 EXPERT_AGREEMENT_MIN = 0.98
 LLAMA_MODES = ("llamaExperts", "llamaCPU")
-QUALITY_MARGIN = 0.01  # nats
+QUALITY_MARGIN = 0.01  # nats; the superseded first form of (d)
+QUALITY_MEAN_MIN = -0.005  # nats; the corrected (d)
 
 
 def fmt4(x):
@@ -283,12 +288,23 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
     if rs:
         rng = __import__("random").Random(20261123)
         d = {"measure": measure, "positions": len(rs), "prompts": used, "missing": missing, "pairs": {}}
+        # llama.cpp against itself on the same positions: the corrected rule's yardstick
+        mc = [r[3] - r[4] for r in rs]
+        mc_lo, mc_hi = ntq.boot(mc, 10000, rng)
+        d["llama_metal_minus_cpu"] = {"mean": ntq.mean(mc), "ci95": [mc_lo, mc_hi]}
         for k, name in ((1, "metal"), (2, "cpu")):
             diffs = [r[2] - r[2 + k] for r in rs]
             lo, hi = ntq.boot(diffs, 10000, rng)
-            d["pairs"][f"runner - {name}"] = {"mean": ntq.mean(diffs), "ci95": [lo, hi],
-                                              "pass": finite(lo) and lo >= -QUALITY_MARGIN}
+            mean_d = ntq.mean(diffs)
+            d["pairs"][f"runner - {name}"] = {
+                "mean": mean_d, "ci95": [lo, hi],
+                # corrected: mean >= -0.005 and lower bound >= llama.cpp's own Metal - CPU lower bound
+                "pass": finite(mean_d) and mean_d >= QUALITY_MEAN_MIN and finite(lo) and lo >= mc_lo,
+                # superseded first form: lower bound >= -0.01 (fails llama.cpp against itself)
+                "pass_superseded": finite(lo) and lo >= -QUALITY_MARGIN}
         d["pass"] = all(v["pass"] for v in d["pairs"].values())
+        d["pass_superseded"] = all(v["pass_superseded"] for v in d["pairs"].values())
+        d["llama_passes_superseded"] = finite(mc_lo) and mc_lo >= -QUALITY_MARGIN
         out["d"] = d
     return out
 
@@ -309,9 +325,15 @@ def print_rebased(rb):
         print("  (d) quality: no data")
     else:
         pairs = "; ".join(f"{k} {v['mean']:+.4f} [{v['ci95'][0]:+.4f}, {v['ci95'][1]:+.4f}]" for k, v in d["pairs"].items())
+        mc = d["llama_metal_minus_cpu"]
         print(f"  (d) quality ({d['measure']}, {d['positions']} positions, {', '.join(d['prompts'])}"
-              + (f"; missing {', '.join(d['missing'])}" if d["missing"] else "") + f"): {pairs}: "
-              + ("pass" if d["pass"] else f"FAIL (a lower bound below -{QUALITY_MARGIN})"))
+              + (f"; missing {', '.join(d['missing'])}" if d["missing"] else "") + f"): {pairs}; "
+              + f"llama.cpp Metal - CPU {mc['mean']:+.4f} [{mc['ci95'][0]:+.4f}, {mc['ci95'][1]:+.4f}]")
+        print(f"      corrected (mean >= {QUALITY_MEAN_MIN}, lower bound >= llama.cpp's own Metal - CPU lower bound): "
+              + ("pass" if d["pass"] else "FAIL"))
+        print(f"      superseded: fails llama.cpp against itself (lower bound >= -{QUALITY_MARGIN}): "
+              + ("pass" if d["pass_superseded"] else "FAIL")
+              + ("" if d["llama_passes_superseded"] else f" (llama.cpp Metal - CPU: FAIL too)"))
 
 
 def ink_dir():
