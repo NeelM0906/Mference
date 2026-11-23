@@ -76,6 +76,9 @@ public struct Model {
     let packedExpertsLayout: PackedExpertsLayout
     let manifest: Manifest
     let directoryURL: URL
+    /// The validated routed-expert layout of an `inkling2Loop` install, set
+    /// once at load; nil for every other family.
+    let validatedInkling2Experts: Inkling2ExpertLayout?
 
     /// Lazy state. Held inside a reference box so `Model` can stay a struct
     /// while still letting accessors mutate layer state via a serial queue.
@@ -110,7 +113,8 @@ public struct Model {
          residentIndex: ResidentIndex,
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
-         directoryURL: URL) {
+         directoryURL: URL,
+         inkling2ExpertLayout: Inkling2ExpertLayout? = nil) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -121,6 +125,7 @@ public struct Model {
         self.packedExpertsLayout = packedExpertsLayout
         self.manifest = manifest
         self.directoryURL = directoryURL
+        self.validatedInkling2Experts = inkling2ExpertLayout
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "mference.expert-streamers")
         self.prefillSweepBypassesPageCache = Self.prefillSweepBypassesPageCache(
@@ -142,16 +147,20 @@ public struct Model {
         guard case .pread(let slotCount) = streamingMode else { return false }
         // File bytes, since those are what the page cache would hold.
         let poolBytes = layout.layers.reduce(UInt64(0)) { total, layer in
-            total + UInt64(layer.experts.count) * layout.storedExpertStride
+            total + UInt64(layer.experts.count) * layout.storedExpertStride(of: layer)
         }
-        let routedLayers = UInt64(layout.layers.filter { !$0.experts.isEmpty }.count)
-        let slotBytes = UInt64(PreadExpertStreamer.slotAllocationSize(
-            expertStride: layout.expertStride))
+        // Each routed layer's slots are sized from its own stride (the single
+        // stride for every layout without per-layer strides).
+        let wiredSlotBytes = layout.layers.enumerated().reduce(UInt64(0)) { total, entry in
+            guard !entry.element.experts.isEmpty else { return total }
+            return total + UInt64(slotCount) * UInt64(PreadExpertStreamer.slotAllocationSize(
+                expertStride: layout.expertStride(layer: entry.offset)))
+        }
         return RuntimeConfiguration.prefillSweepBypassesPageCache(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes,
             expertPoolBytes: poolBytes,
-            wiredSlotBytes: UInt64(slotCount) * routedLayers * slotBytes,
+            wiredSlotBytes: wiredSlotBytes,
             coreWeightsBytes: coreWeightsBytes)
     }
 
@@ -521,14 +530,16 @@ public struct Model {
             }
             streamersBox.layerVerified[L] = true
         }
+        // A layout with per-layer strides sizes each layer by its own stride;
+        // otherwise both accessors return the layout's single values.
         let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.storedExpertStride
+            * packedExpertsLayout.storedExpertStride(layer: L)
         let layout = StreamLayout(
             path: url.path,
             streamOffset: 0,
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-            expertStride: packedExpertsLayout.expertStride,
+            expertStride: packedExpertsLayout.expertStride(layer: L),
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
             storage: packedExpertsLayout.storage)
         switch streamingMode {
@@ -682,6 +693,16 @@ extension Model {
 
         let residentIndex = try ResidentIndexReader.load(fileURL: weightsURL)
         let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
+        // Per-layer strides are the format of an install copied from a GGUF,
+        // which proves its expert formats, shapes and strides against the
+        // baseline before anything is mapped; no other family writes them.
+        var inkling2Experts: Inkling2ExpertLayout?
+        if expecting.family == .inkling2Loop {
+            inkling2Experts = try Inkling2ExpertLayout.validated(layout: layout, config: expecting)
+        } else if layout.hasPerLayerStrides {
+            throw ModelError.indexCorrupt(
+                detail: "layout.json: per-layer expert strides are not a \(expecting.family.rawValue) format")
+        }
 
         // The resident index must account for the complete weights file.
         let attrs = try FileManager.default.attributesOfItem(atPath: weightsURL.path)
@@ -737,7 +758,8 @@ extension Model {
             residentIndex: residentIndex,
             packedExpertsLayout: layout,
             manifest: manifest,
-            directoryURL: directoryURL)
+            directoryURL: directoryURL,
+            inkling2ExpertLayout: inkling2Experts)
         model.integrityFallbackDetail = fallbackDetail
         if case .resident = streamingMode {
             let warmupStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -801,7 +823,7 @@ extension Model {
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")
             }
-            let storedStride = layout.storedExpertStride
+            let storedStride = layout.storedExpertStride(of: layer)
             guard storedStride % pageSize == 0 else {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) stored stride \(storedStride) is not page-aligned")
