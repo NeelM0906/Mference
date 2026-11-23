@@ -1834,3 +1834,94 @@ void inkling2_attention_prefill_tensorops(
     }
 }
 #endif
+
+// ============================================================================
+// MoE router at one token (decode). The prefill router (`inkling2_moe_router`)
+// tiles 32 tokens on one threadgroup, so at one token a single threadgroup
+// streams the 1.2 MB router matrix (210 us). Here: the logits `W x` by one
+// simdgroup per expert row, then that kernel's selection for one token (the
+// same code: sigmoid of the clamped logit, top-k of sigmoid + bias with ties to
+// the lower expert, weights sigmoid / (sum + 1e-20) * routeScale).
+// ============================================================================
+
+struct Inkling2RouterDecodeParams {
+    uint  width;          // the hidden size (a multiple of 4)
+    uint  experts;        // up to 128
+    uint  topK;           // up to 32
+    float routeScale;
+};
+
+// Grid: ceil(experts / 2) threadgroups of 256: two expert rows per threadgroup,
+// each row's dot product split over four simdgroups (a quarter of the width each).
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_router_logits_decode(
+    constant Inkling2RouterDecodeParams& p [[buffer(0)]],
+    device const float* x       [[buffer(1)]],    // [width]
+    device const float* weight  [[buffer(2)]],    // [experts][width]
+    device float*       logits  [[buffer(3)]],    // [experts]
+    uint   tg    [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]])
+{
+    threadgroup float partial[8];
+    const uint e = tg * 2u + sgitg / 4u, q = sgitg % 4u;
+    const uint quarter = p.width / 16u;                 // float4s in a quarter row
+    float acc = 0.0f;
+    if (e < p.experts) {
+        device const float4* w = (device const float4*)(weight + ulong(e) * p.width) + q * quarter;
+        device const float4* xv = (device const float4*)x + q * quarter;
+        for (uint i = lane; i < quarter; i += 32u) { acc += dot(w[i], xv[i]); }
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) { partial[sgitg] = acc; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 2u) {
+        const uint row = tg * 2u + tid;
+        if (row < p.experts) {
+            logits[row] = (partial[tid * 4u] + partial[tid * 4u + 1u]) + (partial[tid * 4u + 2u] + partial[tid * 4u + 3u]);
+        }
+    }
+}
+
+// Grid: one threadgroup of 32 (one simdgroup); lane l holds experts l + 32 j.
+[[kernel, max_total_threads_per_threadgroup(32)]]
+void inkling2_router_select_decode(
+    constant Inkling2RouterDecodeParams& p [[buffer(0)]],
+    device const float* logits       [[buffer(1)]],
+    device const float* bias         [[buffer(2)]],
+    device uint*        ids          [[buffer(3)]],
+    device float*       routeWeights [[buffer(4)]],
+    ushort lane [[thread_index_in_simdgroup]])
+{
+    float prob[4], sel[4];
+    for (uint j = 0; j < 4; ++j) {
+        const uint e = lane + 32u * j;
+        const float l = e < p.experts ? clamp(logits[e], -80.0f, 80.0f) : 0.0f;
+        prob[j] = e < p.experts ? 1.0f / (1.0f + exp(-l)) : 0.0f;
+        sel[j] = e < p.experts ? prob[j] + bias[e] : -FLT_MAX;
+    }
+    // Lane r keeps rank r; the sum runs in rank order.
+    float sum = 0.0f, myProb = 0.0f;
+    uint myId = 0u;
+    for (uint r = 0; r < p.topK; ++r) {
+        float best = sel[0];
+        uint bestE = lane;
+        for (uint j = 1; j < 4; ++j) {
+            if (sel[j] > best) { best = sel[j]; bestE = lane + 32u * j; }
+        }
+        const float top = simd_max(best);
+        const uint chosen = simd_min(best == top ? bestE : 0xFFFFFFFFu);
+        float chosenProb = 0.0f;
+        for (uint j = 0; j < 4; ++j) {
+            if (lane + 32u * j == chosen) { chosenProb = prob[j]; sel[j] = -FLT_MAX; }
+        }
+        chosenProb = simd_sum(chosenProb);
+        sum += chosenProb;
+        if (lane == r) { myProb = chosenProb; myId = chosen; }
+    }
+    if (lane < p.topK) {
+        ids[lane] = myId;
+        routeWeights[lane] = (myProb / (sum + 1e-20f)) * p.routeScale;
+    }
+}
