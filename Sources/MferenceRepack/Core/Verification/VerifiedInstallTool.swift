@@ -121,6 +121,10 @@ public enum VerifiedInstallTool {
         let layer: Int
         let file: String
         let experts: [Expert]
+        /// Per-layer stride; only an install copied from a GGUF writes it,
+        /// since its block formats vary by layer. Absent, every layer uses
+        /// the layout's single stride.
+        let expertStride: UInt64?
     }
 
     private struct Expert: Decodable {
@@ -220,7 +224,16 @@ public enum VerifiedInstallTool {
             throw RepackError.configurationInvalid(detail: "packed expert layout layer count mismatch")
         }
         for layer in layout.layers {
-            let layerStride = layout.expertStride
+            let layerStride = layer.expertStride ?? layout.expertStride
+            // Only a per-layer stride needs its own check: the single stride
+            // was checked above.
+            if let own = layer.expertStride {
+                guard own > 0, own % pageSize == 0, own <= layout.expertStride else {
+                    throw RepackError.configurationInvalid(
+                        detail: "packed_experts/\(layer.file) stride \(own) is not page-aligned "
+                            + "or exceeds the layout's \(layout.expertStride)")
+                }
+            }
             let expectedLayerSize = UInt64(layout.expertsPerLayer) * layerStride
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")

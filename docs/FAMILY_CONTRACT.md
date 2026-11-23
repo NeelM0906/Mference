@@ -484,6 +484,15 @@ its expert's F32 factor (`ffn_gate_up_exps.scale`, `ffn_down_exps.scale`).
 | `expertUpSoftcap` | `Double` | Soft cap `c'` on the expert up pre-activation (`activation.situ_linear_beta`). | 25.0 |
 | `routedExpertFormats` | `[String]` | GGML block format of each stored layer's routed experts, fused gate-up and down alike. Empty means one format for all layers, set by `manifest.quant.routedExpert`. | `"NVFP4"` on layers 0–19, `"Q8_0"` on 20–23 |
 
+**Install layout.** Each expert is one blob in `packed_experts/layer_LL.bin`:
+the fused gate-up rows at offset 0, the down rows at the next 256-byte
+boundary, both the GGUF's own block bytes, the blob padded to 16 KiB. Because
+the format differs by layer, `layout.json` gives every layer its own
+`expertStride` and `format` (4,489,216 bytes for NVFP4, 8,470,528 for Q8_0;
+the top-level `expertStride` is the largest), and `Model.load` checks them
+against `routedExpertFormats` (`Inkling2ExpertLayout`). A layout without
+per-layer strides, every other family's, reads exactly as before.
+
 The rest of the file's formats are per tensor, not axes: the runtime
 dispatches on each resident tensor's index dtype (`GGMLBlockFormat`: Q8_0 for
 attention, embedding and head; F32 for the norms, router, convolutions,

@@ -142,7 +142,7 @@ public struct Model {
         guard case .pread(let slotCount) = streamingMode else { return false }
         // File bytes, since those are what the page cache would hold.
         let poolBytes = layout.layers.reduce(UInt64(0)) { total, layer in
-            total + UInt64(layer.experts.count) * layout.storedExpertStride
+            total + UInt64(layer.experts.count) * layout.storedExpertStride(of: layer)
         }
         let routedLayers = UInt64(layout.layers.filter { !$0.experts.isEmpty }.count)
         let slotBytes = UInt64(PreadExpertStreamer.slotAllocationSize(
@@ -521,14 +521,16 @@ public struct Model {
             }
             streamersBox.layerVerified[L] = true
         }
+        // A layout with per-layer strides sizes each layer by its own stride;
+        // otherwise both accessors return the layout's single values.
         let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.storedExpertStride
+            * packedExpertsLayout.storedExpertStride(layer: L)
         let layout = StreamLayout(
             path: url.path,
             streamOffset: 0,
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-            expertStride: packedExpertsLayout.expertStride,
+            expertStride: packedExpertsLayout.expertStride(layer: L),
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
             storage: packedExpertsLayout.storage)
         switch streamingMode {
@@ -682,6 +684,11 @@ extension Model {
 
         let residentIndex = try ResidentIndexReader.load(fileURL: weightsURL)
         let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
+        // An install copied from a GGUF proves its per-layer expert formats,
+        // shapes and strides against the baseline before anything is mapped.
+        if expecting.family == .inkling2Loop {
+            _ = try Inkling2ExpertLayout.validated(layout: layout, config: expecting)
+        }
 
         // The resident index must account for the complete weights file.
         let attrs = try FileManager.default.attributesOfItem(atPath: weightsURL.path)
@@ -801,7 +808,7 @@ extension Model {
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")
             }
-            let storedStride = layout.storedExpertStride
+            let storedStride = layout.storedExpertStride(of: layer)
             guard storedStride % pageSize == 0 else {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) stored stride \(storedStride) is not page-aligned")
