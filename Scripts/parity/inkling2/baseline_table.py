@@ -27,7 +27,8 @@ def main():
             continue
         rj = json.load(open(os.path.join(p, "run.json"))) if os.path.exists(os.path.join(p, "run.json")) else {}
         jobs = open(os.path.join(p, "jobs.log")).read().strip().splitlines() if os.path.exists(os.path.join(p, "jobs.log")) else []
-        jstart = next((l.split(": ")[-1] for l in jobs if "at start" in l), "?")
+        # jobs.log is appended to: the last "at start" line belongs to the run in run.json
+        jstart = next((l.split(": ")[-1] for l in reversed(jobs) if "at start" in l), "?")
         out = open(os.path.join(p, "stdout.log"), errors="replace").read() if os.path.exists(os.path.join(p, "stdout.log")) else ""
         err = open(os.path.join(p, "stderr.log"), errors="replace").read() if os.path.exists(os.path.join(p, "stderr.log")) else ""
         pp = tg = ttft = ptok = None
@@ -49,7 +50,10 @@ def main():
             m2 = re.search(r"\beval time =\s*([\d.]+) ms /\s*(\d+) runs\s*\(\s*([\d.]+) ms per token,\s*([\d.]+) tokens per second\)", err)
             if m2:
                 tg = m2.group(4)
-                ttft = f"{(pe_ms + float(m2.group(3))) / 1000:.2f}"
+            # llama-completion samples the first token from the prefill logits
+            # (n new tokens take n - 1 eval runs), so the first token exists
+            # when prompt eval ends: TTFT = prompt eval time (load excluded)
+            ttft = f"{pe_ms / 1000:.2f}"
         rows.append((st, ptok or "?", pp or "-", tg or "-", ttft or "-", rj.get("peak_footprint_bytes"), rj.get("max_rss_bytes"),
                      rj.get("swap_start_mb"), rj.get("swap_end_mb"), rj.get("swap_delta_mb"), rj.get("exit"), rj.get("wall_s"), jstart))
     print("| Stage | Prompt tok | Prefill tok/s | Decode tok/s | TTFT s | Peak footprint GB | Max RSS GB | Swap before / after MB | Delta | Exit | Wall s | Other swift jobs at start |")

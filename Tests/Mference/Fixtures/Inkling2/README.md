@@ -42,12 +42,15 @@ products on the CPU, everything else on Metal), n_ctx 4096, n_ubatch 512,
   greedy generated ids (argmax, ties to the lower id), text, pieces, stop.
 - `g01-capital`, `g05-wetlands`, `g06-chat-none`: `logprobs.json`, the top 20
   log-probabilities (log-softmax over the 200,058 real tokens) at every
-  prompt and generated position, `[[id, logprob], ...]` plus the next token.
+  position that predicts a token: each prompt position and each generated
+  token except the last (n_prompt + n_gen - 1 rows), `[[id, logprob], ...]`
+  plus the next token.
 - `trace01/trace.json`: for each of the 48 layer visits (layers 0-5, the
   core 6-17 three times, 18-23) the cache slot, the physical layer, and per
   position the 8 routed expert ids with their weights (normalized, scaled by
-  8). The per-visit hidden states themselves (2.2 MB) are kept with the
-  program's results, not here.
+  8). The per-visit hidden states (`hidden_after_visit.f32`, 2.2 MB) and
+  `result_norm.f32`, which trace.json names, are kept with the program's
+  results, not here.
 - `noise-metal-vs-cpu.json`: the same prompts run CPU-only (no GPU device,
   no op offload, no weight repacking) compared with these: the reference's
   own backend noise, from which the G6 tolerances were proposed. Metal run

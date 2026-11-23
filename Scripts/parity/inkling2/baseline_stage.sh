@@ -4,7 +4,7 @@
 #
 #   baseline_stage.sh <build-dir> <out-dir> <stage>
 #
-# Stages (run shortest first, one per `lock.sh run --quiet` hold; stop at the
+# Stages (run shortest first, one per `model-hold.sh --timing` hold; stop at the
 # first swap growth, exit 70):
 #   bench-512    llama-bench -p 512   -n 128 -r 3 (synthetic tokens; prefill and decode tok/s)
 #   bench-4k     llama-bench -p 4096  -n 0   -r 3
@@ -30,7 +30,7 @@ case "$STAGE" in
   *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
 # Coordinator rule (2026-11-23): a timing stage runs with at most one other
-# swift build/test job on the machine. The quiet flag (lock.sh run --quiet)
+# swift build/test job on the machine. The quiet flag (set by model-hold.sh)
 # stops new builds; wait up to 30 min for running jobs to drop to <= 1, else
 # refuse (exit 71). Nothing is stopped. The counts are recorded for baseline.md.
 mkdir -p "$OUT/$STAGE"
