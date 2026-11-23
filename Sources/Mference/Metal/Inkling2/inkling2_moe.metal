@@ -337,7 +337,8 @@ constant constexpr uint kI2RouterLogitLd = kI2RouterExperts + 4;
 
 // logits = W x in FP32 (W [128][D] F32, x [T][x_stride] F32), then per token
 // sigmoid, top-8 of (sigmoid + bias) with ties to the lower expert, weights
-// = sigmoid / max(sum, 2^-14) * route_scale. Writes ids [T][top_k] and
+// = sigmoid / (sum + 1e-20) * route_scale (`expert_weights_norm_eps`), FP32
+// throughout as upstream runs this router. Writes ids [T][top_k] and
 // weights [T][top_k]. 32 tokens per threadgroup of 128 threads.
 kernel void inkling2_moe_router(
     device const float* x                [[buffer(0)]],
@@ -433,7 +434,7 @@ kernel void inkling2_moe_router(
             const uint chosen = simd_min(best == top ? best_e : 0xFFFFFFFFu);
             float chosen_prob = 0.0f;
             I2_UNROLL for (uint j = 0; j < 4; ++j) {
-                if (lane + 32u * j == chosen) { chosen_prob = prob[j]; sel[j] = -INFINITY; }
+                if (lane + 32u * j == chosen) { chosen_prob = prob[j]; sel[j] = -FLT_MAX; }
             }
             chosen_prob = simd_sum(chosen_prob);
             sum += chosen_prob;
@@ -442,7 +443,7 @@ kernel void inkling2_moe_router(
         if (lane < top_k) {
             const ulong at = ulong(t) * top_k + lane;
             ids[at] = my_id;
-            route_weights[at] = (my_prob / max(sum, 6.103515625e-5f)) * route_scale;
+            route_weights[at] = (my_prob / (sum + 1e-20f)) * route_scale;
         }
     }
 }

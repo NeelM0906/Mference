@@ -57,7 +57,9 @@ struct Inkling2ExpertPool {
     let buffer: MTLBuffer
     let offset: Int
     let encoding: Inkling2MoEEncoding
-    let experts: Int
+    /// The layer shape the pool was validated against; every encode checks it.
+    let shape: Inkling2MoEShape
+    var experts: Int { shape.experts }
     let expertStride: Int
     let gateUpOffset: Int
     let downOffset: Int
@@ -76,6 +78,7 @@ struct Inkling2ExpertPool {
          expertStride: Int, gateUpOffset: Int = 0, downOffset: Int? = nil,
          gateUpScales: MTLBuffer, gateUpScalesOffset: Int = 0,
          downScales: MTLBuffer, downScalesOffset: Int = 0) throws {
+        precondition(shape.isSupported, "unsupported Inkling 2 expert shape \(shape)")
         let down = downOffset ?? gateUpOffset + shape.gateUpBytes(encoding)
         for (name, value) in [("offset", offset), ("expert stride", expertStride),
                               ("gate-up offset", gateUpOffset), ("down offset", down)]
@@ -102,7 +105,7 @@ struct Inkling2ExpertPool {
         self.buffer = buffer
         self.offset = offset
         self.encoding = encoding
-        self.experts = shape.experts
+        self.shape = shape
         self.expertStride = expertStride
         self.gateUpOffset = gateUpOffset
         self.downOffset = down
@@ -284,6 +287,9 @@ final class Inkling2MoEKernels {
                       tokens: Int, routeScale: Float = 8) {
         precondition(shape.experts == Self.routerExperts, "the router kernel is built for 128 experts")
         precondition(shape.d % 32 == 0 && xStride % 4 == 0 && xStride >= shape.d && tokens > 0)
+        precondition(shape.topK <= 32, "one lane per rank")
+        precondition(xOffset % 16 == 0 && weightOffset % 16 == 0, "the router reads float4")
+        precondition(biasOffset % 4 == 0 && idsOffset % 4 == 0 && routeWeightsOffset % 4 == 0)
         var t = UInt32(tokens), d = UInt32(shape.d), stride = UInt32(xStride), k = UInt32(shape.topK)
         var scale = routeScale
         encoder.setComputePipelineState(router)
@@ -357,6 +363,7 @@ final class Inkling2MoEKernels {
     func encodeGroupedExperts(_ encoder: MTLComputeCommandEncoder, hidden: MTLBuffer, hiddenOffset: Int = 0,
                               hiddenStride: Int, pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch) {
         let shape = scratch.shape
+        precondition(pool.shape == shape, "pool and scratch shapes differ")
         precondition(hiddenStride % 4 == 0 && hiddenStride >= shape.d && hiddenOffset % 8 == 0)
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
         var p = Self.params(shape, pool: pool, hiddenStride: hiddenStride)
@@ -417,8 +424,11 @@ final class Inkling2MoEKernels {
                       x: MTLBuffer, xOffset: Int = 0, ids: MTLBuffer, idsOffset: Int = 0,
                       routeWeights: MTLBuffer, routeWeightsOffset: Int = 0, pool: Inkling2ExpertPool,
                       activation: MTLBuffer, activationOffset: Int = 0, out: MTLBuffer, outOffset: Int = 0) {
-        precondition(shape.f % Self.decodeRowsPerThreadgroup == 0 && shape.d % Self.decodeRowsPerThreadgroup == 0)
-        precondition(xOffset % 8 == 0)
+        precondition(pool.shape == shape, "pool and decode shapes differ")
+        precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0
+                     && shape.d % Self.decodeRowsPerThreadgroup == 0)
+        precondition(xOffset % 8 == 0 && activationOffset % 8 == 0, "the decode kernels read half4")
+        precondition(idsOffset % 4 == 0 && routeWeightsOffset % 4 == 0 && outOffset % 4 == 0)
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
         var p = Self.params(shape, pool: pool, hiddenStride: shape.d)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)

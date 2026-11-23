@@ -12,9 +12,10 @@ import MferenceValidationSupport
 @Suite(.serialized) struct Inkling2MoEKernelTests {
     static let small = Inkling2MoEShape(d: 256, f: 128, experts: 8, topK: 4)
 
-    /// Bound for the routed sum against the FP32 reference: FP16 activations
-    /// (rel 2^-11) feed a 128-deep FP32 product, plus FP16-rounded Q8_0 weights.
-    static let routedTolerance: Float = 4e-3
+    /// Bound for the routed sum against the FP32 reference: one FP16 rounding
+    /// of the activation between two FP32 products (rel 2^-11 each), plus
+    /// FP16-rounded Q8_0 weights in the grouped tiles.
+    static let routedTolerance: Float = Tolerance.fp16Reduction
 
     private static func expectedRows(_ synthetic: Inkling2SyntheticPool, hidden: [[Float]],
                                      ids: [UInt32], weights: [Float], topK: Int) -> [[Float]] {
@@ -60,10 +61,13 @@ import MferenceValidationSupport
         #expect(worst < Self.routedTolerance, "worst row rel err \(worst)")
     }
 
-    @Test func routePlanGroupsEveryPairOnce() throws {
+    /// 128 experts runs the planner's threadgroup as four simdgroups (thread
+    /// 0's prefix sums published by the barrier); 16 as one.
+    @Test(arguments: [16, 128])
+    func routePlanGroupsEveryPairOnce(experts: Int) throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
-        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 8)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: experts, topK: 8)
         let tokens = 300
         // Skewed: expert 3 takes most tokens, so it needs several blocks.
         var routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2A04)
@@ -105,11 +109,14 @@ import MferenceValidationSupport
         let kernels = try Inkling2MoEKernels(context: context)
         let shape = Inkling2MoEShape(d: 256, f: 128, experts: 128, topK: 8)
         let tokens = 37
+        let tiedToken = 33   // an all-zero row: every logit 0, so the ties pick experts 0-7
         var rng = SeedTree(0x2A05).key("router")
         let weight = (0..<(128 * shape.d)).map { _ in rng.uniform(-0.1, 0.1) }
         let bias = (0..<128).map { _ in rng.uniform(-0.2, 0.2) }
         let xStride = shape.d + 4
-        let x = (0..<(tokens * xStride)).map { _ in rng.uniform(-1, 1) }
+        var x = (0..<(tokens * xStride)).map { _ in rng.uniform(-1, 1) }
+        for i in 0..<xStride { x[tiedToken * xStride + i] = 0 }
+        let tiedBias = bias.map { _ in Float(0) }
         func buffer(_ v: [Float]) -> MTLBuffer {
             v.withUnsafeBytes { context.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)! }
         }
@@ -120,6 +127,16 @@ import MferenceValidationSupport
                                  bias: buffer(bias), ids: ids, routeWeights: weights, tokens: tokens)
         }
         #expect(cb.status == .completed)
+        // Ties need a zero bias too: route the tied row again on its own.
+        let tiedIds = context.device.makeBuffer(length: 32, options: .storageModeShared)!
+        let tiedWeights = context.device.makeBuffer(length: 32, options: .storageModeShared)!
+        _ = Inkling2MoETestSupport.run(context) {
+            kernels.encodeRouter($0, shape: shape, x: buffer(x), xOffset: tiedToken * xStride * 4, xStride: xStride,
+                                 weight: buffer(weight), bias: buffer(tiedBias), ids: tiedIds,
+                                 routeWeights: tiedWeights, tokens: 1)
+        }
+        #expect(Inkling2MoETestSupport.read(tiedIds, as: UInt32.self, count: 8) == [0, 1, 2, 3, 4, 5, 6, 7])
+        #expect(Inkling2MoETestSupport.read(tiedWeights, as: Float.self, count: 8) == [Float](repeating: 1, count: 8))
         let gotIds = Inkling2MoETestSupport.read(ids, as: UInt32.self, count: tokens * 8)
         let gotWeights = Inkling2MoETestSupport.read(weights, as: Float.self, count: tokens * 8)
         for t in 0..<tokens {
@@ -128,7 +145,7 @@ import MferenceValidationSupport
             let route = Inkling2RouterRef.route(logits: logits, selectionBias: bias)
             #expect(gotIds[(t * 8)..<(t * 8 + 8)].map(Int.init) == route.ids, "token \(t)")
             let err = RelError.compute(actual: Array(gotWeights[(t * 8)..<(t * 8 + 8)]), reference: route.weights)
-            #expect(err < 1e-5, "token \(t) weights rel err \(err)")
+            #expect(err < Tolerance.identity, "token \(t) weights rel err \(err)")
         }
     }
 
@@ -193,6 +210,45 @@ import MferenceValidationSupport
         let b = Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: tokens * shape.d)
         let err = RelError.compute(actual: a, reference: b)
         #expect(err < (encoding == .nvfp4 ? 2e-3 : Self.routedTolerance), "rel err \(err)")
+    }
+
+    /// NVFP4 scale bytes over all 256 values (0x00, 0x7F, sign bit,
+    /// subnormal and exponent-15 bytes; tile values up to 6 x 480), as the
+    /// real file's bytes 95-126 sit at the top of the range. Per-expert
+    /// scales near 1e-4, as in the file, bring the products back to O(1).
+    @Test func nvfp4EveryScaleByteMatchesReference() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 8, topK: 4)
+        let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: .nvfp4, shape: shape,
+                                                       seed: 0x2A0F, quantized: false, fullScaleRange: true,
+                                                       expertScales: 5e-5...2e-4)
+        let tokens = 70
+        let (hidden, rows) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d,
+                                                               d: shape.d, seed: 0x2A10)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2A11)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+        Inkling2MoETestSupport.write(routes.ids, to: scratch.ids)
+        Inkling2MoETestSupport.write(routes.weights, to: scratch.routeWeights)
+        let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared)!
+        let decodeOut = context.device.makeBuffer(length: shape.d * 4, options: .storageModeShared)!
+        let activation = context.device.makeBuffer(length: shape.topK * shape.f * 2, options: .storageModeShared)!
+        _ = Inkling2MoETestSupport.run(context) { encoder in
+            kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: synthetic.pool,
+                                  scratch: scratch, tokens: tokens, out: out, outStride: shape.d)
+        }
+        _ = Inkling2MoETestSupport.run(context) {
+            kernels.encodeDecode($0, shape: shape, x: hidden, ids: scratch.ids, routeWeights: scratch.routeWeights,
+                                 pool: synthetic.pool, activation: activation, out: decodeOut)
+        }
+        let want = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
+        let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
+        let err = RelError.compute(actual: got, reference: want.flatMap { $0 })
+        #expect(err < Self.routedTolerance, "prefill rel err \(err)")
+        let decodeErr = RelError.compute(actual: Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d),
+                                         reference: want[0])
+        #expect(decodeErr < Self.routedTolerance, "decode rel err \(decodeErr)")
+        #expect(!got.contains { !$0.isFinite })
     }
 
     /// Production shape (D 2304, F 1152) with random blocks: one grouped

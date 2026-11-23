@@ -9,8 +9,10 @@ public enum Inkling2ExpertInputQuantization: Sendable, Equatable {
     case none
     /// ggml's CPU product (`vec_dot_type = Q8_0` for NVFP4 and Q8_0 weights):
     /// each 32-value block of the input is rounded through Q8_0. Stock
-    /// llama.cpp b12635 runs the NVFP4 experts on the CPU (Metal has no NVFP4
-    /// kernel there), so this is what the base reference does for layers 0-19.
+    /// llama.cpp runs the NVFP4 experts on the CPU (its Metal backend has no
+    /// NVFP4 kernel), so this is what the base reference does for layers
+    /// 0-19 only; see `baseReference(for:)`. The mode itself applies to
+    /// whatever layer it is given.
     case q8_0Blocks
     /// `hf_quant_config.json` `required_activation_quantization`: NVFP4 with
     /// a per-token outer scale (`amax / 1536`) and the four-over-six block
@@ -18,6 +20,13 @@ public enum Inkling2ExpertInputQuantization: Sendable, Equatable {
     /// for the vendor's 8-bit experts. Routing weights apply before the down
     /// projection's quantizer, as in the vendor's serving code.
     case vendorRequired
+
+    /// What the base reference (stock llama.cpp, Metal build) does per layer:
+    /// its NVFP4 products run on the CPU with Q8_0-rounded inputs, its Q8_0
+    /// products on Metal with FP16 inputs (`$INK/ref/TENSORS.md`).
+    public static func baseReference(for encoding: Inkling2ExpertEncoding) -> Inkling2ExpertInputQuantization {
+        encoding == .nvfp4 ? .q8_0Blocks : .none
+    }
 }
 
 /// Byte views of one expert, laid out as in the GGUF: the merged gate-up
@@ -294,7 +303,8 @@ public enum Inkling2ActivationQuant {
 
 /// FP32 reference for the router of one layer visit (`build_moe_ffn` with
 /// sigmoid gating, `exp_probs_b` selection bias, normalized weights and
-/// `expert_weights_scale` 8).
+/// `expert_weights_scale` 8; `inkling2.cpp` runs the router in F32 and sets
+/// `expert_weights_norm_eps` to 1e-20).
 public enum Inkling2RouterRef {
     public struct Route: Equatable {
         public let ids: [Int]
@@ -302,8 +312,9 @@ public enum Inkling2RouterRef {
     }
 
     public static let routeScale: Float = 8
-    /// ggml clamps the weight sum to the smallest normal FP16.
-    public static let minimumWeightSum: Float = 6.103515625e-5
+    /// `expert_weights_norm_eps` for this architecture: the weights are
+    /// divided by `sum + 1e-20` (ggml's `scale_bias` branch), not clamped.
+    public static let weightNormEpsilon: Float = 1e-20
 
     /// Logits `W x` for the F32 router matrix `[experts][d]`.
     public static func logits(weight: [Float], experts: Int, x: [Float]) -> [Float] {
@@ -311,7 +322,7 @@ public enum Inkling2RouterRef {
     }
 
     /// Top-`k` by `sigmoid(logit) + bias` (a tie takes the lower expert),
-    /// weights from the unbiased sigmoid, normalized to sum 1, times 8.
+    /// weights from the unbiased sigmoid divided by their sum + 1e-20, times 8.
     public static func route(logits: [Float], selectionBias: [Float], topK: Int = 8,
                              routeScale: Float = routeScale) -> Route {
         precondition(logits.count == selectionBias.count && topK <= logits.count)
@@ -321,7 +332,7 @@ public enum Inkling2RouterRef {
             selection[$0] != selection[$1] ? selection[$0] > selection[$1] : $0 < $1
         }.prefix(topK).map { $0 }
         let chosen = ids.map { probs[$0] }
-        let sum = max(chosen.reduce(0, +), minimumWeightSum)
+        let sum = chosen.reduce(0, +) + weightNormEpsilon
         return Route(ids: ids, weights: chosen.map { $0 / sum * routeScale })
     }
 }

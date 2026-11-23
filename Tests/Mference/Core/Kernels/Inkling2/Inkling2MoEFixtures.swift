@@ -24,11 +24,14 @@ struct Inkling2SyntheticPool {
             gateUpScale: scales[e], downScale: scales[shape.experts + e])
     }
 
-    /// `quantized`: encode uniform weights with the reference encoders (small
-    /// shapes); otherwise random blocks. `keepBlobs: false` skips the CPU copy
-    /// (benchmarks).
+    /// `quantized`: encode weights with the reference encoders (small
+    /// shapes), each 16-value block at its own amplitude so block and
+    /// sub-block scales vary, at magnitudes that keep SITU out of saturation;
+    /// otherwise random blocks (`fullScaleRange`: NVFP4 scale bytes over all
+    /// 256 values). `keepBlobs: false` skips the CPU copy (benchmarks).
     static func make(device: MTLDevice, encoding: Inkling2MoEEncoding, shape: Inkling2MoEShape,
-                     seed: UInt64, quantized: Bool, keepBlobs: Bool = true,
+                     seed: UInt64, quantized: Bool, fullScaleRange: Bool = false,
+                     expertScales: ClosedRange<Float>? = nil, keepBlobs: Bool = true,
                      expertStride stride: Int? = nil) throws -> Inkling2SyntheticPool {
         var rng = SeedTree(seed).key("inkling2-pool-\(encoding)")
         let blobBytes = shape.expertBytes(encoding)
@@ -43,20 +46,32 @@ struct Inkling2SyntheticPool {
         for e in 0..<shape.experts {
             var blob: [UInt8]
             if quantized {
+                // NVFP4 layers carry a per-expert scale (about 0.013 here);
+                // Q8_0 layers do not, so their weights are that much smaller.
+                let base: Float = encoding == .nvfp4 ? 6 : 0.08
+                func row(_ k: Int) -> [Float] {
+                    var out: [Float] = []
+                    for _ in 0..<(k / 16) {
+                        let amplitude = base * Float(pow(2.0, Double(rng.uniform(-2, 2))))
+                        for _ in 0..<16 { out.append(rng.uniform(-1, 1) * amplitude) }
+                    }
+                    return out
+                }
                 blob = []
                 blob.reserveCapacity(blobBytes)
-                for _ in 0..<(2 * shape.f) { blob += reference.quantize((0..<shape.d).map { _ in rng.uniform(-6, 6) }) }
-                for _ in 0..<shape.d { blob += reference.quantize((0..<shape.f).map { _ in rng.uniform(-6, 6) }) }
+                for _ in 0..<(2 * shape.f) { blob += reference.quantize(row(shape.d)) }
+                for _ in 0..<shape.d { blob += reference.quantize(row(shape.f)) }
             } else {
-                blob = randomBlocks(encoding: encoding, bytes: blobBytes, rng: &rng)
+                blob = randomBlocks(encoding: encoding, bytes: blobBytes, rng: &rng, fullScaleRange: fullScaleRange)
             }
             blob.withUnsafeBufferPointer { src in
                 (base + e * expertStride).update(from: src.baseAddress!, count: blobBytes)
             }
             if keepBlobs { blobs.append(blob) }
         }
+        let range = expertScales ?? 0.006...0.02
         let scales: [Float] = (0..<(2 * shape.experts)).map { _ in
-            encoding == .nvfp4 ? rng.uniform(0.006, 0.02) : 1
+            encoding == .nvfp4 ? rng.uniform(range.lowerBound, range.upperBound) : 1
         }
         guard let scaleBuffer = scales.withUnsafeBytes({
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
@@ -68,10 +83,13 @@ struct Inkling2SyntheticPool {
         return Inkling2SyntheticPool(encoding: encoding, shape: shape, blobs: blobs, scales: scales, pool: pool)
     }
 
-    /// Random blocks: NVFP4 scales in [0.25, 2) and any codes; Q8_0 scales
-    /// in [1/256, 1/64) and any int8. Both whole-block layouts, so a blob of
-    /// `bytes` is a whole number of blocks.
-    static func randomBlocks(encoding: Inkling2MoEEncoding, bytes: Int, rng: inout SplitMix64) -> [UInt8] {
+    /// Random blocks: NVFP4 scales in [0.25, 2) (or any byte with
+    /// `fullScaleRange`: zero, 0x7F, sign bit, subnormal and exponent 15
+    /// bytes included) and any codes; Q8_0 scales in [1/256, 1/64) and any
+    /// int8. Both whole-block layouts, so a blob of `bytes` is a whole
+    /// number of blocks.
+    static func randomBlocks(encoding: Inkling2MoEEncoding, bytes: Int, rng: inout SplitMix64,
+                             fullScaleRange: Bool = false) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: bytes)
         let block = encoding.blockBytes
         precondition(bytes % block == 0)
@@ -79,7 +97,9 @@ struct Inkling2SyntheticPool {
             var i = 0
             while i < bytes {
                 if encoding == .nvfp4 {
-                    for s in 0..<4 { p[i + s] = UInt8(0x28 + Int(rng.next() % 24)) }
+                    for s in 0..<4 {
+                        p[i + s] = fullScaleRange ? UInt8(rng.next() & 0xFF) : UInt8(0x28 + Int(rng.next() % 24))
+                    }
                     var j = 4
                     while j < block {
                         var r = rng.next()
