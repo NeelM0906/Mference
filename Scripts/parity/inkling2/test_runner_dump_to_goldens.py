@@ -40,6 +40,15 @@ class Convert(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def fresh(self):
+        """A new output directory for each conversion (the converter refuses a used one)."""
+        self.n = getattr(self, "n", 0) + 1
+        return os.path.join(self.tmp.name, f"out{self.n}")
+
+    def refused(self, pattern, goldens=None):
+        with self.assertRaisesRegex(ValueError, pattern):
+            rd.convert(self.dump, self.fresh(), goldens)
+
     def prompt(self, pid, rows, positions, ids, row_len=V, softcapped=True, **extra):
         write_f32(os.path.join(self.dump, pid + ".logits.f32"), [v for r in rows for v in r])
         d = {"prompt_ids": ids, "positions": positions, "logits_file": pid + ".logits.f32",
@@ -79,14 +88,50 @@ class Convert(unittest.TestCase):
     def test_refusals(self):
         self.prompt("bad", [row({})], [0], [1])
         os.truncate(os.path.join(self.dump, "bad.logits.f32"), 4 * V - 4)
-        with self.assertRaisesRegex(ValueError, "bytes"):
-            rd.convert(self.dump, self.out, None)
+        self.refused("bytes")
         self.prompt("bad", [row({3: float("nan")})], [0], [1])
-        with self.assertRaisesRegex(ValueError, "non-finite"):
-            rd.convert(self.dump, self.out, None)
+        self.refused("non-finite")
+        # an infinity is refused even when the converter applies the softcap,
+        # which would otherwise turn it into an ordinary 30
+        self.prompt("bad", [row({3: float("inf")})], [0], [1], softcapped=False)
+        self.refused("non-finite")
         self.prompt("bad", [row({})], [1], [1])
-        with self.assertRaisesRegex(ValueError, "positions"):
+        self.refused("positions")
+        self.prompt("bad", [], [], [1])
+        self.refused("positions")
+        self.prompt("bad", [row({})], [0], [1], softcapped="false")
+        self.refused("logits_softcapped")
+        self.prompt("bad", [row({})], [0], [1], row_len=float(V))
+        self.refused("logits_row_length")
+        self.prompt("bad", [row({})], [0], [V])
+        self.refused("prompt_ids")
+
+    def test_output_directory_must_be_new(self):
+        self.prompt("p", [row({})], [0], [1])
+        rd.convert(self.dump, self.out, None)
+        with self.assertRaisesRegex(ValueError, "not empty"):
             rd.convert(self.dump, self.out, None)
+
+    def test_reference_check(self):
+        g = os.path.join(self.tmp.name, "goldens")
+        ref = os.path.join(g, "generate-tf", "metal", "p")
+        os.makedirs(ref)
+        json.dump({"prompt_ids": [11, 22, 33]}, open(os.path.join(ref, "golden.json"), "w"))
+        json.dump([{"pos": 1, "top": []}, {"pos": 2, "top": []}], open(os.path.join(ref, "logprobs.json"), "w"))
+        self.prompt("p", [row({}), row({})], [1, 2], [11, 22, 33])
+        rd.convert(self.dump, self.fresh(), g)
+        self.prompt("p", [row({})], [2], [11, 22, 33])
+        self.refused("reference positions not dumped", g)
+        self.prompt("p", [row({}), row({})], [1, 2], [11, 22, 34])
+        self.refused("teacher-forced ids", g)
+        self.prompt("p", [row({}), row({})], [1, 2], [11, 22, 33])
+        self.prompt("q", [row({})], [0], [5])
+        self.refused("not a G6c prompt", g)
+        out = self.fresh()
+        with self.assertRaises(ValueError):
+            rd.convert(self.dump, out, g)
+        # nothing of the refused prompt is written
+        self.assertFalse(os.path.exists(os.path.join(out, "q")))
 
     def test_trace(self):
         n = 2
@@ -102,8 +147,11 @@ class Convert(unittest.TestCase):
                          4 * rd.VISITS * n * rd.HIDDEN)
         json.dump({"prompt_ids": [3, 4, 5], "hidden_file": "t.hidden.f32", "experts": ex},
                   open(os.path.join(self.dump, "t.json"), "w"))
-        with self.assertRaisesRegex(ValueError, "hidden file"):
-            rd.convert(self.dump, self.out, None)
+        self.refused("hidden file")
+        for bad in ([[1, 1, 2, 3, 4, 5, 6, 7]] * n, [[1, 2, 3, 4, 5, 6, 7, 128]] * n):
+            json.dump({"prompt_ids": [3, 4], "hidden_file": "t.hidden.f32", "experts": [bad] * rd.VISITS},
+                      open(os.path.join(self.dump, "t.json"), "w"))
+            self.refused("distinct ids")
 
 
 if __name__ == "__main__":
