@@ -15,6 +15,7 @@ Nothing here is part of any product target, and nothing downloads anything.
 | `vocab_goldens.sh` | Tokenizer and chat-template goldens. |
 | `golden_stage.sh` | One weight-loading golden stage (Metal, Metal again, CPU-only: for `--ngl 0` ink-golden opens no GPU device and turns op offload and CPU weight repacking off, so the weights stay mapped). |
 | `baseline_stage.sh` | One baseline timing stage (llama-bench at 512, 4,096 and 16,384 tokens; llama-completion on real text for time to first token). Waits until at most one other swift build or test job runs. |
+| `g6c_verdict.py` | Tier G6c in one run for a runner's teacher-forced output (`inputs/generate_prompts_tf.json`) and, with `--traces`, its traces: verdict A, v2 as adopted (spec v1.7), against the free-running Metal goldens, and verdict B, v2 with the not-yet-adopted addendum, against `generate-tf/metal`; notes where llama.cpp's own Metal fails A. Exit 1 when A fails. |
 | `native_stage.sh` | One native stage of the baseline table: release `MferenceCLI` on the Inkling 2 install with the baseline's three real-text prompts (SHA-256 checked), greedy, the same context and new-token counts as the llama.cpp `text-*` stages, `--verify trusted-receipt` (no hashing inside the timed prefill), no warm-up, through `guarded_run.sh --timing`; moves an earlier attempt aside; surfaces the CLI's `error:` line (for example an expert plan over the host budget). |
 | `native_table.py` | The native table: `baseline.md`'s columns plus a ratio column against its `text-*` rows (prefill, decode, TTFT). |
 | `run_held_stages.sh` | All the weight-loading stages in order, each as its own machine-lock hold. |
@@ -25,7 +26,7 @@ Nothing here is part of any product target, and nothing downloads anything.
 | `noise_table.py` | The per-prompt and pooled noise tables (and per-trace rows) of the G6 proposal from `compare_goldens.py --json` outputs. |
 | `compare_goldens.py` | Agreement between two `generate` outputs: token identity, top-1 agreement, log-probability deltas, approximate KL over the top 20, hidden-state error and routed-expert agreement per layer visit. |
 | `ignore_merges_words.py` | The 337 vocabulary entries plain BPE merges split, from the GGUF header (tokens, merges) without touching tensor data. |
-| `inputs/` | The frozen inputs: tokenizer texts, chat cases, generation prompt sets 1-3 (`generate_prompts*.json`; a prompt may set `logprobs_last` to record only its last N positions). |
+| `inputs/` | The frozen inputs: tokenizer texts, chat cases, generation prompt sets 1-3 and 5 (`generate_prompts*.json`; a prompt may set `logprobs_last` to record only its last N positions; set 5 is trace02's prompt untraced, stage `metal5`). |
 
 Build (one build job; the checkout must be clean and at the tag):
 
