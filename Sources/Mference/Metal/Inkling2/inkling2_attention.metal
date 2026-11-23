@@ -1091,6 +1091,22 @@ struct Inkling2NormParams {
     float eps;
 };
 
+// One row's norm by one threadgroup of 256; shared by both norm kernels, so
+// they write the same bytes.
+static inline void ink2_rms_row(uint width, float eps, device const float* xr, device const float* weight,
+                                device half* orow, ushort tid, ushort lane, ushort sgitg,
+                                threadgroup float* partial) {
+    float acc = 0.0f;
+    for (uint i = tid; i < width; i += 256u) { acc = fma(xr[i], xr[i], acc); }
+    acc = simd_sum(acc);
+    if (lane == 0) { partial[sgitg] = acc; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (short s = 0; s < 8; ++s) { total += partial[s]; }
+    const float inv = rsqrt(total / float(width) + eps);
+    for (uint i = tid; i < width; i += 256u) { orow[i] = half(xr[i] * inv * weight[i]); }
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_rms_f32_to_f16(
     constant Inkling2NormParams& p [[buffer(0)]],
@@ -1103,17 +1119,38 @@ void inkling2_rms_f32_to_f16(
     ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
     threadgroup float partial[8];
-    device const float* xr = x + ulong(row) * p.xStride;
-    float acc = 0.0f;
-    for (uint i = tid; i < p.width; i += 256u) { acc = fma(xr[i], xr[i], acc); }
-    acc = simd_sum(acc);
-    if (lane == 0) { partial[sgitg] = acc; }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = 0.0f;
-    for (short s = 0; s < 8; ++s) { total += partial[s]; }
-    const float inv = rsqrt(total / float(p.width) + p.eps);
-    device half* orow = out + ulong(row) * p.outStride;
-    for (uint i = tid; i < p.width; i += 256u) { orow[i] = half(xr[i] * inv * weight[i]); }
+    ink2_rms_row(p.width, p.eps, x + ulong(row) * p.xStride, weight, out + ulong(row) * p.outStride,
+                 tid, lane, sgitg, partial);
+}
+
+// Up to three inputs (an attention block's q, k and v inputs), each with its own
+// weight and output, normed in one dispatch: grid (tokens, inputs). The same
+// bytes as one `inkling2_rms_f32_to_f16` dispatch per input; at one token the
+// threadgroups run side by side, so the norm's latency is paid once.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_rms_f32_to_f16_set(
+    constant Inkling2NormParams& p    [[buffer(0)]],
+    device const float* x0            [[buffer(1)]],
+    device const float* x1            [[buffer(2)]],
+    device const float* x2            [[buffer(3)]],
+    device const float* w0            [[buffer(4)]],
+    device const float* w1            [[buffer(5)]],
+    device const float* w2            [[buffer(6)]],
+    device half*        o0            [[buffer(7)]],
+    device half*        o1            [[buffer(8)]],
+    device half*        o2            [[buffer(9)]],
+    uint2  tg    [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float partial[8];
+    const uint token = tg.x, k = tg.y;
+    device const float* x = k == 0u ? x0 : (k == 1u ? x1 : x2);
+    device const float* w = k == 0u ? w0 : (k == 1u ? w1 : w2);
+    device half*        o = k == 0u ? o0 : (k == 1u ? o1 : o2);
+    ink2_rms_row(p.width, p.eps, x + ulong(token) * p.xStride, w, o + ulong(token) * p.outStride,
+                 tid, lane, sgitg, partial);
 }
 
 // ----------------------------------------------------------------------------

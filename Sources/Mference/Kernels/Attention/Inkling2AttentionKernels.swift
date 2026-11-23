@@ -242,9 +242,24 @@ public final class Inkling2ShortConv {
 /// weights (the GGUF `attn_norm`, `attn_*_inp_norm`, `ffn_norm` tensors).
 public final class Inkling2InputNorm {
     private let pipeline: MTLComputePipelineState
+    private let setPipeline: MTLComputePipelineState
+
+    /// One input of `encodeSet`: its rows, its norm weight and its FP16 output.
+    public struct Input {
+        public var x: Inkling2BufferRef
+        public var weight: Inkling2BufferRef
+        public var output: Inkling2BufferRef
+
+        public init(x: Inkling2BufferRef, weight: Inkling2BufferRef, output: Inkling2BufferRef) {
+            self.x = x
+            self.weight = weight
+            self.output = output
+        }
+    }
 
     public init(library: Inkling2KernelLibrary) throws {
         pipeline = try library.pipeline("inkling2_rms_f32_to_f16")
+        setPipeline = try library.pipeline("inkling2_rms_f32_to_f16_set")
     }
 
     public func encode(commandBuffer: MTLCommandBuffer, x: Inkling2BufferRef, xStride: Int,
@@ -272,6 +287,38 @@ public final class Inkling2InputNorm {
         encoder.setBuffer(weight.buffer, offset: weight.offset, index: 2)
         encoder.setBuffer(output.buffer, offset: output.offset, index: 3)
         encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    }
+
+    /// One to three inputs (an attention block's q, k and v inputs), each with its own weight
+    /// and output and the same strides, in one dispatch. It writes the same bytes as one
+    /// `encode` per input; at one row (decode) the norm's latency is paid once, not per input.
+    public func encodeSet(commandBuffer: MTLCommandBuffer, _ inputs: [Input], xStride: Int, outputStride: Int,
+                          rows: Int, width: Int = Inkling2AttentionShape.hidden,
+                          eps: Float = Inkling2AttentionShape.rmsEps) {
+        commandBuffer.inkling2Compute {
+            encodeSet(encoder: $0, inputs, xStride: xStride, outputStride: outputStride, rows: rows,
+                      width: width, eps: eps)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encodeSet(encoder: MTLComputeCommandEncoder, _ inputs: [Input], xStride: Int, outputStride: Int,
+                          rows: Int, width: Int = Inkling2AttentionShape.hidden,
+                          eps: Float = Inkling2AttentionShape.rmsEps) {
+        precondition(rows > 0 && (1...3).contains(inputs.count))
+        var params = Inkling2NormParams(width: UInt32(width), xStride: UInt32(xStride),
+                                        outStride: UInt32(outputStride), eps: eps)
+        encoder.setComputePipelineState(setPipeline)
+        encoder.setBytes(&params, length: MemoryLayout<Inkling2NormParams>.stride, index: 0)
+        for k in 0..<3 {
+            let input = inputs[min(k, inputs.count - 1)]          // unused slots repeat the last input
+            encoder.setBuffer(input.x.buffer, offset: input.x.offset, index: 1 + k)
+            encoder.setBuffer(input.weight.buffer, offset: input.weight.offset, index: 4 + k)
+            encoder.setBuffer(input.output.buffer, offset: input.output.offset, index: 7 + k)
+        }
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: inputs.count, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
 }

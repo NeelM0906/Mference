@@ -33,9 +33,9 @@ final class Inkling2VisitFixture {
         let state: Inkling2AttentionState
         let mixOut, acts, gateIn, zRows, fg, gated, h, y, q, rel, att, o, post, partials, z: MTLBuffer
 
-        init(_ device: MTLDevice, stride: Int) throws {
+        init(_ device: MTLDevice, stride: Int, window: Int, maxContext: Int) throws {
             state = try Inkling2AttentionState(device: device, configuration: .init(
-                maxContext: 64, maxChunkTokens: Inkling2VisitFixture.maxRows, window: Inkling2VisitFixture.window))
+                maxContext: maxContext, maxChunkTokens: Inkling2VisitFixture.maxRows, window: window))
             func zeroed(_ bytes: Int) -> MTLBuffer {
                 let buffer = device.makeBuffer(length: bytes, options: .storageModeShared)!
                 memset(buffer.contents(), 0, bytes)
@@ -55,7 +55,7 @@ final class Inkling2VisitFixture {
             att = zeroed(rows * 3072 * 2)
             o = zeroed(rows * d * 4)
             post = zeroed((rows + 1) * d * 4)
-            partials = zeroed(Inkling2DecodeAttention.partialsLength(keys: 64))
+            partials = zeroed(Inkling2DecodeAttention.partialsLength(keys: max(64, maxContext)))
             z = zeroed(3 * 64 * 4)
         }
 
@@ -83,7 +83,12 @@ final class Inkling2VisitFixture {
     let decode: Inkling2DecodeAttention
     let conv: Inkling2ShortConv
     let segments: [Segment]
-    let projWeights: MTLBuffer, outWeights: MTLBuffer, gateWeights: MTLBuffer
+    /// Weight sets: identical bytes in separate buffers, so a chain that cycles them reads DRAM.
+    let projWeightSets: [MTLBuffer], outWeightSets: [MTLBuffer], gateWeightSets: [MTLBuffer]
+    var projWeights: MTLBuffer { projWeightSets[0] }
+    var outWeights: MTLBuffer { outWeightSets[0] }
+    var gateWeights: MTLBuffer { gateWeightSets[0] }
+    let window: Int, maxContext: Int
     let normWeights: [MTLBuffer]
     let qClip: MTLBuffer, relClip: MTLBuffer, kConv: MTLBuffer, vConv: MTLBuffer, relBias: MTLBuffer, postConv: MTLBuffer
     let states: [MTLBuffer]
@@ -91,7 +96,7 @@ final class Inkling2VisitFixture {
     let messages: [Float]
     let prefillMessages: MTLBuffer
 
-    init(global: Bool) throws {
+    init(global: Bool, window: Int = Inkling2VisitFixture.window, maxContext: Int = 64, weightSets: Int = 1) throws {
         typealias B = Inkling2KernelBenchmarks
         let d = Self.d
         ctx = try MetalContext()
@@ -106,6 +111,8 @@ final class Inkling2VisitFixture {
         prefill = try Inkling2PrefillAttention(library: library)
         decode = try Inkling2DecodeAttention(library: library)
         conv = try Inkling2ShortConv(library: library)
+        self.window = window
+        self.maxContext = maxContext
         self.global = global
         slot = global ? 5 : 0
         stride = global ? 8664 : 8600
@@ -130,7 +137,6 @@ final class Inkling2VisitFixture {
         }
         self.segments = segments
         let stacked = device.makeBuffer(length: size, options: .storageModeShared)!
-        projWeights = stacked
         let bytes = stacked.contents().bindMemory(to: UInt8.self, capacity: size)
         var seed: UInt64 = 0x51ED_0000 &+ (global ? 1 : 0)
         for s in segments {
@@ -142,7 +148,7 @@ final class Inkling2VisitFixture {
                 for (i, b) in encoded.enumerated() { bytes[s.offset + i] = b }
             }
         }
-        outWeights = B.q8Buffer(device, rows: d, inputs: 3072)
+        let output = B.q8Buffer(device, rows: d, inputs: 3072)
         normWeights = (0..<3).map { B.floatBuffer(device, d, salt: 11 + $0, scale: 1) }
         qClip = B.floatBuffer(device, 24 * 128, salt: 3, scale: 2)
         relClip = B.floatBuffer(device, 24 * 16, salt: 5, scale: 3)
@@ -152,7 +158,17 @@ final class Inkling2VisitFixture {
         postConv = B.floatBuffer(device, d * 4, salt: 17, scale: 0.5)
         states = (0..<3).map { B.floatBuffer(device, (Self.maxRows + 1) * d, salt: 19 + $0, scale: 2) }
         queries = B.floatBuffer(device, 3 * d, salt: 23, scale: 1)
-        gateWeights = B.floatBuffer(device, 3 * (64 * 2 * d + 2 * d * 64), salt: 29, scale: 0.05)
+        let gates = B.floatBuffer(device, 3 * (64 * 2 * d + 2 * d * 64), salt: 29, scale: 0.05)
+        func copies(_ buffer: MTLBuffer) -> [MTLBuffer] {
+            [buffer] + (1..<max(1, weightSets)).map { _ in
+                let copy = device.makeBuffer(length: buffer.length, options: .storageModeShared)!
+                memcpy(copy.contents(), buffer.contents(), buffer.length)
+                return copy
+            }
+        }
+        projWeightSets = copies(stacked)
+        outWeightSets = copies(output)
+        gateWeightSets = copies(gates)
         messages = (0..<(3 * d)).map { Float(($0 &* 41) % 103) / 103 * 4 - 2 }
         prefillMessages = B.floatBuffer(device, 3 * Self.maxRows * d, salt: 31, scale: 2)
     }
@@ -175,49 +191,85 @@ final class Inkling2VisitFixture {
     }
 
     func makeRun() throws -> Run {
-        let run = try Run(ctx.device, stride: stride)
+        let run = try Run(ctx.device, stride: stride, window: window, maxContext: maxContext)
         let acts = run.acts.contents().bindMemory(to: Float.self, capacity: 9 * Self.d)
         for (i, m) in messages.enumerated() { acts[3 * Self.d + i] = m }
         return run
     }
 
-    /// The kernels of one chunk (`rows` rows at position `row0`), in order. Call after `ensureCapacity`.
-    func steps(_ r: Run, row0: Int, rows: Int) -> [Step] {
+    enum StepKind: Sendable { case mix, gate, norm, projection, epilogue, tail, attention, output, conv }
+
+    /// Bytes of weights a decode step reads per kernel kind (one set).
+    var stackedBytes: Int { projWeights.length }
+    var outputBytes: Int { outWeights.length }
+    var gateBytes: Int { gateWeights.length }
+
+    /// Moves the state's cursor to `position` without GPU work, and zero-fills every visit's
+    /// cache rows up to it, so each slot reads its own physical pages.
+    func fastForward(_ r: Run, to position: Int) throws {
+        while r.state.position < position {
+            let n = min(Self.maxRows, position - r.state.position)
+            try r.state.ensureCapacity(tokens: r.state.position + n)
+            r.state.advance(by: n)
+        }
+        try r.state.ensureCapacity(tokens: position + 1)
+        for visit in 0..<Inkling2VisitPlan.visitCount {
+            let kv = r.state.kv(slot: visit)
+            let rows = kv.ringCapacity > 0 ? kv.ringCapacity : position + 1
+            for half in [kv.keys, kv.values] { memset(half.buffer.contents() + half.offset, 0, rows * 2048) }
+        }
+    }
+
+    /// The kernels of one chunk (`rows` data rows at `row0`), in order. Call after `ensureCapacity`.
+    /// - `set`: the weight set; `position`: the attention position of a decode step (default `row0`);
+    /// - `gates`: run the q/k/v message gates (a loop pass) or not (a first-pass visit);
+    /// - `slot`: the visit's cache slot (default the fixture's; same layer kind);
+    /// - `normSet`: the three input norms in one `encodeSet` dispatch instead of three;
+    /// - `only`: keep just these kinds (timing breakdowns).
+    func steps(_ r: Run, row0: Int, rows: Int, set: Int = 0, position: Int? = nil, gates: Bool = true,
+               slot: Int? = nil, normSet: Bool = false, only: Set<StepKind>? = nil) -> [Step] {
         let d = Self.d, decodeStep = rows == 1
+        let pos = position ?? row0
+        let projW = projWeightSets[set], outW = outWeightSets[set], gateW = gateWeightSets[set]
         let q = queryCount, maxRows = Self.maxRows
-        let kv = r.state.kv(slot: slot), vt = r.state.tails(slot: slot), mask = r.state.mask(slot: slot)
+        let visitSlot = slot ?? self.slot
+        precondition(Inkling2VisitPlan.bySlot[visitSlot].isGlobal == global)
+        let kv = r.state.kv(slot: visitSlot), vt = r.state.tails(slot: visitSlot), mask = r.state.mask(slot: visitSlot)
         let controllerFloats = 64 * 2 * d + 2 * d * 64
         func downOffset(_ c: Int) -> Int { c * controllerFloats * 4 }
         func forgetOffset(_ c: Int) -> Int { (c * controllerFloats + 64 * 2 * d) * 4 }
         func gainOffset(_ c: Int) -> Int { (c * controllerFloats + 64 * 2 * d + d * 64) * 4 }
         var steps: [Step] = []
-        steps.append { e in
+        func add(_ kind: StepKind, _ step: @escaping Step) {
+            if only?.contains(kind) ?? true { steps.append(step) }
+        }
+        add(.mix) { e in
             try self.mix.encode(encoder: e, states: self.states.map { (ref: Inkling2BufferRef($0, offset: row0 * d * 4), stride: d) },
                                 queries: .init(self.queries), queryCount: q,
                                 output: decodeStep ? .init(r.acts) : .init(r.mixOut), outputStride: q * d, rows: rows)
         }
-        if decodeStep {
+        if decodeStep && gates {
             let controllers = (0..<3).map { c in
                 Inkling2MessageGateKernels.DecodeController(
                     down: downOffset(c), forget: forgetOffset(c), gain: gainOffset(c),
                     x: self.global ? c * d : 0, message: (3 + c) * d, output: (6 + c) * d)
             }
-            steps.append { e in
-                self.gate.encodeDecode(encoder: e, weights: self.gateWeights, activations: r.acts, z: .init(r.z),
+            add(.gate) { e in
+                self.gate.encodeDecode(encoder: e, weights: gateW, activations: r.acts, z: .init(r.z),
                                        controllers: controllers)
             }
-        } else {
+        } else if !decodeStep {
             func x(_ c: Int) -> Inkling2BufferRef { .init(r.mixOut, offset: (self.global ? c : 0) * d * 4) }
             func message(_ c: Int) -> Inkling2BufferRef { .init(self.prefillMessages, offset: c * maxRows * d * 4) }
             for c in 0..<3 {
-                steps.append { e in
+                add(.gate) { e in
                     self.gate.encodeInputs(encoder: e, x: x(c), xStride: q * d, message: message(c), messageStride: d,
                                            output: .init(r.gateIn, offset: c * maxRows * 2 * d * 4),
                                            outputStride: 2 * d, rows: rows)
                 }
             }
-            steps.append { e in
-                self.projection.encodeFloat(encoder: e, weights: self.gateWeights, input: r.gateIn, output: r.zRows,
+            add(.gate) { e in
+                self.projection.encodeFloat(encoder: e, weights: gateW, input: r.gateIn, output: r.zRows,
                                             tokens: rows, inputs: 2 * d, outStride: 3 * 64,
                                             segments: (0..<3).map { c in
                                                 Inkling2ProjectionSegment(weightOffset: downOffset(c),
@@ -227,8 +279,8 @@ final class Inkling2VisitFixture {
                                             })
             }
             for c in 0..<3 {
-                steps.append { e in
-                    self.projection.encodeFloat(encoder: e, weights: self.gateWeights, input: r.zRows, output: r.fg,
+                add(.gate) { e in
+                    self.projection.encodeFloat(encoder: e, weights: gateW, input: r.zRows, output: r.fg,
                                                 tokens: rows, inputs: 64, outStride: 2 * d,
                                                 segments: [.init(weightOffset: forgetOffset(c), inputOffset: c * 64,
                                                                  inputStride: 3 * 64, rows: d, outColumn: 0, format: .f32),
@@ -241,43 +293,52 @@ final class Inkling2VisitFixture {
                 }
             }
         }
-        for c in 0..<3 {
-            let input: Inkling2BufferRef = decodeStep ? .init(r.acts, offset: (6 + c) * d * 4)
-                                                      : .init(r.gated, offset: c * maxRows * d * 4)
-            let weight = normWeights[global ? c : 0]
-            steps.append { e in
-                self.norm.encode(encoder: e, x: input, xStride: d, weight: .init(weight),
-                                 output: .init(r.h, offset: c * maxRows * d * 2), outputStride: d, rows: rows)
+        let normInputs = (0..<3).map { c in
+            Inkling2InputNorm.Input(
+                x: !decodeStep ? .init(r.gated, offset: c * maxRows * d * 4)
+                    : .init(r.acts, offset: (gates ? 6 + c : (global ? c : 0)) * d * 4),
+                weight: .init(normWeights[global ? c : 0]), output: .init(r.h, offset: c * maxRows * d * 2))
+        }
+        if normSet {
+            add(.norm) { e in
+                self.norm.encodeSet(encoder: e, normInputs, xStride: d, outputStride: d, rows: rows)
+            }
+        } else {
+            for input in normInputs {
+                add(.norm) { e in
+                    self.norm.encode(encoder: e, x: input.x, xStride: d, weight: input.weight,
+                                     output: input.output, outputStride: d, rows: rows)
+                }
             }
         }
         let projectionSegments = segments.map { s in
             Inkling2ProjectionSegment(weightOffset: s.offset, inputOffset: s.input * Self.maxRows * d,
                                       inputStride: d, rows: s.rows, outColumn: s.column, format: s.format)
         }
-        steps.append { e in
-            self.projection.encode(encoder: e, weights: self.projWeights, input: r.h, output: r.y, tokens: rows,
+        add(.projection) { e in
+            self.projection.encode(encoder: e, weights: projW, input: r.h, output: r.y, tokens: rows,
                                    inputs: d, outStride: self.stride, segments: projectionSegments)
         }
-        steps.append { e in
+        add(.epilogue) { e in
             self.epilogue.encode(encoder: e, .init(
                 projections: .init(r.y), projectionStride: self.stride, columns: self.columns,
                 queryScale: .init(self.qClip), relativeScale: .init(self.relClip),
                 keyConv: .init(self.kConv), valueConv: .init(self.vConv), keyTail: vt.keys, valueTail: vt.values,
-                queries: .init(r.q), relative: .init(r.rel), cache: kv, rows: rows, startPosition: row0,
+                queries: .init(r.q), relative: .init(r.rel), cache: kv, rows: rows, startPosition: pos,
                 advanceTails: decodeStep))
         }
         if !decodeStep {
-            steps.append { e in
+            add(.tail) { e in
                 self.tails.encode(encoder: e, x: .init(r.y), xStride: self.stride, rows: rows, tails: vt.keys,
                                   runs: vt.keyValueRuns(keyColumn: self.columns.keys, valueColumn: self.columns.values))
             }
         }
-        steps.append { e in
+        add(.attention) { e in
             if decodeStep {
                 self.decode.encode(encoder: e, .init(
                     queries: .init(r.q), cache: kv, relative: .init(r.rel), table: .init(self.relBias),
                     sink: .init(r.y, offset: 3456 * 4), gate: .init(r.y, offset: 3480 * 4), output: .init(r.att),
-                    partials: .init(r.partials), position: row0, mask: mask))
+                    partials: .init(r.partials), position: pos, mask: mask))
             } else {
                 self.prefill.encode(encoder: e, .init(
                     queries: .init(r.q), cache: kv, relative: .init(r.rel), table: .init(self.relBias),
@@ -286,19 +347,19 @@ final class Inkling2VisitFixture {
                     output: .init(r.att), rows: rows, startPosition: row0, mask: mask))
             }
         }
-        steps.append { e in
-            self.projection.encode(encoder: e, weights: self.outWeights, input: r.att, output: r.o, tokens: rows,
+        add(.output) { e in
+            self.projection.encode(encoder: e, weights: outW, input: r.att, output: r.o, tokens: rows,
                                    inputs: 3072, outStride: d,
                                    segments: [.init(weightOffset: 0, inputOffset: 0, inputStride: 3072, rows: d, outColumn: 0)])
         }
-        steps.append { e in
+        add(.conv) { e in
             self.conv.encode(encoder: e, x: .init(r.o), xStride: d, weight: .init(self.postConv), tail: vt.attentionOutput,
                              residual: .init(self.states[0], offset: row0 * d * 4), residualStride: d,
                              output: .init(r.post, offset: row0 * d * 4), outputStride: d, rows: rows,
                              advanceTail: decodeStep)
         }
         if !decodeStep {
-            steps.append { e in
+            add(.tail) { e in
                 self.tails.encode(encoder: e, x: .init(r.o), xStride: d, rows: rows, tails: vt.attentionOutput,
                                   runs: [.init(xColumn: 0, tailOffset: 0, channels: d)])
             }
@@ -307,9 +368,10 @@ final class Inkling2VisitFixture {
     }
 
     /// Encodes one chunk into `cb`: one compute encoder per kernel, or every kernel in one serial encoder.
-    func encode(_ r: Run, row0: Int, rows: Int, oneEncoder: Bool, into cb: MTLCommandBuffer) throws {
+    func encode(_ r: Run, row0: Int, rows: Int, oneEncoder: Bool, normSet: Bool = false,
+                into cb: MTLCommandBuffer) throws {
         try r.state.ensureCapacity(tokens: row0 + rows)
-        let list = steps(r, row0: row0, rows: rows)
+        let list = steps(r, row0: row0, rows: rows, normSet: normSet)
         if oneEncoder {
             let encoder = cb.makeComputeCommandEncoder()!
             for step in list { try step(encoder) }
@@ -325,8 +387,9 @@ final class Inkling2VisitFixture {
 }
 
 /// Every K3 kernel through its `encode(encoder:)` form: a whole visit's chain
-/// in one serial encoder, with no barriers, writes exactly the bytes that one
-/// encoder per kernel writes (outputs, KV rows, tails). The other suites
+/// in one serial encoder, with no barriers and the three input norms in one
+/// `encodeSet` dispatch, writes exactly the bytes that one encoder per kernel
+/// and one norm dispatch per input write (outputs, KV rows, tails). The other suites
 /// check each kernel's values through the `encode(commandBuffer:)` wrappers.
 @Suite(.serialized) struct Inkling2SerialEncoderTests {
     static func bytes(_ buffer: MTLBuffer, offset: Int = 0, count: Int? = nil) -> [UInt8] {
@@ -341,7 +404,7 @@ final class Inkling2VisitFixture {
         for (row0, rows) in [(0, Inkling2VisitFixture.maxRows), (Inkling2VisitFixture.maxRows, 1)] {
             let cb = f.ctx.queue.makeCommandBuffer()!
             try f.encode(perKernel, row0: row0, rows: rows, oneEncoder: false, into: cb)
-            try f.encode(shared, row0: row0, rows: rows, oneEncoder: true, into: cb)
+            try f.encode(shared, row0: row0, rows: rows, oneEncoder: true, normSet: true, into: cb)
             cb.commit()
             cb.waitUntilCompleted()
             #expect(cb.status == .completed)

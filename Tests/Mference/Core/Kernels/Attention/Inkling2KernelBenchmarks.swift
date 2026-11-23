@@ -481,4 +481,66 @@ import Testing
                          + "one serial encoder %.2f us", chain, tinyBest[0], tinyBest[1]))
         }
     }
+
+    /// Where a decode visit's attention-side time goes, against the bytes each part reads.
+    /// - The visit is one token at the 1,024-key window (layer kind window) or at position 4,095
+    ///   (global).
+    /// - 24 weight sets and the layer kind's own cache slots (40 window, 8 global) are cycled
+    ///   through 48 chained visits (one token), so the 48 MB SLC cannot serve repeats of either.
+    /// - Every case is interleaved over 10 rounds and reports its minimum.
+    @Test(.enabled(if: enabled && only("bandwidth"))) func decodeVisitBandwidth() throws {
+        typealias K = Inkling2VisitFixture.StepKind
+        let sets = 24, visits = 48
+        for (global, position) in [(false, 1023), (true, 4095)] {
+            let f = try Inkling2VisitFixture(global: global, window: 1024, maxContext: 4112, weightSets: sets)
+            let run = try f.makeRun()
+            try f.fastForward(run, to: position)
+            try run.state.ensureCapacity(tokens: position + 1)
+            let keys = global ? position + 1 : 1024
+            let kvBytes = keys * 2048 * 2
+            let weights = f.stackedBytes + f.outputBytes
+            let cases: [(name: String, gates: Bool, normSet: Bool, only: Set<K>?, bytes: Int)] = [
+                ("first-pass visit", false, false, nil, weights + kvBytes),
+                ("loop-pass visit (q/k/v gates)", true, false, nil, weights + f.gateBytes + kvBytes),
+                ("loop-pass visit, norms in one dispatch", true, true, nil, weights + f.gateBytes + kvBytes),
+                ("  stacked projection", false, false, [.projection], f.stackedBytes),
+                ("  output projection", false, false, [.output], f.outputBytes),
+                ("  q/k/v gates, decode form", true, false, [.gate], f.gateBytes),
+                ("  decode attention", false, false, [.attention], kvBytes),
+                ("  mix, norms, epilogue, post conv", false, false, [.mix, .norm, .epilogue, .conv], 0),
+                ("    depth mix", false, false, [.mix], 0),
+                ("    input norms (3)", false, false, [.norm], 0),
+                ("    input norms (3), one dispatch", false, true, [.norm], 0),
+                ("    epilogue", false, false, [.epilogue], 0),
+                ("    post conv", false, false, [.conv], 0),
+            ]
+            let chains = cases.map { c in
+                (0..<sets).map { set in
+                    let slots = global ? Inkling2VisitPlan.globalSlots : Inkling2VisitPlan.windowSlots
+                    return f.steps(run, row0: 0, rows: 1, set: set, position: position, gates: c.gates,
+                                   slot: slots[set % slots.count], normSet: c.normSet, only: c.only)
+                }
+            }
+            var best = [Double](repeating: .infinity, count: cases.count)
+            for round in 0...10 {
+                for (i, chain) in chains.enumerated() {
+                    let cb = f.ctx.queue.makeCommandBuffer()!
+                    let encoder = cb.makeComputeCommandEncoder()!
+                    for v in 0..<visits { for step in chain[v % sets] { try step(encoder) } }
+                    encoder.endEncoding()
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    #expect(cb.status == .completed)
+                    if round > 0 { best[i] = min(best[i], cb.gpuEndTime - cb.gpuStartTime) }
+                }
+            }
+            for (c, seconds) in zip(cases, best) {
+                let us = seconds / Double(visits) * 1e6
+                let rate = c.bytes > 0 ? String(format: ", %.1f MB, %.0f GB/s", Double(c.bytes) / 1e6,
+                                                Double(c.bytes) / (seconds / Double(visits)) / 1e9) : ""
+                print(String(format: "[ink2-kbench] bandwidth %@ %ld keys: %@: %.1f us per visit%@",
+                             global ? "global" : "window", keys, c.name, us, rate))
+            }
+        }
+    }
 }
