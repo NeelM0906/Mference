@@ -307,9 +307,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private var prefetchesNextChunk = false
     /// Staged decode visits wait on the GPU for the slot loads (a shared
     /// event the CPU signals) instead of splitting the command buffer for a
-    /// route readback. On by default; `MFERENCE_INKLING2_DECODE_READBACK=split`
-    /// keeps the split readbacks (an A/B switch).
-    var defersDecodeReadback = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_READBACK"] != "split"
+    /// route readback. Off by default: timed, it was 3% faster on one text
+    /// and 3% slower on another, the same tokens either way (coordinator
+    /// ruling, 2026-11-23); `MFERENCE_INKLING2_DECODE_READBACK=deferred`
+    /// turns it on (an A/B switch).
+    var defersDecodeReadback = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_READBACK"] == "deferred"
     /// Deferred visits encoded in the chunk being run.
     private var deferredInChunk = 0
     /// Prefill chunks of at most this many tokens visit staged layers
