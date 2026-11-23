@@ -70,7 +70,7 @@ import MferenceValidationSupport
     func messageGatePipelineMatchesReference(rows: Int) throws {
         let ctx = try MetalContext()
         let library = try Inkling2KernelLibrary(context: ctx)
-        let gate = try Inkling2MessageGate(library: library)
+        let gate = try Inkling2MessageGateKernels(library: library)
         let projection = try Inkling2Projection(library: library)
         var rng = SeedTree(0x6b00 + UInt64(rows)).key("ink2-gate")
         let width = 2304, rank = 64

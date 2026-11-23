@@ -56,8 +56,9 @@ public enum Inkling2AttentionMask: Sendable, Equatable {
 ///
 /// The chunk's own keys and values must already be in the cache.
 public final class Inkling2PrefillAttention {
-    /// Kernel form: simdgroup fragments with 16- or 32-key tiles (every
-    /// GPU), or Metal 4 `matmul2d` with 8 rows x 64 keys (tensor support).
+    /// Kernel form: simdgroup fragments with 16- or 32-key tiles (every GPU),
+    /// 16-key tiles shared by a KV head's three query heads (where 192 threads
+    /// fit), or Metal 4 `matmul2d` with 8 rows x 64 keys (tensor support).
     public enum Variant: String, Sendable, CaseIterable {
         case keys16
         case keys32
@@ -133,8 +134,10 @@ public final class Inkling2PrefillAttention {
         states[.keys16] = try library.pipeline("inkling2_attention_prefill_bk16")
         states[.keys32] = try library.pipeline("inkling2_attention_prefill_bk32")
         // The shared-tile form needs 192 threads; register-heavy builds can cap lower.
-        let gqa = try library.pipeline("inkling2_attention_prefill_gqa16")
-        if gqa.maxTotalThreadsPerThreadgroup >= Variant.gqa16.threadsPerThreadgroup { states[.gqa16] = gqa }
+        if let gqa = try? library.pipeline("inkling2_attention_prefill_gqa16"),
+           gqa.maxTotalThreadsPerThreadgroup >= Variant.gqa16.threadsPerThreadgroup {
+            states[.gqa16] = gqa
+        }
         states[.tensorOps] = try? library.pipeline("inkling2_attention_prefill_tensorops")
         pipelines = states
         let tensorDefault = states[.tensorOps] != nil && library.context.device.supportsApple10TensorOps
@@ -155,6 +158,8 @@ public final class Inkling2PrefillAttention {
             precondition(a.cache.ringCapacity == 0 || a.cache.ringCapacity >= window - 1 + a.rows)
         }
         let variant = forced ?? self.variant
+        // gqa16 hard-codes three query heads per KV head (24 / 8).
+        precondition(variant != .gqa16 || Inkling2AttentionShape.numQHeads == 3 * Inkling2AttentionShape.numKVHeads)
         guard let pipeline = pipelines[variant] else {
             preconditionFailure("variant \(variant) did not build on this GPU")
         }

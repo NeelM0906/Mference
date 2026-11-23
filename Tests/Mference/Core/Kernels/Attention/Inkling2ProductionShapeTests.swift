@@ -59,6 +59,9 @@ import MferenceValidationSupport
             keyBase: first, window: global ? nil : 1024, logScale: global ? .init() : nil)
         reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: gate)
         for variant in Inkling2PrefillAttention.Variant.allCases where prefill.supports(variant) {
+            // NaN everywhere first, so a variant that skips rows or heads cannot pass on leftovers.
+            let halves = out.contents().bindMemory(to: UInt16.self, capacity: rows * 3072)
+            for i in 0..<(rows * 3072) { halves[i] = 0x7E00 }
             S.run(ctx) { cb in
                 prefill.encode(commandBuffer: cb, .init(
                     queries: .init(qBuffer), cache: cache, relative: .init(relBuffer), table: .init(tableBuffer),

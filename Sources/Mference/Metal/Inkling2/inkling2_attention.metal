@@ -595,10 +595,12 @@ template [[host_name("inkling2_q8_stacked_mv_t8")]] [[kernel]] decltype(inkling2
 // logical window is at most two physical spans; each key row is addressed on
 // its own); global layers read linear storage (capacity 0) and apply tau.
 //
-// Threadgroup: 32 query rows of one query head, 4 simdgroups of 8 rows; keys
-// in tiles of BK. Q, S, P and O live in simdgroup fragments; K, V and the P
-// rows of the tile are staged in threadgroup memory. Grid: x = ceil(rows/32),
-// y = query heads.
+// Threadgroup: BQT query rows of HG query heads, one simdgroup per 8 rows of a
+// head (HG = 1: 32 rows, 4 simdgroups, grid x = ceil(rows / 32), y = query
+// heads; HG = 3: 16 rows of the three heads of one KV head, 6 simdgroups,
+// grid x = ceil(rows / 16), y = KV heads); keys in tiles of BK. Q, S, P and
+// O live in simdgroup fragments; K, V and the P rows of the tile are staged
+// in threadgroup memory.
 // ----------------------------------------------------------------------------
 
 struct Inkling2AttnParams {

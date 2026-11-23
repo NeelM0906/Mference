@@ -276,7 +276,7 @@ import Testing
         let ctx = try MetalContext()
         let library = try Inkling2KernelLibrary(context: ctx)
         let mix = try Inkling2DepthMix(library: library)
-        let gate = try Inkling2MessageGate(library: library)
+        let gate = try Inkling2MessageGateKernels(library: library)
         let projection = try Inkling2Projection(library: library)
         let rows = 2048, width = 2304, rank = 64
         let states = (0..<6).map { Self.floatBuffer(ctx.device, rows * width, salt: $0) }

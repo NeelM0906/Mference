@@ -80,7 +80,7 @@ public final class Inkling2DepthMix {
 /// 3. `Inkling2Projection.encodeFloat` with `loop_*_ctrl_forget` and
 ///    `loop_*_ctrl_gain` (`.f32`, 64 inputs, 2304 rows each) on `z` into `fg`;
 /// 4. `encodeCombine`: the elementwise mix.
-public final class Inkling2MessageGate {
+public final class Inkling2MessageGateKernels {
     private let inputs: MTLComputePipelineState
     private let combine: MTLComputePipelineState
 
