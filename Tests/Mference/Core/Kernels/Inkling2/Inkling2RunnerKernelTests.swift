@@ -232,4 +232,107 @@ struct Inkling2RunnerKernelTests {
         // Padded rows are not written.
         #expect((rows..<(rows + 3)).allSatisfy { got[$0].bitPattern == 0x7B7B })
     }
+
+    /// The head's body before the interleaved rows (one row at a time per
+    /// simdgroup, x staged in threadgroup memory), kept as a test-only
+    /// pipeline: the current body must write the same logits to the bit.
+    private static let earlierHeadSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct I2RHeadParams { uint d; uint rows; uint rowBytes; float softcap; };
+        constant uint I2R_THREADS = 256;
+        constant uint I2R_SIMDS = I2R_THREADS / 32;
+        constant uint I2R_HEAD_ROWS_PER_SIMD = 4;
+        kernel void inkling2_head_q8_0_earlier(device const float *x        [[buffer(0)]],
+                                               device const uchar *table    [[buffer(1)]],
+                                               device half *logits          [[buffer(2)]],
+                                               constant I2RHeadParams &p    [[buffer(3)]],
+                                               uint group [[threadgroup_position_in_grid]],
+                                               uint tid   [[thread_index_in_threadgroup]],
+                                               uint simd  [[simdgroup_index_in_threadgroup]],
+                                               uint lane  [[thread_index_in_simdgroup]]) {
+            threadgroup float xs[4096];
+            for (uint i = tid; i < p.d; i += I2R_THREADS) { xs[i] = x[i]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            const uint blocks = p.d / 32;
+            const uint firstRow = (group * I2R_SIMDS + simd) * I2R_HEAD_ROWS_PER_SIMD;
+            for (uint k = 0; k < I2R_HEAD_ROWS_PER_SIMD; ++k) {
+                const uint r = firstRow + k;
+                if (r >= p.rows) { return; }
+                device const uchar *row = table + ulong(r) * p.rowBytes;
+                float acc = 0.0f;
+                for (uint b = lane; b < blocks; b += 32) {
+                    device const uchar *block = row + b * 34;
+                    const float scale = float(as_type<half>(ushort(ushort(block[0]) | (ushort(block[1]) << 8))));
+                    float s = 0.0f;
+                    for (uint j = 0; j < 32; ++j) {
+                        s += float(as_type<char>(block[2 + j])) * xs[b * 32 + j];
+                    }
+                    acc += scale * s;
+                }
+                acc = simd_sum(acc);
+                if (lane == 0) {
+                    float v = acc;
+                    if (p.softcap > 0.0f) { v = p.softcap * precise::tanh(v / p.softcap); }
+                    logits[r] = half(v);
+                }
+            }
+        }
+        """
+
+    /// At the runner's layout: the table at a 2-byte offset, x at d * 4
+    /// bytes (the final row's normed copy), logits at a 2-byte offset (the
+    /// G6c hook's per-row offsets), and `rows` short of the table's rows and
+    /// of a whole simdgroup. Same bits as the earlier body, the CPU reference
+    /// within FP16 rounding, nothing written past `rows`; softcap on and off.
+    @Test func headMatchesTheEarlierBodyAndTheReferenceAtTheRunnersOffsets() throws {
+        let d = Self.d, tableRows = 1_300, rows = 1_237
+        let (q8, table) = q8Rows(tableRows, d, "head-earlier")
+        let bytes: [UInt8] = [0xEE, 0xEE] + q8
+        let x = random(d, "head-earlier-x", -2, 2)
+        let xBuffer = buffer([Float](repeating: 7, count: d) + x)
+        let tableBuffer = buffer(bytes: bytes)
+        let options = MTLCompileOptions()
+        options.languageVersion = MetalContext.shaderLanguageVersion
+        let library = try context.device.makeLibrary(source: Self.earlierHeadSource, options: options)
+        let function = try #require(library.makeFunction(name: "inkling2_head_q8_0_earlier"))
+        let earlier = try context.device.makeComputePipelineState(function: function)
+        let rowBytes = d / 32 * 34
+        for softcap: Float in [30, 0] {
+            var outputs: [[UInt16]] = []
+            for useEarlier in [false, true] {
+                let logits = try #require(context.device.makeBuffer(length: 2 + tableRows * 2, options: .storageModeShared))
+                memset(logits.contents(), 0x7B, 2 + tableRows * 2)
+                try run { enc in
+                    if useEarlier {
+                        var p = Inkling2RunnerKernels.HeadParams(d: UInt32(d), rows: UInt32(rows),
+                                                                  rowBytes: UInt32(rowBytes), softcap: softcap)
+                        enc.setComputePipelineState(earlier)
+                        enc.setBuffer(xBuffer, offset: d * 4, index: 0)
+                        enc.setBuffer(tableBuffer, offset: 2, index: 1)
+                        enc.setBuffer(logits, offset: 2, index: 2)
+                        enc.setBytes(&p, length: MemoryLayout<Inkling2RunnerKernels.HeadParams>.stride, index: 3)
+                        enc.dispatchThreadgroups(MTLSize(width: (rows + 31) / 32, height: 1, depth: 1),
+                                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                    } else {
+                        kernels.encodeHead(enc, x: xBuffer, xOffset: d * 4, table: tableBuffer, tableOffset: 2,
+                                           rowBytes: rowBytes, rows: rows, softcap: softcap,
+                                           logits: logits, logitsOffset: 2, d: d)
+                    }
+                }
+                let p = (logits.contents() + 2).bindMemory(to: UInt16.self, capacity: tableRows)
+                outputs.append((0..<tableRows).map { p[$0] })
+            }
+            let differing = zip(outputs[0], outputs[1]).filter { $0 != $1 }.count
+            #expect(differing == 0, "softcap \(softcap): \(differing) logits differ from the earlier body")
+            #expect(outputs[0][rows...].allSatisfy { $0 == 0x7B7B }, "a row past `rows` was written")
+            var worst: Float = 0
+            for r in 0..<rows {
+                let dot = Op.dot(table[r], x)
+                let want = softcap > 0 ? Op.softcap(dot, softcap) : dot
+                worst = max(worst, abs(Float(Float16(bitPattern: outputs[0][r])) - want) / max(abs(want), 1))
+            }
+            #expect(worst < 2e-3, "softcap \(softcap): worst \(worst)")   // FP16 output rounding
+        }
+    }
 }
