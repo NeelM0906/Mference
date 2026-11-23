@@ -240,6 +240,11 @@ public func run(args: Args,
             stderr.write(Data(lines.utf8))
         }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let ink = runner as? any Inkling2DecodePhaseReporting, ink.decodePhaseStats.decodeSteps > 0 {
+            // The runner kept these only because the variable was set at load.
+            stderr.write(Data(inkling2PhaseReport(ink.decodePhaseStats, decodeSeconds: stats.decodeSeconds).utf8))
+        }
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
            let q38 = runner as? Qwen38ForwardRunner,
            let spec = q38.mtpSpecStats, spec.rounds > 0 {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }

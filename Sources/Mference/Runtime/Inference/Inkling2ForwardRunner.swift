@@ -305,6 +305,13 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// buffer): per decoded token, the command buffers, the CPU's waits on
     /// them and the GPU's own start and end times, printed to stderr.
     private let decodeTimeline = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_TIMELINE"]
+    /// `MFERENCE_PHASES=1` (the CLI's phases report), read once at load:
+    /// decode steps then time their buffers as the timeline does and add to
+    /// `decodePhaseStats`. Unset, nothing new runs.
+    var tracesPhases = ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1"
+    /// Diagnostics only: the decode attribution `tracesPhases` keeps
+    /// (`Inkling2DecodePhases.swift`, which adds to it).
+    var decodePhaseStats = Inkling2DecodePhaseStats()
     /// Set by `prefillChunked` while another chunk follows the one running.
     private var prefetchesNextChunk = false
     /// Staged decode visits wait on the GPU for the slot loads (a shared
@@ -691,8 +698,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         var cb = try commandBuffer()
         var committed: [MTLCommandBuffer] = []
         var pending: MTLCommandBuffer? = cb
-        let timesBuffers = decodeTimeline != nil && t == 1
-        let runStarted = Self.hostSeconds()
+        let timesBuffers = (decodeTimeline != nil || tracesPhases) && t == 1
+        let runStarted = timesBuffers ? Self.hostSeconds() : 0
         let statsBefore = decodeCacheStats
         var blocked: Double = 0, waits = 0
         /// Waits for every committed buffer (timed for the decode timeline).
@@ -911,8 +918,14 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             FileHandle.standardError.write(Data(lines.utf8))
         }
         if timesBuffers {
-            reportDecodeTimeline(committed, started: runStarted, blocked: blocked, waits: waits, position: start,
-                                 before: statsBefore)
+            let ended = Self.hostSeconds()
+            if decodeTimeline != nil {
+                reportDecodeTimeline(committed, started: runStarted, blocked: blocked, waits: waits, position: start,
+                                     before: statsBefore)
+            }
+            if tracesPhases {
+                recordDecodePhases(committed, started: runStarted, ended: ended, blocked: blocked, before: statsBefore)
+            }
         }
         state.advance(by: t)
         chunkState.markCommitted()
