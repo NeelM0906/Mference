@@ -225,11 +225,15 @@ final class Inkling2VisitFixture {
     /// - `gates`: run the q/k/v message gates (a loop pass) or not (a first-pass visit);
     /// - `slot`: the visit's cache slot (default the fixture's; same layer kind);
     /// - `normSet`: the three input norms in one `encodeSet` dispatch instead of three;
+    /// - `mixNorm`: on a first-pass decode step (no gates), the mix and its norms in one
+    ///   `encodeNormed` dispatch;
     /// - `only`: keep just these kinds (timing breakdowns).
     func steps(_ r: Run, row0: Int, rows: Int, set: Int = 0, position: Int? = nil, gates: Bool = true,
-               slot: Int? = nil, normSet: Bool = false, only: Set<StepKind>? = nil) -> [Step] {
+               slot: Int? = nil, normSet: Bool = false, mixNorm: Bool = false,
+               only: Set<StepKind>? = nil) -> [Step] {
         let d = Self.d, decodeStep = rows == 1
         let pos = position ?? row0
+        let distinct = !(decodeStep && !gates && !global)
         let projW = projWeightSets[set], outW = outWeightSets[set], gateW = gateWeightSets[set]
         let q = queryCount, maxRows = Self.maxRows
         let visitSlot = slot ?? self.slot
@@ -243,10 +247,23 @@ final class Inkling2VisitFixture {
         func add(_ kind: StepKind, _ step: @escaping Step) {
             if only?.contains(kind) ?? true { steps.append(step) }
         }
-        add(.mix) { e in
-            try self.mix.encode(encoder: e, states: self.states.map { (ref: Inkling2BufferRef($0, offset: row0 * d * 4), stride: d) },
-                                queries: .init(self.queries), queryCount: q,
-                                output: decodeStep ? .init(r.acts) : .init(r.mixOut), outputStride: q * d, rows: rows)
+        let fusedMixNorm = mixNorm && decodeStep && !gates
+        if fusedMixNorm {
+            let norms = (0..<q).map { c in
+                Inkling2DepthMix.Norm(weight: .init(normWeights[global ? c : 0]),
+                                      output: .init(r.h, offset: c * maxRows * d * 2))
+            }
+            add(.mix) { e in
+                try self.mix.encodeNormed(encoder: e, states: self.states.map { (ref: Inkling2BufferRef($0, offset: row0 * d * 4), stride: d) },
+                                          queries: .init(self.queries), queryCount: q, output: .init(r.acts),
+                                          outputStride: q * d, norms: norms, normedStride: d, rows: rows)
+            }
+        } else {
+            add(.mix) { e in
+                try self.mix.encode(encoder: e, states: self.states.map { (ref: Inkling2BufferRef($0, offset: row0 * d * 4), stride: d) },
+                                    queries: .init(self.queries), queryCount: q,
+                                    output: decodeStep ? .init(r.acts) : .init(r.mixOut), outputStride: q * d, rows: rows)
+            }
         }
         if decodeStep && gates {
             let controllers = (0..<3).map { c in
@@ -293,13 +310,15 @@ final class Inkling2VisitFixture {
                 }
             }
         }
-        let normInputs = (0..<3).map { c in
+        let normInputs = (0..<(distinct ? 3 : 1)).map { c in
             Inkling2InputNorm.Input(
                 x: !decodeStep ? .init(r.gated, offset: c * maxRows * d * 4)
                     : .init(r.acts, offset: (gates ? 6 + c : (global ? c : 0)) * d * 4),
                 weight: .init(normWeights[global ? c : 0]), output: .init(r.h, offset: c * maxRows * d * 2))
         }
-        if normSet {
+        if fusedMixNorm {
+            // The norms ran inside the mix.
+        } else if normSet {
             add(.norm) { e in
                 self.norm.encodeSet(encoder: e, normInputs, xStride: d, outputStride: d, rows: rows)
             }
@@ -312,7 +331,7 @@ final class Inkling2VisitFixture {
             }
         }
         let projectionSegments = segments.map { s in
-            Inkling2ProjectionSegment(weightOffset: s.offset, inputOffset: s.input * Self.maxRows * d,
+            Inkling2ProjectionSegment(weightOffset: s.offset, inputOffset: (distinct ? s.input : 0) * Self.maxRows * d,
                                       inputStride: d, rows: s.rows, outColumn: s.column, format: s.format)
         }
         add(.projection) { e in

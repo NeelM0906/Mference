@@ -1107,6 +1107,25 @@ static inline void ink2_rms_row(uint width, float eps, device const float* xr, d
     for (uint i = tid; i < width; i += 256u) { orow[i] = half(xr[i] * inv * weight[i]); }
 }
 
+// `ink2_rms_row` that also writes the normed row in FP32; its FP16 output is the same bytes.
+static inline void ink2_rms_row_dual(uint width, float eps, device const float* xr, device const float* weight,
+                                     device half* orow, device float* frow, ushort tid, ushort lane, ushort sgitg,
+                                     threadgroup float* partial) {
+    float acc = 0.0f;
+    for (uint i = tid; i < width; i += 256u) { acc = fma(xr[i], xr[i], acc); }
+    acc = simd_sum(acc);
+    if (lane == 0) { partial[sgitg] = acc; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (short s = 0; s < 8; ++s) { total += partial[s]; }
+    const float inv = rsqrt(total / float(width) + eps);
+    for (uint i = tid; i < width; i += 256u) {
+        const float y = xr[i] * inv * weight[i];
+        frow[i] = y;
+        orow[i] = half(y);
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_rms_f32_to_f16(
     constant Inkling2NormParams& p [[buffer(0)]],
@@ -1334,26 +1353,16 @@ constant uint FC_MIX_QUERIES [[function_constant(201)]];
 constant uint kMixStates  = is_function_constant_defined(FC_MIX_STATES) ? FC_MIX_STATES : 1u;
 constant uint kMixQueries = is_function_constant_defined(FC_MIX_QUERIES) ? FC_MIX_QUERIES : 1u;
 
-[[kernel, max_total_threads_per_threadgroup(256)]]
-void inkling2_depth_mix(
-    constant Inkling2MixParams& p [[buffer(0)]],
-    device const float* s0 [[buffer(1)]],
-    device const float* s1 [[buffer(2)]],
-    device const float* s2 [[buffer(3)]],
-    device const float* s3 [[buffer(4)]],
-    device const float* s4 [[buffer(5)]],
-    device const float* s5 [[buffer(6)]],
-    device const float* queries [[buffer(7)]],
-    device float*       out     [[buffer(8)]],
-    uint   row   [[threadgroup_position_in_grid]],
-    ushort tid   [[thread_index_in_threadgroup]],
-    ushort lane  [[thread_index_in_simdgroup]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]])
+// The depth mix of one token row, shared by the mix kernel and the mix + norm kernel.
+static inline void ink2_depth_mix_row(constant Inkling2MixParams& p,
+                                      device const float* s0, device const float* s1, device const float* s2,
+                                      device const float* s3, device const float* s4, device const float* s5,
+                                      device const float* queries, device float* out, uint row,
+                                      ushort tid, ushort lane, ushort sgitg,
+                                      threadgroup float (*partial)[30], threadgroup float (*weights)[6],
+                                      threadgroup float* inv)
 {
-    constexpr uint NS = 6, NQ = 4, NA = NS + NQ * NS;
-    threadgroup float partial[8][NA];
-    threadgroup float weights[NQ][NS];
-    threadgroup float inv[NS];
+    constexpr uint NS = 6, NQ = 4, NA = NS + NQ * NS;   // NA = 30: the threadgroup arrays' widths
     device const float* rowp[NS] = {
         s0 + ulong(row) * p.stateStride[0], s1 + ulong(row) * p.stateStride[1], s2 + ulong(row) * p.stateStride[2],
         s3 + ulong(row) * p.stateStride[3], s4 + ulong(row) * p.stateStride[4], s5 + ulong(row) * p.stateStride[5]};
@@ -1437,6 +1446,91 @@ void inkling2_depth_mix(
                 orow[j * p.width + i] = o;
             }
         }
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_depth_mix(
+    constant Inkling2MixParams& p [[buffer(0)]],
+    device const float* s0 [[buffer(1)]],
+    device const float* s1 [[buffer(2)]],
+    device const float* s2 [[buffer(3)]],
+    device const float* s3 [[buffer(4)]],
+    device const float* s4 [[buffer(5)]],
+    device const float* s5 [[buffer(6)]],
+    device const float* queries [[buffer(7)]],
+    device float*       out     [[buffer(8)]],
+    uint   row   [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float mixPartial[8][30];
+    threadgroup float mixWeights[4][6];
+    threadgroup float mixInv[6];
+    ink2_depth_mix_row(p, s0, s1, s2, s3, s4, s5, queries, out, row, tid, lane, sgitg, mixPartial, mixWeights, mixInv);
+}
+
+// ----------------------------------------------------------------------------
+// The depth mix fused with the weighted RMS norm of each of its outputs, for
+// the visits where nothing sits between them (first-pass attention inputs, and
+// the MoE input outside the loop passes): the mix as `inkling2_depth_mix` into
+// `out` (FP32 scratch), then each query's row normed as `inkling2_rms_f32_to_f16`
+// does (each thread reads back the elements it wrote, in that kernel's order),
+// so `normed` is byte-identical to the two kernels. Up to three queries, each
+// with its own norm weight and FP16 output; `normed32` (optional) also takes
+// the normed rows in FP32 (the MoE router's input). One threadgroup per token.
+// ----------------------------------------------------------------------------
+
+struct Inkling2MixNormParams {
+    uint  normedStride;   // halves between token rows of each FP16 output
+    uint  normed32Stride; // floats between token rows of each FP32 output (0 = none)
+    float normEps;
+    uint  reserved;
+};
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_depth_mix_norm(
+    constant Inkling2MixParams& p        [[buffer(0)]],
+    device const float* s0               [[buffer(1)]],
+    device const float* s1               [[buffer(2)]],
+    device const float* s2               [[buffer(3)]],
+    device const float* s3               [[buffer(4)]],
+    device const float* s4               [[buffer(5)]],
+    device const float* s5               [[buffer(6)]],
+    device const float* queries          [[buffer(7)]],
+    device float*       out              [[buffer(8)]],
+    constant Inkling2MixNormParams& n    [[buffer(9)]],
+    device const float* w0               [[buffer(10)]],
+    device const float* w1               [[buffer(11)]],
+    device const float* w2               [[buffer(12)]],
+    device half*        h0               [[buffer(13)]],
+    device half*        h1               [[buffer(14)]],
+    device half*        h2               [[buffer(15)]],
+    device float*       f0               [[buffer(16)]],
+    device float*       f1               [[buffer(17)]],
+    device float*       f2               [[buffer(18)]],
+    uint   row   [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float mixPartial[8][30];
+    threadgroup float mixWeights[4][6];
+    threadgroup float mixInv[6];
+    ink2_depth_mix_row(p, s0, s1, s2, s3, s4, s5, queries, out, row, tid, lane, sgitg, mixPartial, mixWeights, mixInv);
+    threadgroup float partial[8];
+    for (uint j = 0; j < kMixQueries && j < 3u; ++j) {
+        device const float* xr = out + ulong(row) * p.outStride + j * p.width;
+        device const float* w = j == 0u ? w0 : (j == 1u ? w1 : w2);
+        device half* hrow = (j == 0u ? h0 : (j == 1u ? h1 : h2)) + ulong(row) * n.normedStride;
+        if (n.normed32Stride == 0u) {
+            ink2_rms_row(p.width, n.normEps, xr, w, hrow, tid, lane, sgitg, partial);
+        } else {
+            device float* frow = (j == 0u ? f0 : (j == 1u ? f1 : f2)) + ulong(row) * n.normed32Stride;
+            ink2_rms_row_dual(p.width, n.normEps, xr, w, hrow, frow, tid, lane, sgitg, partial);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);   // `partial` is reused by the next query
     }
 }
 
