@@ -28,7 +28,8 @@ import MferenceValidationSupport
 /// (relative to the goldens folder) picks the prompt, `generate2/cpu/trace02`
 /// by default: any golden folder; without a `trace.json` (a teacher-forced
 /// prompt, `generate-tf/metal/<id>`) only the log-probs are written and
-/// `margins` is refused. `llamaCPU` and `margins` need fewer than 32 tokens.
+/// `margins` is refused. `llamaCPU` and `margins` need fewer than 32 tokens,
+/// `llamaExperts` 32 or more; at most 512 tokens (the trace's arrays).
 @Suite("Inkling2 precision and routing on the real install", .serialized)
 struct Inkling2PrecisionRoutingTests {
     static let environment = ProcessInfo.processInfo.environment
@@ -82,6 +83,12 @@ struct Inkling2PrecisionRoutingTests {
         if modes.contains("llamaCPU") || modes.contains("margins") {
             try #require(n < 32, "\(n) tokens take ggml's BLAS path, which .llamaCPU does not model")
         }
+        if modes.contains("llamaExperts") {
+            try #require(n >= 32, "\(n) tokens: below 32 llama.cpp rounds as .llamaCPU, not .llamaExperts")
+        }
+        // The reference's trace keeps every visit's running sum as Swift
+        // arrays ([48][n][2304] floats, 0.44 MB per token): bounded here.
+        try #require(n <= 512, "\(n) tokens: the reference's trace would hold \(n * 48 * 2304 * 4 >> 20) MiB")
 
         let device = try #require(MTLCreateSystemDefaultDevice())
         // `.pread`: the Model never opens an expert file; the reference maps them.

@@ -25,12 +25,14 @@ struct Inkling2LogProbRow {
 
     init(halves: UnsafePointer<Float16>, count n: Int, softcap: Double, k: Int = 20) {
         var floats = [Float](repeating: 0, count: n)
-        floats.withUnsafeMutableBytes { dst in
+        let status = floats.withUnsafeMutableBytes { dst in
             var source = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: halves), height: 1,
                                        width: vImagePixelCount(n), rowBytes: n * 2)
             var target = vImage_Buffer(data: dst.baseAddress, height: 1, width: vImagePixelCount(n), rowBytes: n * 4)
-            _ = vImageConvert_Planar16FtoPlanarF(&source, &target, vImage_Flags(kvImageNoFlags))
+            return vImageConvert_Planar16FtoPlanarF(&source, &target, vImage_Flags(kvImageNoFlags))
         }
+        // A failed conversion would leave zeros: uniform log-probs, silently.
+        precondition(status == kvImageNoError, "FP16 to F32 conversion failed: \(status)")
         self.init(floats: floats, count: n, softcap: softcap, k: k)
     }
 
@@ -359,7 +361,8 @@ struct Inkling2G6cTests {
             }
             let n = ids.count
             try #require(n > 0 && n <= 4096)
-            let first = tf.map { n - 1 - ($0.logprobs_last ?? (n - 1)) }
+            // As ink-golden reads it: `logprobs_last` absent or 0 means every position.
+            let first = tf.map { n - 1 - (($0.logprobs_last ?? 0) > 0 ? $0.logprobs_last! : n - 1) }
             try #require(first.map { (0..<n).contains($0) } ?? true)
 
             var logitRows: MTLBuffer?
