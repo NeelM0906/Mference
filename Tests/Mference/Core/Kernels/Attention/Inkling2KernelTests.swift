@@ -117,8 +117,9 @@ enum Inkling2TestSupport {
     /// The 64 x 64 and 64 x 32 tiles run the same fragment products in the same K order, so
     /// they write the same bits; the 64 x 64 kernel's edge fragments (stored through a
     /// per-simdgroup scratch) included. Q8_0, BF16 and F32 rows; partial row tiles (70, 24, 100,
-    /// 40 rows) and partial token tiles; columns outside every segment untouched.
-    @Test(arguments: [37, 130, 1000])
+    /// 40 rows) and partial token tiles (37, 130 and 1,001 tokens cut an 8 x 8 fragment); columns
+    /// outside every segment untouched.
+    @Test(arguments: [37, 130, 1001])
     func tiled64MatchesTiledBitForBit(tokens: Int) throws {
         let ctx = try MetalContext()
         let projection = try Inkling2Projection(library: Inkling2KernelLibrary(context: ctx))

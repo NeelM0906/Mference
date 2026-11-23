@@ -333,6 +333,7 @@ void inkling2_q8_stacked_mm64(
         // Fragments wholly inside the tile's rows and tokens store directly;
         // a fragment cut by the edge goes through the scratch, lane by lane.
         threadgroup float* scratch = edge + 64 * sgitg;
+        INK2_UNROLL
         for (short i = 0; i < 16; ++i) {
             const uint lr = 32u * (sgitg & 1) + 8u * uint(i % 4), lt = 32u * (sgitg >> 1) + 8u * uint(i / 4);
             if (lr >= uint(nr0) || lt >= uint(nr1)) { continue; }
