@@ -31,6 +31,12 @@ import MferenceValidationSupport
 /// shortfall below `.fp32`'s 8th score, and each visit's increment error;
 /// and every disagreement, near-tie or not (shortfall under rule (a)'s
 /// 0.0258). It asserts nothing about how many there are.
+/// `MFERENCE_INKLING2_PRECISION_FORCED_PRECISION` (`fp32` by default,
+/// `llamaExperts` from 32 tokens, `llamaCPU` below) sets the reference's
+/// precision, and `FORCED_FROM` may also be one of K0's llama.cpp CPU trace
+/// folders (`<goldens>/generate3/cpu`): its `expert_weights` and
+/// `result_norm` then add G6a's route-weight and final-norm errors, so the
+/// reference is checked against llama.cpp per visit at any depth up to 512.
 ///
 /// Loads the install, so it runs only with `MFERENCE_INKLING2_GTURBO`,
 /// `MFERENCE_INKLING2_GOLDENS_DIR` and `MFERENCE_INKLING2_PRECISION_OUT` set,
@@ -87,10 +93,15 @@ struct Inkling2PrecisionRoutingTests {
             let layer: Int
             let experts: [[Int]]
             let margins: [Float]?
+            /// llama.cpp's traces only.
+            let expert_weights: [[Float]]?
         }
         let hidden_file: String
         let hidden_shape: [Int]
         let visits: [Visit]
+        /// llama.cpp's traces only: the final norm's last rows.
+        let result_norm_file: String?
+        let result_norm_shape: [Int]?
     }
     /// An optional written as `null` when absent: the synthesized
     /// `Encodable` would leave the key out, and the reader expects it.
@@ -121,6 +132,15 @@ struct Inkling2PrecisionRoutingTests {
             /// this visit (output minus input, the runner's input) against
             /// the runner's, `.fp32` using the runner's experts.
             let increment_rel_l2: [Float]
+            /// Per token: G6a's element error, the output's largest element
+            /// difference relative to the record's largest magnitude, or to
+            /// the increment's, whichever is larger.
+            let element_rel_max: [Float]
+            /// Per token: the largest difference between the reference's
+            /// weights for the forced experts and the trace's
+            /// `expert_weights` (G6a's route weights); null when the trace
+            /// has none, as the runner's.
+            let route_weight_err: Nullable<[Float]>
         }
         struct Disagreement: Encodable {
             let visit: Int
@@ -146,6 +166,11 @@ struct Inkling2PrecisionRoutingTests {
         let runner_trace_sha256: String
         let reference_commit: Nullable<String>
         let reference: String
+        /// The reference's precision: fp32, llamaExperts or llamaCPU.
+        let precision: String
+        /// Per row of the trace's `result_norm` (its last rows), G6a's
+        /// final-norm error; null when the trace has none, as the runner's.
+        let final_norm_rel: Nullable<[Float]>
         /// The runner trace's folder name.
         let forced_from: String
         /// Where `runner_margin` comes from: "trace.json", or null when the
@@ -328,7 +353,12 @@ struct Inkling2PrecisionRoutingTests {
         }
     }
 
-    /// The `forced` mode: `.fp32`'s own router at the runner's state.
+    struct ForcedPrecisionError: Error, CustomStringConvertible {
+        let name: String
+        var description: String { "unknown MFERENCE_INKLING2_PRECISION_FORCED_PRECISION \(name)" }
+    }
+
+    /// The `forced` mode: the reference's own router at the trace's state.
     private func forcedRouting(reference: Inkling2ReferenceModel, id: String, ids: [Int32], d: Int, topK: Int,
                                experts: Int, schedule: [Inkling2ReferenceVisit], outURL: URL) throws {
         let root = try #require(Self.forcedFrom, "forced needs MFERENCE_INKLING2_PRECISION_FORCED_FROM")
@@ -360,8 +390,34 @@ struct Inkling2PrecisionRoutingTests {
             }
         }()
 
+        let precisionName = Self.environment["MFERENCE_INKLING2_PRECISION_FORCED_PRECISION"] ?? "fp32"
+        switch precisionName {
+        case "fp32":
+            reference.precision = .fp32
+        case "llamaExperts":
+            try #require(n >= 32, "\(n) tokens: below 32 llama.cpp rounds as .llamaCPU, not .llamaExperts")
+            reference.precision = .llamaExperts
+        case "llamaCPU":
+            try #require(n < 32, "\(n) tokens take ggml's BLAS path, which .llamaCPU does not model")
+            reference.precision = .llamaCPU
+        default:
+            throw ForcedPrecisionError(name: precisionName)
+        }
+        try #require(runner.visits.allSatisfy { w in
+            w.expert_weights.map { $0.count == n && $0.allSatisfy { $0.count == topK } } ?? true
+        }, "\(id): the trace's expert weights")
+        let finalNorm: [[Float]]? = try runner.result_norm_file.map { file in
+            let shape = try #require(runner.result_norm_shape)
+            let rows = shape.first ?? 0
+            try #require(shape == [rows, d] && (1...n).contains(rows), "\(id): result_norm shape")
+            let data = try Data(contentsOf: folder.appendingPathComponent(file))
+            try #require(data.count == rows * d * 4, "\(id): result_norm size")
+            return data.withUnsafeBytes { raw in
+                (0..<rows).map { r in (0..<d).map { raw.load(fromByteOffset: (r * d + $0) * 4, as: Float.self) } }
+            }
+        }
+
         let started = Date()
-        reference.precision = .fp32
         reference.forcedRoutes = runner.visits.map(\.experts)
         reference.forcedVisitOutputs = records
         _ = reference.forward(tokens: ids, logits: .none)
@@ -373,19 +429,28 @@ struct Inkling2PrecisionRoutingTests {
         for v in 0..<48 {
             // A block's first visit starts its running sum from zero (as G6a).
             let blockStart = schedule[v].layer % 6 == 0
-            var increments: [Float] = []
+            var increments: [Float] = [], elements: [Float] = [], weightErrors: [Float] = []
             var differs: [Bool] = []
             for t in 0..<n {
                 let got = own.visitOutputs[v][t], want = records[v][t]
                 let input: [Float]? = blockStart ? nil : records[v - 1][t]
-                var error = 0.0, norm = 0.0
+                var error = 0.0, norm = 0.0, largestDiff = 0.0, largestWant = 0.0, largestIncrement = 0.0
                 for i in 0..<d {
                     let base = Double(input?[i] ?? 0)
                     let g = Double(got[i]) - base, w = Double(want[i]) - base
                     error += (g - w) * (g - w)
                     norm += w * w
+                    largestDiff = max(largestDiff, abs(g - w))
+                    largestWant = max(largestWant, abs(Double(want[i])))
+                    largestIncrement = max(largestIncrement, abs(w))
                 }
                 increments.append(Float((error / max(norm, 1e-30)).squareRoot()))
+                elements.append(Float(largestDiff / max(min(largestWant, largestIncrement), 1e-6)))
+                if let traced = runner.visits[v].expert_weights?[t] {
+                    let mineW = own.routes[v][t].weights
+                    weightErrors.append(mineW.count == traced.count
+                                        ? zip(mineW, traced).map { abs($0 - $1) }.max()! : .infinity)
+                }
                 let mine = Set(own.ownRoutes[v][t].experts), theirs = Set(runner.visits[v].experts[t])
                 differs.append(mine != theirs)
                 if mine != theirs {
@@ -401,21 +466,34 @@ struct Inkling2PrecisionRoutingTests {
             visits.append(.init(visit: v, layer: schedule[v].layer, slot: schedule[v].cacheSlot,
                                 own_experts: (0..<n).map { own.ownRoutes[v][$0].experts.sorted() },
                                 fp32_margins: own.routeMargins[v], shortfalls: own.routeShortfalls[v],
-                                differs: differs, increment_rel_l2: increments))
+                                differs: differs, increment_rel_l2: increments, element_rel_max: elements,
+                                route_weight_err: Nullable(runner.visits[v].expert_weights == nil ? nil : weightErrors)))
         }
         let notNearTie = disagreements.filter { !$0.near_tie }
+        let finalNormErrors: [Float]? = finalNorm.map { rows in
+            rows.indices.map { r in
+                let got = own.finalHidden[n - rows.count + r], want = rows[r]
+                let diff = zip(got, want).map { abs($0 - $1) }.max()!
+                return diff / max(want.map(abs).max()!, 1e-6)
+            }
+        }
         // The reader refuses non-finite values; so does JSONEncoder, less clearly.
         try #require(visits.allSatisfy { v in
-            (v.fp32_margins + v.shortfalls + v.increment_rel_l2).allSatisfy(\.isFinite)
-        }, "\(id): a non-finite margin, shortfall or increment error")
+            (v.fp32_margins + v.shortfalls + v.increment_rel_l2 + v.element_rel_max
+             + (v.route_weight_err.value ?? [])).allSatisfy(\.isFinite)
+        } && (finalNormErrors ?? []).allSatisfy(\.isFinite),
+        "\(id): a non-finite margin, shortfall, increment, element, route-weight or final-norm error")
         try FileManager.default.createDirectory(at: outURL.appendingPathComponent("forced"),
                                                 withIntermediateDirectories: true)
         try write(ForcedRouting(schema: "inkling2-forced-routing-v1", id: id,
-                                candidate: root.deletingLastPathComponent().lastPathComponent,
+                                candidate: root.lastPathComponent == "traces"
+                                    ? root.deletingLastPathComponent().lastPathComponent
+                                    : root.deletingLastPathComponent().lastPathComponent + "/" + root.lastPathComponent,
                                 runner_tip: Nullable(Self.environment["MFERENCE_INKLING2_PRECISION_RUNNER_TIP"]),
                                 runner_trace_sha256: traceSHA,
                                 reference_commit: Nullable(Self.environment["MFERENCE_INKLING2_PRECISION_REFERENCE_COMMIT"]),
-                                reference: "Inkling2ReferenceModel fp32", forced_from: folder.lastPathComponent,
+                                reference: "Inkling2ReferenceModel \(precisionName)", precision: precisionName,
+                                final_norm_rel: Nullable(finalNormErrors), forced_from: folder.lastPathComponent,
                                 runner_margins: Nullable(hasMargins ? "trace.json" : nil),
                                 n_tokens: n, top_k: topK, near_tie_bound: Self.nearTieBound,
                                 token_visits: 48 * n, disagreement_count: disagreements.count,
@@ -424,12 +502,22 @@ struct Inkling2PrecisionRoutingTests {
                                 visits: visits, disagreements: disagreements),
                   to: outURL.appendingPathComponent("forced").appendingPathComponent("\(id).json"))
         let increments = visits.flatMap(\.increment_rel_l2).sorted()
-        print("inkling2 precision \(id) forced (.fp32 at the runner's state, \(String(format: "%.0f", seconds)) s): "
+        let weights = visits.flatMap { $0.route_weight_err.value ?? [] }
+        print("inkling2 precision \(id) forced (.\(precisionName) at the trace's state, \(String(format: "%.0f", seconds)) s): "
               + "own top-8 differs from the runner's on \(disagreements.count) of \(48 * n) token-visits, "
               + "largest shortfall \(disagreements.map(\.shortfall).max() ?? 0), "
               + "not near-tie (>= \(Self.nearTieBound)) \(notNearTie.count); increment rel L2 median "
-              + "\(increments[increments.count / 2]), max \(increments.last!); "
+              + "\(increments[increments.count / 2]), max \(increments.last!); element max "
+              + "\(visits.flatMap(\.element_rel_max).max()!), route weights max \(weights.max().map { "\($0)" } ?? "n/a"), "
+              + "final norm max \(finalNormErrors?.max().map { "\($0)" } ?? "n/a"); "
               + "peak footprint \(Inkling2G6cTests.footprint().peak >> 20) MiB")
+        for v in visits {
+            let worstWeight = v.route_weight_err.value?.max().map { String(format: " w %.2e", $0) } ?? ""
+            print(String(format: "inkling2 precision \(id) forced %2d L%02d s%02d incL2 %.2e max %.2e", v.visit, v.layer,
+                         v.slot, v.increment_rel_l2.max()!, v.element_rel_max.max()!)
+                  + worstWeight + " own-top8 differs \(v.differs.filter { $0 }.count)/\(n) short "
+                  + String(format: "%.2e", v.shortfalls.max()!))
+        }
         for x in notNearTie {
             print("inkling2 precision \(id) forced NOT A NEAR-TIE: visit \(x.visit) layer \(x.layer) pos \(x.pos) "
                   + "shortfall \(x.shortfall) fp32 margin \(x.fp32_margin) runner margin "
