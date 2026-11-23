@@ -52,6 +52,10 @@ struct Inkling2PrecisionRoutingTests {
         environment["MFERENCE_INKLING2_PRECISION_FORCED_FROM"].map { URL(fileURLWithPath: $0) }
     }
     /// Rule (a)'s bound on an expert-set flip's selection margin (spec v1.12).
+    /// `forced` calls a disagreement a near-tie when the runner's shortfall
+    /// is under it: the cost of the runner's actual choice, never below
+    /// `.fp32`'s margin there, so the stricter reading (agreed with K0).
+    /// Each disagreement also carries `.fp32`'s margin for rule (a)'s own.
     static let nearTieBound: Float = 0.0258
 
     static let sites: [String: Inkling2ReferenceModel.MetalRunnerSites] = [
@@ -79,6 +83,7 @@ struct Inkling2PrecisionRoutingTests {
     /// The runner's trace as `Inkling2G6cTests` writes it.
     struct RunnerTrace: Decodable {
         struct Visit: Decodable {
+            let slot: Int
             let layer: Int
             let experts: [[Int]]
             let margins: [Float]?
@@ -86,6 +91,16 @@ struct Inkling2PrecisionRoutingTests {
         let hidden_file: String
         let hidden_shape: [Int]
         let visits: [Visit]
+    }
+    /// An optional written as `null` when absent: the synthesized
+    /// `Encodable` would leave the key out, and the reader expects it.
+    struct Nullable<Value: Encodable>: Encodable {
+        let value: Value?
+        init(_ value: Value?) { self.value = value }
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.singleValueContainer()
+            if let value { try container.encode(value) } else { try container.encodeNil() }
+        }
     }
     /// `forced`'s record, `inkling2-forced-routing-v1`.
     struct ForcedRouting: Encodable {
@@ -113,8 +128,8 @@ struct Inkling2PrecisionRoutingTests {
             let pos: Int
             let shortfall: Float
             let fp32_margin: Float
-            /// The runner's own margin at that token-visit (its trace's).
-            let runner_margin: Float?
+            /// The runner's own margin at that token-visit (its trace's), or null.
+            let runner_margin: Nullable<Float>
             let runner_only: [Int]
             let fp32_only: [Int]
             /// `shortfall` under `near_tie_bound`.
@@ -127,15 +142,15 @@ struct Inkling2PrecisionRoutingTests {
         /// (`MFERENCE_INKLING2_PRECISION_RUNNER_TIP` and `_REFERENCE_COMMIT`,
         /// null when unset), and the SHA-256 of the `trace.json` forced from.
         let candidate: String
-        let runner_tip: String?
+        let runner_tip: Nullable<String>
         let runner_trace_sha256: String
-        let reference_commit: String?
+        let reference_commit: Nullable<String>
         let reference: String
         /// The runner trace's folder name.
         let forced_from: String
         /// Where `runner_margin` comes from: "trace.json", or null when the
         /// runner's trace has no margins.
-        let runner_margins: String?
+        let runner_margins: Nullable<String>
         let n_tokens: Int
         let top_k: Int
         let near_tie_bound: Float
@@ -198,7 +213,7 @@ struct Inkling2PrecisionRoutingTests {
             let started = Date()
             if mode == "forced" {
                 try forcedRouting(reference: reference, id: id, ids: ids, d: d, topK: c.topKExperts,
-                                  schedule: schedule, outURL: outURL)
+                                  experts: c.numExperts, schedule: schedule, outURL: outURL)
                 continue
             }
             if mode == "margins" {
@@ -315,7 +330,7 @@ struct Inkling2PrecisionRoutingTests {
 
     /// The `forced` mode: `.fp32`'s own router at the runner's state.
     private func forcedRouting(reference: Inkling2ReferenceModel, id: String, ids: [Int32], d: Int, topK: Int,
-                               schedule: [Inkling2ReferenceVisit], outURL: URL) throws {
+                               experts: Int, schedule: [Inkling2ReferenceVisit], outURL: URL) throws {
         let root = try #require(Self.forcedFrom, "forced needs MFERENCE_INKLING2_PRECISION_FORCED_FROM")
         let folder = root.appendingPathComponent(id)
         let n = ids.count
@@ -328,7 +343,12 @@ struct Inkling2PrecisionRoutingTests {
         try #require(runner.hidden_shape == [48, n, d] && runner.visits.count == 48
                      && runner.visits.allSatisfy { $0.experts.count == n && $0.experts.allSatisfy { $0.count == topK } },
                      "\(id): the runner's trace shape")
-        try #require(zip(runner.visits, schedule).allSatisfy { $0.layer == $1.layer },
+        // Distinct, in range: the reference's precondition would end the process instead.
+        try #require(runner.visits.allSatisfy { $0.experts.allSatisfy { e in
+            Set(e).count == topK && e.allSatisfy { (0..<experts).contains($0) }
+        } }, "\(id): the runner's expert ids")
+        let hasMargins = runner.visits.allSatisfy { $0.margins?.count == n }
+        try #require(zip(runner.visits, schedule).allSatisfy { $0.layer == $1.layer && $0.slot == $1.cacheSlot },
                      "\(id): the runner's visit order is the reference's schedule")
         let records: [[[Float]]] = try {
             let hidden = try Data(contentsOf: folder.appendingPathComponent(runner.hidden_file))
@@ -372,7 +392,7 @@ struct Inkling2PrecisionRoutingTests {
                     let shortfall = own.routeShortfalls[v][t]
                     disagreements.append(.init(visit: v, layer: schedule[v].layer, pos: t, shortfall: shortfall,
                                                fp32_margin: own.routeMargins[v][t],
-                                               runner_margin: runner.visits[v].margins?[t],
+                                               runner_margin: Nullable(hasMargins ? runner.visits[v].margins?[t] : nil),
                                                runner_only: theirs.subtracting(mine).sorted(),
                                                fp32_only: mine.subtracting(theirs).sorted(),
                                                near_tie: shortfall < Self.nearTieBound))
@@ -388,16 +408,15 @@ struct Inkling2PrecisionRoutingTests {
         try #require(visits.allSatisfy { v in
             (v.fp32_margins + v.shortfalls + v.increment_rel_l2).allSatisfy(\.isFinite)
         }, "\(id): a non-finite margin, shortfall or increment error")
-        let hasMargins = runner.visits.allSatisfy { $0.margins?.count == n }
         try FileManager.default.createDirectory(at: outURL.appendingPathComponent("forced"),
                                                 withIntermediateDirectories: true)
         try write(ForcedRouting(schema: "inkling2-forced-routing-v1", id: id,
                                 candidate: root.deletingLastPathComponent().lastPathComponent,
-                                runner_tip: Self.environment["MFERENCE_INKLING2_PRECISION_RUNNER_TIP"],
+                                runner_tip: Nullable(Self.environment["MFERENCE_INKLING2_PRECISION_RUNNER_TIP"]),
                                 runner_trace_sha256: traceSHA,
-                                reference_commit: Self.environment["MFERENCE_INKLING2_PRECISION_REFERENCE_COMMIT"],
+                                reference_commit: Nullable(Self.environment["MFERENCE_INKLING2_PRECISION_REFERENCE_COMMIT"]),
                                 reference: "Inkling2ReferenceModel fp32", forced_from: folder.lastPathComponent,
-                                runner_margins: hasMargins ? "trace.json" : nil,
+                                runner_margins: Nullable(hasMargins ? "trace.json" : nil),
                                 n_tokens: n, top_k: topK, near_tie_bound: Self.nearTieBound,
                                 token_visits: 48 * n, disagreement_count: disagreements.count,
                                 disagreement_rate: Double(disagreements.count) / Double(48 * n),
@@ -414,7 +433,7 @@ struct Inkling2PrecisionRoutingTests {
         for x in notNearTie {
             print("inkling2 precision \(id) forced NOT A NEAR-TIE: visit \(x.visit) layer \(x.layer) pos \(x.pos) "
                   + "shortfall \(x.shortfall) fp32 margin \(x.fp32_margin) runner margin "
-                  + "\(x.runner_margin.map { "\($0)" } ?? "none") runner-only \(x.runner_only) fp32-only \(x.fp32_only)")
+                  + "\(x.runner_margin.value.map { "\($0)" } ?? "none") runner-only \(x.runner_only) fp32-only \(x.fp32_only)")
         }
     }
 }
