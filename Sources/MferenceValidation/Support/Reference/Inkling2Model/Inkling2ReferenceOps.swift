@@ -227,21 +227,41 @@ public enum Inkling2ReferenceOps {
         return Inkling2Route(experts: Array(chosen), weights: weights)
     }
 
+    /// `route` with the experts given (another implementation's choice, in
+    /// its order) instead of the top-k: the weights are those experts' own
+    /// scores, normalized, times `routeScale`. `shortfall` is how far the
+    /// lowest given expert's selection score lies below the k-th best, 0
+    /// when the given experts are the top-k; a small shortfall marks a
+    /// near-tie the two implementations broke differently.
+    public static func route(_ x: [Float], router: any Inkling2ReferenceMatrix, bias: [Float],
+                             experts: [Int], routeScale: Float) -> (route: Inkling2Route, shortfall: Float) {
+        let scores = router.apply(x).map(sigmoid)
+        let selection: [Float] = (0..<scores.count).map { scores[$0] + bias[$0] }
+        let kth = selection.sorted(by: >)[experts.count - 1]
+        let lowest = experts.map { selection[$0] }.min()!
+        let sum = experts.reduce(0.0) { $0 + Double(scores[$1]) }
+        let weights = experts.map { Float(Double(scores[$0]) / (sum + 1e-20) * Double(routeScale)) }
+        return (Inkling2Route(experts: experts, weights: weights), max(0, kth - lowest))
+    }
+
     /// One expert: `[gate; up] = gateUp x`,
     /// `act = softcap(gate, gateCap) * sigmoid(gate) * softcap(up, upCap)`
     /// (the sigmoid sees the raw gate), output `down act`.
     /// `observe`, when given, sees the `[gate; up]` pre-activations.
+    /// `halfActivation` rounds the activation to FP16 before `down`, as a
+    /// kernel that stores it in half does.
     public static func expert(_ x: [Float], gateUp: any Inkling2ReferenceMatrix,
                               down: any Inkling2ReferenceMatrix,
-                              gateSoftcap: Float, upSoftcap: Float,
+                              gateSoftcap: Float, upSoftcap: Float, halfActivation: Bool = false,
                               observe: (([Float]) -> Void)? = nil) -> [Float] {
         let gu = gateUp.apply(x)
         observe?(gu)
         let ff = gu.count / 2
         let act = (0..<ff).map { i -> Float in
             let g = gu[i]
-            return Float(Double(softcap(g, gateSoftcap)) * Double(sigmoid(g))
-                         * Double(softcap(gu[ff + i], upSoftcap)))
+            let a = Float(Double(softcap(g, gateSoftcap)) * Double(sigmoid(g))
+                          * Double(softcap(gu[ff + i], upSoftcap)))
+            return halfActivation ? Float(Float16(a)) : a
         }
         return down.apply(act)
     }
@@ -251,12 +271,12 @@ public enum Inkling2ReferenceOps {
     public static func moe(_ x: [Float], route: Inkling2Route,
                            gateUp: [any Inkling2ReferenceMatrix],
                            down: [any Inkling2ReferenceMatrix],
-                           gateSoftcap: Float, upSoftcap: Float,
+                           gateSoftcap: Float, upSoftcap: Float, halfActivation: Bool = false,
                            observe: (([Float]) -> Void)? = nil) -> [Float] {
         var acc = [Double](repeating: 0, count: x.count)
         for (e, w) in zip(route.experts, route.weights) {
-            let y = expert(x, gateUp: gateUp[e], down: down[e],
-                           gateSoftcap: gateSoftcap, upSoftcap: upSoftcap, observe: observe)
+            let y = expert(x, gateUp: gateUp[e], down: down[e], gateSoftcap: gateSoftcap,
+                           upSoftcap: upSoftcap, halfActivation: halfActivation, observe: observe)
             for i in 0..<acc.count { acc[i] += Double(w) * Double(y[i]) }
         }
         return acc.map { Float($0) }

@@ -153,6 +153,20 @@ struct Inkling2ReferenceOpsTests {
         #expect(close(biased.weights.reduce(0, +), 8, 1e-5))
     }
 
+    @Test func forcedRouteWeightsTheGivenExpertsAndMeasuresTheShortfall() {
+        let router = Inkling2DenseMatrix(rows: 3, cols: 1, values: [2, 1, -1])
+        let own = Op.route([1], router: router, bias: [0, 0, 0], topK: 2, routeScale: 8)
+        let same = Op.route([1], router: router, bias: [0, 0, 0], experts: [1, 0], routeScale: 8)
+        #expect(same.shortfall == 0)
+        #expect(same.route.experts == [1, 0])
+        #expect(close(same.route.weights[0], own.weights[1]) && close(same.route.weights[1], own.weights[0]))
+        // Expert 2 instead of 1: its selection score is sigmoid(-1) against the cutoff sigmoid(1).
+        let other = Op.route([1], router: router, bias: [0, 0, 0], experts: [0, 2], routeScale: 8)
+        #expect(close(other.shortfall, Op.sigmoid(1) - Op.sigmoid(-1)))
+        let s0 = Op.sigmoid(2), s2 = Op.sigmoid(-1)
+        #expect(close(other.route.weights[0], s0 / (s0 + s2) * 8, 1e-5))
+    }
+
     @Test func routerTiesGoToTheLowerIndex() {
         let router = Inkling2DenseMatrix(rows: 4, cols: 1, values: [1, 1, 1, 1])
         #expect(Op.route([1], router: router, bias: [0, 0, 0, 0], topK: 2, routeScale: 1).experts == [0, 1])
