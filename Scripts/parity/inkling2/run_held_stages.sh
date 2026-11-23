@@ -8,6 +8,10 @@
 #
 # Order: the goldens first (not timing; any power), then the baseline timing
 # stages shortest first (model-hold.sh --timing: quiet, AC power, builds drained).
+# Native stages (native:native-512, native:native-4k, native:native-16k) are
+# never in the default list; they need NATIVE_CLI_DIR (a release MferenceCLI
+# with its bundles) and MFERENCE_INKLING2_GTURBO (the install) and write
+# $INK/results/k0/native/<stage>.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=paths.sh
@@ -25,6 +29,11 @@ for s in "${STAGES[@]}"; do
   kind=${s%%:*}; stage=${s#*:}
   if [ "$kind" = golden ]; then
     "$MODEL_HOLD" ws0 "golden $stage" -- "$HERE/golden_stage.sh" "$B" "$INK/goldens" "$stage"
+  elif [ "$kind" = native ]; then
+    [ -n "${NATIVE_CLI_DIR:-}" ] && [ -n "${MFERENCE_INKLING2_GTURBO:-}" ] || {
+      echo "native stages need NATIVE_CLI_DIR and MFERENCE_INKLING2_GTURBO" >&2; exit 2; }
+    "$MODEL_HOLD" --timing ws0 "native $stage" -- "$HERE/native_stage.sh" \
+      "$NATIVE_CLI_DIR" "$MFERENCE_INKLING2_GTURBO" "$INK/results/k0/native" "$stage"
   else
     "$MODEL_HOLD" --timing ws0 "baseline $stage" -- "$HERE/baseline_stage.sh" "$B" "$INK/results/k0/baseline" "$stage"
   fi
