@@ -12,8 +12,9 @@ using namespace metal;
 //
 // Pieces, each one or two dispatches, with no CPU readback between them:
 //   router        F32 logits, sigmoid, biased top-8, normalized weights x 8
-//   route plan    count, prefix, scatter: pairs grouped by expert and a list
-//                 of 64-row work blocks, plus indirect dispatch arguments
+//   route plan    count, prefix, scatter: pairs grouped by expert, a list of
+//                 64-row blocks and of 32-row tail blocks (an expert's last
+//                 1-32 rows), plus four indirect dispatch records
 //   gate-up       grouped GEMM, weights decoded a tile at a time into half
 //                 threadgroup tiles, float accumulators, the per-expert scale
 //                 and the SITU activation in the epilogue
@@ -53,6 +54,8 @@ struct I2Params {
     uint gate_up_offset;    // bytes from a blob to gate-up row 0
     uint down_offset;       // bytes from a blob to down row 0
     uint experts;
+    uint work_tail_base;    // index of the first tail block in the work list
+    uint flags;             // bit 0: route weights are already in the down input
 };
 
 static inline uint i2_row_bytes(uint k) {
@@ -125,18 +128,6 @@ static inline void i2_dequant_tile(device const uchar* mat, uint k, uint row0, u
     }
 }
 
-// Rows [0, 64) x K [k0, k0 + 32); rows past the block's end are zero. Each
-// thread copies half a row (16 halves).
-static inline void i2_load_rows(device const half* src_row, bool valid, uint k0, threadgroup half* dst_row) {
-    threadgroup half4* dst = reinterpret_cast<threadgroup half4*>(dst_row);
-    if (valid) {
-        device const half4* src = reinterpret_cast<device const half4*>(src_row + k0);
-        I2_UNROLL for (uint i = 0; i < kI2K / 8u; ++i) dst[i] = src[i];
-    } else {
-        I2_UNROLL for (uint i = 0; i < kI2K / 8u; ++i) dst[i] = half4(0.0h);
-    }
-}
-
 // SITU with clamped arguments: Metal's fast tanh and exp return NaN far
 // outside their useful range; at the clamps tanh is 1 and the sigmoid 0 or 1
 // to FP32 precision.
@@ -149,50 +140,52 @@ static inline float i2_situ(float g, float u) {
 
 // MARK: - Prefill grouped GEMMs
 
-kernel void inkling2_moe_gate_up(
-    device const half* hidden            [[buffer(0)]],
-    device const I2Pair* pairs           [[buffer(1)]],
-    device const I2Work* work            [[buffer(2)]],
-    device const uint* work_count        [[buffer(3)]],
-    device half* activation              [[buffer(4)]],
-    device const uchar* pool             [[buffer(5)]],
-    device const float* gate_up_scales   [[buffer(6)]],
-    constant I2Params& p                 [[buffer(7)]],
-    uint2 tgid  [[threadgroup_position_in_grid]],
-    ushort tid  [[thread_index_in_threadgroup]],
-    ushort sg   [[simdgroup_index_in_threadgroup]],
-    ushort lane [[thread_index_in_simdgroup]]) {
-    if (tgid.y >= work_count[0]) return;
-    const I2Work w = work[tgid.y];
+// Rows [0, ROWS) x K [k0, k0 + 32) of the block's routed rows; rows past the
+// block's end are zero. 128 threads, 128 / ROWS per row.
+template <uint ROWS>
+static inline void i2_load_rows(device const half* src_row, bool valid, uint k0, threadgroup half* dst_row) {
+    constexpr uint kHalves = kI2K * ROWS / kI2Threads;   // 16 or 8
+    threadgroup half4* dst = reinterpret_cast<threadgroup half4*>(dst_row);
+    if (valid) {
+        device const half4* src = reinterpret_cast<device const half4*>(src_row + k0);
+        I2_UNROLL for (uint i = 0; i < kHalves / 4u; ++i) dst[i] = src[i];
+    } else {
+        I2_UNROLL for (uint i = 0; i < kHalves / 4u; ++i) dst[i] = half4(0.0h);
+    }
+}
+
+// One work block of gate-up: ROWS routed rows (64, or 32 for an expert's
+// tail) x 64 gate and 64 up outputs. Four simdgroups: 2 x 2 of 32 x 32 for
+// 64 rows, 1 x 4 of 32 x 16 for 32 rows.
+template <uint ROWS>
+static inline void i2_gate_up_block(
+    device const half* hidden, device const I2Pair* pairs, const I2Work w, device half* activation,
+    device const uchar* pool, device const float* gate_up_scales, constant I2Params& p, uint n_base,
+    threadgroup half* smem, threadgroup half2* lut, ushort tid, ushort sg, ushort lane) {
+    constexpr uint SG_COLS = 4u / (ROWS / 32u);            // 2 or 4
+    constexpr uint COLS = kI2GateUpCols / SG_COLS;           // 32 or 16 per matrix
+    constexpr uint NJ = COLS / 8u;                           // 4 or 2
+    constexpr uint kThreadsPerRow = kI2Threads / ROWS;       // 2 or 4
     device const uchar* gate = pool + ulong(w.expert) * p.expert_stride + p.gate_up_offset;
     device const uchar* up = gate + ulong(p.F) * i2_row_bytes(p.D);
-    const uint n_base = tgid.x * kI2GateUpCols;
-
-    threadgroup half smem[3 * kI2Rows * kI2Ld];
-    threadgroup half2 lut[256];
     threadgroup half* rows_tile = smem;
     threadgroup half* gate_tile = smem + kI2Rows * kI2Ld;
     threadgroup half* up_tile = gate_tile + kI2GateUpCols * kI2Ld;
-    if (kI2Encoding == kI2NVFP4) {
-        i2_fill_lut(lut, tid, kI2Threads);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
 
-    const uint a_row = tid / 2u, a_k = (tid % 2u) * (kI2K / 2u);
+    const uint a_row = tid / kThreadsPerRow, a_k = (tid % kThreadsPerRow) * (kI2K / kThreadsPerRow);
     const bool a_valid = a_row < w.row_count;
     device const half* a_src = hidden;
     if (a_valid) a_src = hidden + ulong(pairs[w.pair_start + a_row].token) * p.hidden_stride + a_k;
 
-    simdgroup_float8x8 acc_gate[4][4], acc_up[4][4];
-    I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < 4; ++j) {
+    simdgroup_float8x8 acc_gate[4][NJ], acc_up[4][NJ];
+    I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
         acc_gate[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
         acc_up[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     }
-    const uint sg_m = (sg / 2u) * 32u, sg_n = (sg % 2u) * 32u;
+    const uint sg_m = (sg / SG_COLS) * 32u, sg_n = (sg % SG_COLS) * COLS;
 
     for (uint k0 = 0; k0 < p.D; k0 += kI2K) {
-        i2_load_rows(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
-        // Simdgroups 0-1 decode the gate rows and 2-3 the up rows.
+        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
         if (tid < kI2GateUpCols) {
             i2_dequant_tile(gate, p.D, n_base, kI2GateUpCols, k0, lut, gate_tile, tid, kI2GateUpCols);
         } else {
@@ -200,15 +193,15 @@ kernel void inkling2_moe_gate_up(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         I2_UNROLL for (uint kk = 0; kk < kI2K; kk += 8) {
-            simdgroup_half8x8 a[4], g[4], u[4];
+            simdgroup_half8x8 a[4], g[NJ], u[NJ];
             I2_UNROLL for (uint i = 0; i < 4; ++i) {
                 simdgroup_load(a[i], rows_tile + (sg_m + i * 8u) * kI2Ld + kk, kI2Ld);
             }
-            I2_UNROLL for (uint j = 0; j < 4; ++j) {
+            I2_UNROLL for (uint j = 0; j < NJ; ++j) {
                 simdgroup_load(g[j], gate_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true);
                 simdgroup_load(u[j], up_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true);
             }
-            I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < 4; ++j) {
+            I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
                 simdgroup_multiply_accumulate(acc_gate[i][j], a[i], g[j], acc_gate[i][j]);
                 simdgroup_multiply_accumulate(acc_up[i][j], a[i], u[j], acc_up[i][j]);
             }
@@ -216,13 +209,11 @@ kernel void inkling2_moe_gate_up(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Per-expert scale in FP32, then SITU, staged so partial blocks write
-    // only their own rows.
     const float scale = gate_up_scales[w.expert];
     constexpr uint kStage = kI2GateUpCols + 8;
     threadgroup half* stage = smem;
     const ushort2 fc = i2_frag_coord(lane);
-    I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < 4; ++j) {
+    I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
         const uint r = sg_m + i * 8u + fc.x, c = sg_n + j * 8u + fc.y;
         I2_UNROLL for (uint e = 0; e < 2; ++e) {
             const float gv = acc_gate[i][j].thread_elements()[e] * scale;
@@ -231,85 +222,136 @@ kernel void inkling2_moe_gate_up(
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint out_row = tid / 2u, out_col = (tid % 2u) * (kI2GateUpCols / 2u);
+    constexpr uint kOutCols = kI2GateUpCols / kThreadsPerRow;   // 32 or 16
+    const uint out_row = tid / kThreadsPerRow, out_col = (tid % kThreadsPerRow) * kOutCols;
     if (out_row < w.row_count) {
         device half4* dst = reinterpret_cast<device half4*>(
             activation + ulong(w.pair_start + out_row) * p.F + n_base + out_col);
         threadgroup const half4* src = reinterpret_cast<threadgroup const half4*>(stage + out_row * kStage + out_col);
-        I2_UNROLL for (uint i = 0; i < kI2GateUpCols / 8u; ++i) dst[i] = src[i];
+        I2_UNROLL for (uint i = 0; i < kOutCols / 4u; ++i) dst[i] = src[i];
     }
 }
 
-kernel void inkling2_moe_down(
-    device const half* activation        [[buffer(0)]],
-    device const I2Pair* pairs           [[buffer(1)]],
-    device const I2Work* work            [[buffer(2)]],
-    device const uint* work_count        [[buffer(3)]],
-    device float* partials               [[buffer(4)]],
-    device const uchar* pool             [[buffer(5)]],
-    device const float* down_scales      [[buffer(6)]],
-    constant I2Params& p                 [[buffer(7)]],
-    uint2 tgid  [[threadgroup_position_in_grid]],
-    ushort tid  [[thread_index_in_threadgroup]],
-    ushort sg   [[simdgroup_index_in_threadgroup]],
-    ushort lane [[thread_index_in_simdgroup]]) {
-    if (tgid.y >= work_count[0]) return;
-    const I2Work w = work[tgid.y];
+// One work block of down: ROWS rows x 128 outputs. Four simdgroups: 2 x 2 of
+// 32 x 64 for 64 rows, 1 x 4 of 32 x 32 for 32 rows.
+template <uint ROWS>
+static inline void i2_down_block(
+    device const half* activation, device const I2Pair* pairs, const I2Work w, device float* partials,
+    device const uchar* pool, device const float* down_scales, constant I2Params& p, uint n_base,
+    threadgroup half* smem, threadgroup half2* lut, ushort tid, ushort sg, ushort lane) {
+    constexpr uint SG_COLS = 4u / (ROWS / 32u);
+    constexpr uint COLS = kI2DownCols / SG_COLS;             // 64 or 32
+    constexpr uint NJ = COLS / 8u;                           // 8 or 4
+    constexpr uint kThreadsPerRow = kI2Threads / ROWS;
     device const uchar* down = pool + ulong(w.expert) * p.expert_stride + p.down_offset;
-    const uint n_base = tgid.x * kI2DownCols;
-
-    threadgroup half smem[(kI2Rows + kI2DownCols) * kI2Ld];
-    threadgroup half2 lut[256];
     threadgroup half* rows_tile = smem;
     threadgroup half* weight_tile = smem + kI2Rows * kI2Ld;
-    if (kI2Encoding == kI2NVFP4) {
-        i2_fill_lut(lut, tid, kI2Threads);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
 
-    const uint a_row = tid / 2u, a_k = (tid % 2u) * (kI2K / 2u);
+    const uint a_row = tid / kThreadsPerRow, a_k = (tid % kThreadsPerRow) * (kI2K / kThreadsPerRow);
     const bool a_valid = a_row < w.row_count;
     device const half* a_src = activation + ulong(w.pair_start + (a_valid ? a_row : 0u)) * p.F + a_k;
 
-    simdgroup_float8x8 acc[4][8];
-    I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < 8; ++j) {
+    simdgroup_float8x8 acc[4][NJ];
+    I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
         acc[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     }
-    const uint sg_m = (sg / 2u) * 32u, sg_n = (sg % 2u) * 64u;
+    const uint sg_m = (sg / SG_COLS) * 32u, sg_n = (sg % SG_COLS) * COLS;
 
     for (uint k0 = 0; k0 < p.F; k0 += kI2K) {
-        i2_load_rows(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
+        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
         i2_dequant_tile(down, p.F, n_base, kI2DownCols, k0, lut, weight_tile, tid, kI2Threads);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         I2_UNROLL for (uint kk = 0; kk < kI2K; kk += 8) {
-            simdgroup_half8x8 a[4], b[8];
+            simdgroup_half8x8 a[4], b[NJ];
             I2_UNROLL for (uint i = 0; i < 4; ++i) {
                 simdgroup_load(a[i], rows_tile + (sg_m + i * 8u) * kI2Ld + kk, kI2Ld);
             }
-            I2_UNROLL for (uint j = 0; j < 8; ++j) {
+            I2_UNROLL for (uint j = 0; j < NJ; ++j) {
                 simdgroup_load(b[j], weight_tile + (sg_n + j * 8u) * kI2Ld + kk, kI2Ld, ulong2(0, 0), true);
             }
-            I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < 8; ++j) {
+            I2_UNROLL for (uint i = 0; i < 4; ++i) I2_UNROLL for (uint j = 0; j < NJ; ++j) {
                 simdgroup_multiply_accumulate(acc[i][j], a[i], b[j], acc[i][j]);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // (acc * expert scale) * route weight, FP32, into the pair's partial row.
     const float scale = down_scales[w.expert];
     const ushort2 fc = i2_frag_coord(lane);
     I2_UNROLL for (uint i = 0; i < 4; ++i) {
         const uint r = sg_m + i * 8u + fc.x;
         if (r >= w.row_count) continue;
         const I2Pair pair = pairs[w.pair_start + r];
+        const float weight = (p.flags & 1u) != 0u ? 1.0f : pair.weight;
         device float* dst = partials + ulong(pair.token * p.top_k + pair.rank) * p.D + n_base + sg_n + fc.y;
-        I2_UNROLL for (uint j = 0; j < 8; ++j) {
+        I2_UNROLL for (uint j = 0; j < NJ; ++j) {
             const float2 v = float2(acc[i][j].thread_elements()[0], acc[i][j].thread_elements()[1]);
-            *reinterpret_cast<device float2*>(dst + j * 8u) = (v * scale) * pair.weight;
+            *reinterpret_cast<device float2*>(dst + j * 8u) = (v * scale) * weight;
         }
     }
 }
+
+// Entry points. Full blocks (up to 64 rows) read work[0 ..< work_count[0]];
+// tail blocks (an expert's last 1-32 rows) read work[tail_base ..<
+// tail_base + work_count[1]]. Grid (output tiles, blocks).
+
+#define I2_GATE_UP_KERNEL(NAME, ROWS, COUNT, BASE)                                          \
+kernel void NAME(                                                                           \
+    device const half* hidden            [[buffer(0)]],                                     \
+    device const I2Pair* pairs           [[buffer(1)]],                                     \
+    device const I2Work* work            [[buffer(2)]],                                     \
+    device const uint* work_count        [[buffer(3)]],                                     \
+    device half* activation              [[buffer(4)]],                                     \
+    device const uchar* pool             [[buffer(5)]],                                     \
+    device const float* gate_up_scales   [[buffer(6)]],                                     \
+    constant I2Params& p                 [[buffer(7)]],                                     \
+    uint2 tgid  [[threadgroup_position_in_grid]],                                           \
+    ushort tid  [[thread_index_in_threadgroup]],                                            \
+    ushort sg   [[simdgroup_index_in_threadgroup]],                                         \
+    ushort lane [[thread_index_in_simdgroup]]) {                                            \
+    if (tgid.y >= work_count[COUNT]) return;                                                \
+    threadgroup half smem[3 * kI2Rows * kI2Ld];                                             \
+    threadgroup half2 lut[256];                                                             \
+    if (kI2Encoding == kI2NVFP4) {                                                          \
+        i2_fill_lut(lut, tid, kI2Threads);                                                  \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
+    }                                                                                       \
+    i2_gate_up_block<ROWS>(hidden, pairs, work[BASE + tgid.y], activation, pool,            \
+                           gate_up_scales, p, tgid.x * kI2GateUpCols, smem, lut, tid, sg, lane); \
+}
+
+#define I2_DOWN_KERNEL(NAME, ROWS, COUNT, BASE)                                             \
+kernel void NAME(                                                                           \
+    device const half* activation        [[buffer(0)]],                                     \
+    device const I2Pair* pairs           [[buffer(1)]],                                     \
+    device const I2Work* work            [[buffer(2)]],                                     \
+    device const uint* work_count        [[buffer(3)]],                                     \
+    device float* partials               [[buffer(4)]],                                     \
+    device const uchar* pool             [[buffer(5)]],                                     \
+    device const float* down_scales      [[buffer(6)]],                                     \
+    constant I2Params& p                 [[buffer(7)]],                                     \
+    uint2 tgid  [[threadgroup_position_in_grid]],                                           \
+    ushort tid  [[thread_index_in_threadgroup]],                                            \
+    ushort sg   [[simdgroup_index_in_threadgroup]],                                         \
+    ushort lane [[thread_index_in_simdgroup]]) {                                            \
+    if (tgid.y >= work_count[COUNT]) return;                                                \
+    threadgroup half smem[3 * kI2Rows * kI2Ld];                                             \
+    threadgroup half2 lut[256];                                                             \
+    if (kI2Encoding == kI2NVFP4) {                                                          \
+        i2_fill_lut(lut, tid, kI2Threads);                                                  \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
+    }                                                                                       \
+    i2_down_block<ROWS>(activation, pairs, work[BASE + tgid.y], partials, pool,             \
+                        down_scales, p, tgid.x * kI2DownCols, smem, lut, tid, sg, lane);    \
+}
+
+I2_GATE_UP_KERNEL(inkling2_moe_gate_up, 64, 0, 0u)
+I2_GATE_UP_KERNEL(inkling2_moe_gate_up_tail, 32, 1, p.work_tail_base)
+I2_DOWN_KERNEL(inkling2_moe_down, 64, 0, 0u)
+I2_DOWN_KERNEL(inkling2_moe_down_tail, 32, 1, p.work_tail_base)
+
+#undef I2_GATE_UP_KERNEL
+#undef I2_DOWN_KERNEL
 
 // out[t][i] = sum over ranks, in rank order, of partials[t * top_k + r][i].
 kernel void inkling2_moe_reduce(
@@ -338,7 +380,8 @@ constant constexpr uint kI2RouterLogitLd = kI2RouterExperts + 4;
 // logits = W x in FP32 (W [128][D] F32, x [T][x_stride] F32), then per token
 // sigmoid, top-8 of (sigmoid + bias) with ties to the lower expert, weights
 // = sigmoid / (sum + 1e-20) * route_scale (`expert_weights_norm_eps`), FP32
-// throughout as upstream runs this router. Writes ids [T][top_k] and
+// throughout as upstream runs this router. Up to 128 experts (`experts`;
+// rows past it are zero and never chosen). Writes ids [T][top_k] and
 // weights [T][top_k]. 32 tokens per threadgroup of 128 threads.
 kernel void inkling2_moe_router(
     device const float* x                [[buffer(0)]],
@@ -351,6 +394,7 @@ kernel void inkling2_moe_router(
     constant uint& x_stride              [[buffer(7)]],
     constant uint& top_k                 [[buffer(8)]],
     constant float& route_scale          [[buffer(9)]],
+    constant uint& experts               [[buffer(10)]],
     uint tgid   [[threadgroup_position_in_grid]],
     ushort tid  [[thread_index_in_threadgroup]],
     ushort sg   [[simdgroup_index_in_threadgroup]],
@@ -382,13 +426,17 @@ kernel void inkling2_moe_router(
                 I2_UNROLL for (uint i = 0; i < 8; ++i) dst[i] = 0.0f;
             }
         }
-        // W: 128 experts x 32 K, one expert row per thread.
+        // W: 128 expert rows x 32 K, one row per thread (zero past `experts`).
         {
-            device const float4* src = reinterpret_cast<device const float4*>(weight + ulong(tid) * D + k0);
             threadgroup float* dst = w_tile + tid * kI2RouterLd;
-            I2_UNROLL for (uint i = 0; i < 8; ++i) {
-                const float4 v = src[i];
-                dst[4 * i] = v.x; dst[4 * i + 1] = v.y; dst[4 * i + 2] = v.z; dst[4 * i + 3] = v.w;
+            if (tid < experts) {
+                device const float4* src = reinterpret_cast<device const float4*>(weight + ulong(tid) * D + k0);
+                I2_UNROLL for (uint i = 0; i < 8; ++i) {
+                    const float4 v = src[i];
+                    dst[4 * i] = v.x; dst[4 * i + 1] = v.y; dst[4 * i + 2] = v.z; dst[4 * i + 3] = v.w;
+                }
+            } else {
+                I2_UNROLL for (uint i = 0; i < kI2RouterK; ++i) dst[i] = 0.0f;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -418,8 +466,8 @@ kernel void inkling2_moe_router(
         I2_UNROLL for (uint j = 0; j < 4; ++j) {
             const uint e = lane + 32u * j;
             const float l = clamp(logits[row * kI2RouterLogitLd + e], -80.0f, 80.0f);
-            prob[j] = 1.0f / (1.0f + exp(-l));
-            sel[j] = prob[j] + bias[e];
+            prob[j] = e < experts ? 1.0f / (1.0f + exp(-l)) : 0.0f;
+            sel[j] = e < experts ? prob[j] + bias[e] : -FLT_MAX;
         }
         // Lane r keeps rank r; the sum runs in rank order.
         float sum = 0.0f, my_prob = 0.0f;
@@ -467,13 +515,16 @@ struct I2PlanParams {
     uint rows_per_block;
     uint gate_up_columns;    // threadgroups across gate-up outputs
     uint down_columns;       // threadgroups across down outputs
-    uint work_capacity;
+    uint work_capacity;      // full blocks; tail blocks start here
 };
 
-// One threadgroup with one thread per expert (experts <= 1024). Writes each
-// expert's first pair (also its scatter cursor), its 64-row work blocks, the
-// work count, and two MTLDispatchThreadgroupsIndirectArguments (gate-up,
-// then down).
+// One threadgroup with one thread per expert (experts <= 1024). An expert's
+// rows become 64-row blocks; a remainder of 33-63 rows is one more (partial)
+// 64-row block, a remainder of 1-32 rows a 32-row tail block. Writes each
+// expert's first pair (its scatter cursor), the full blocks at work[0 ..),
+// the tail blocks at work[work_capacity ..), the two counts, and four
+// MTLDispatchThreadgroupsIndirectArguments: gate-up full, gate-up tail,
+// down full, down tail.
 kernel void inkling2_route_plan(
     device const uint* counts            [[buffer(0)]],
     device uint* cursors                 [[buffer(1)]],
@@ -483,29 +534,43 @@ kernel void inkling2_route_plan(
     constant I2PlanParams& pp            [[buffer(5)]],
     uint e [[thread_position_in_threadgroup]]) {
     threadgroup uint pair_start[1024];
-    threadgroup uint block_start[1025];
+    threadgroup uint full_start[1025];
+    threadgroup uint tail_start[1025];
+    const uint half_block = pp.rows_per_block / 2u;
     if (e == 0) {
-        uint pairs = 0, blocks = 0;
+        uint pairs = 0, fulls = 0, tails = 0;
         for (uint x = 0; x < pp.experts; ++x) {
+            const uint c = counts[x], rem = c % pp.rows_per_block;
             pair_start[x] = pairs;
-            block_start[x] = blocks;
-            pairs += counts[x];
-            blocks += (counts[x] + pp.rows_per_block - 1u) / pp.rows_per_block;
+            full_start[x] = fulls;
+            tail_start[x] = tails;
+            pairs += c;
+            fulls += c / pp.rows_per_block + (rem > half_block ? 1u : 0u);
+            tails += (rem > 0u && rem <= half_block) ? 1u : 0u;
         }
-        block_start[pp.experts] = min(blocks, pp.work_capacity);
-        work_count[0] = block_start[pp.experts];
-        dispatch[0] = pp.gate_up_columns; dispatch[1] = block_start[pp.experts]; dispatch[2] = 1u;
-        dispatch[3] = pp.down_columns;    dispatch[4] = block_start[pp.experts]; dispatch[5] = 1u;
+        fulls = min(fulls, pp.work_capacity);
+        full_start[pp.experts] = fulls;
+        tail_start[pp.experts] = tails;
+        work_count[0] = fulls;
+        work_count[1] = tails;
+        dispatch[0] = pp.gate_up_columns; dispatch[1] = fulls;  dispatch[2] = 1u;
+        dispatch[3] = pp.gate_up_columns; dispatch[4] = tails;  dispatch[5] = 1u;
+        dispatch[6] = pp.down_columns;    dispatch[7] = fulls;  dispatch[8] = 1u;
+        dispatch[9] = pp.down_columns;    dispatch[10] = tails; dispatch[11] = 1u;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (e >= pp.experts) return;
-    const uint count = counts[e];
+    const uint count = counts[e], rem = count % pp.rows_per_block;
     cursors[e] = pair_start[e];
-    for (uint b = 0; b * pp.rows_per_block < count; ++b) {
-        const uint slot = block_start[e] + b;
+    const uint full_rows = (rem > half_block) ? count : count - rem;
+    for (uint b = 0; b * pp.rows_per_block < full_rows; ++b) {
+        const uint slot = full_start[e] + b;
         if (slot >= pp.work_capacity) break;
         work[slot] = I2Work{e, pair_start[e] + b * pp.rows_per_block,
-                            min(pp.rows_per_block, count - b * pp.rows_per_block), 0u};
+                            min(pp.rows_per_block, full_rows - b * pp.rows_per_block), 0u};
+    }
+    if (full_rows < count) {
+        work[pp.work_capacity + tail_start[e]] = I2Work{e, pair_start[e] + full_rows, count - full_rows, 0u};
     }
 }
 
@@ -527,12 +592,133 @@ kernel void inkling2_route_scatter(
     sorted[at] = I2Pair{p / top_k, p % top_k, route_weights[p], 0u};
 }
 
+// MARK: - Expert-input quantization (opt-in; `Inkling2ExpertInputQuantization`)
+
+// Rounds rows of FP16 expert inputs the way a quantized product would see
+// them, writing FP16 results (in place is allowed): mode 1 is ggml's Q8_0
+// round trip per 32 values (its CPU NVFP4 and Q8_0 products); mode 2 the
+// vendor's required activation format: NVFP4 four-over-six with a per-row
+// outer scale amax / 1536 (NVFP4 layers) or MXFP8 per 32 values (8-bit
+// layers). With a weight stride (the vendor's down input), row r is first
+// multiplied by weights[r * weight_stride], its route weight, as the
+// vendor's serving code does before the down quantizer; the down epilogue
+// then skips the weight (`I2Params.flags` bit 0). One threadgroup of 128
+// threads per row; `width` <= 4096 and a multiple of 32. Arithmetic follows
+// the CPU reference: no contraction, and every division precise (a fast
+// reciprocal moves values that sit on a rounding boundary by a whole step).
+
+struct I2QuantParams {
+    uint width;
+    uint src_stride;      // halves
+    uint dst_stride;      // halves
+    uint mode;            // 1: Q8_0 blocks, 2: vendor
+    uint weight_stride;   // floats between row weights; 0: no row weight
+};
+
+static inline float i2_round_e4m3(float x) {
+    const uint exponent = (as_type<uint>(x) >> 23) & 255u;
+    const float spacing = as_type<float>((max(exponent, 121u) - 3u) << 23);
+    return rint(precise::divide(x, spacing)) * spacing;
+}
+
+static inline float i2_round_e2m1(float x) {
+    const float m = fabs(x);
+    float q = m > 0.25f ? 0.5f : 0.0f;
+    if (m >= 0.75f) q = 1.0f;
+    if (m > 1.25f) q = 1.5f;
+    if (m >= 1.75f) q = 2.0f;
+    if (m > 2.5f) q = 3.0f;
+    if (m >= 3.5f) q = 4.0f;
+    if (m > 5.0f) q = 6.0f;
+    return x < 0.0f ? -q : q;
+}
+
+kernel void inkling2_moe_input_quant(
+    device const half* src               [[buffer(0)]],
+    device half* dst                     [[buffer(1)]],
+    device const float* weights          [[buffer(2)]],
+    constant I2QuantParams& q            [[buffer(3)]],
+    uint row    [[threadgroup_position_in_grid]],
+    ushort tid  [[thread_index_in_threadgroup]],
+    ushort sg   [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+    #pragma clang fp contract(off) reassociate(off)
+    threadgroup float values[4096];
+    threadgroup float maxima[4];
+    const float weight = q.weight_stride != 0u ? weights[ulong(row) * q.weight_stride] : 1.0f;
+    device const half* in = src + ulong(row) * q.src_stride;
+    device half* out = dst + ulong(row) * q.dst_stride;
+    float local_max = 0.0f;
+    for (uint i = tid; i < q.width; i += kI2Threads) {
+        const float v = float(in[i]) * weight;
+        values[i] = v;
+        local_max = max(local_max, fabs(v));
+    }
+    local_max = simd_max(local_max);
+    if (lane == 0) maxima[sg] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float row_max = max(max(maxima[0], maxima[1]), max(maxima[2], maxima[3]));
+
+    if (q.mode == 1u || (q.mode == 2u && kI2Encoding != kI2NVFP4)) {
+        // 32-value blocks: Q8_0 (ggml quantize_row_q8_0_ref) or MXFP8.
+        for (uint b = tid; b < q.width / 32u; b += kI2Threads) {
+            float amax = 0.0f;
+            for (uint i = 0; i < 32; ++i) amax = max(amax, fabs(values[b * 32u + i]));
+            if (q.mode == 1u) {
+                const float d = precise::divide(amax, 127.0f);
+                const float id = d != 0.0f ? precise::divide(1.0f, d) : 0.0f;
+                const float stored = float(half(d));
+                for (uint i = 0; i < 32; ++i) {
+                    out[b * 32u + i] = half(round(values[b * 32u + i] * id) * stored);
+                }
+            } else {
+                const float raw = amax * precise::divide(1.0f, 448.0f);
+                int exponent = int(as_type<uint>(raw) >> 23);
+                if ((as_type<uint>(raw) & 0x7FFFFFu) != 0u) exponent += 1;
+                exponent = min(exponent, 254);
+                const float minimum = as_type<float>(0x00400000u);
+                if (!(raw > minimum)) exponent = 0;
+                const float scale = max(as_type<float>(uint(exponent) << 23), minimum);
+                const float inverse = exponent == 0 ? as_type<float>(0x7F000000u) : precise::divide(1.0f, scale);
+                for (uint i = 0; i < 32; ++i) {
+                    const float s = clamp(values[b * 32u + i] * inverse, -448.0f, 448.0f);
+                    const float r = i2_round_e4m3(fabs(s));
+                    out[b * 32u + i] = half((s < 0.0f ? -r : r) * scale);
+                }
+            }
+        }
+        return;
+    }
+    // NVFP4 four-over-six (Ollama's port of the vendor's quantizer).
+    const float normalizer = min(precise::divide(1536.0f, row_max), FLT_MAX);
+    const float decoder = precise::divide(1.0f, normalizer);
+    const float outer = row_max * precise::divide(1.0f, 1536.0f);     // the error comparison's scale
+    const float restore = precise::divide(row_max, 1536.0f);           // the output's, as the reference
+    for (uint b = tid; b < q.width / 16u; b += kI2Threads) {
+        float block_max = 0.0f;
+        for (uint i = 0; i < 16; ++i) block_max = max(block_max, fabs(values[b * 16u + i]));
+        const float scale_a = i2_round_e4m3(min(block_max * (normalizer * precise::divide(1.0f, 6.0f)), 448.0f));
+        const float scale_b = i2_round_e4m3(min(block_max * (normalizer * 0.25f), 448.0f));
+        const float inv_a = min(precise::divide(1.0f, scale_a * decoder), FLT_MAX);
+        const float inv_b = min(precise::divide(1.0f, scale_b * decoder), FLT_MAX);
+        float error_a = 0.0f, error_b = 0.0f;
+        for (uint i = 0; i < 16; ++i) {
+            const float v = values[b * 16u + i];
+            error_a += fabs(v - i2_round_e2m1(v * inv_a) * scale_a * outer);
+            error_b += fabs(v - i2_round_e2m1(v * inv_b) * scale_b * outer);
+        }
+        const bool four = error_b < error_a;
+        const float inv = four ? inv_b : inv_a, scale = four ? scale_b : scale_a;
+        for (uint i = 0; i < 16; ++i) {
+            out[b * 16u + i] = half(i2_round_e2m1(values[b * 16u + i] * inv) * scale * restore);
+        }
+    }
+}
+
 // MARK: - Decode (one token)
 
-constant constexpr uint kI2DecodeRows = 4;   // output rows per simdgroup
-
-// Doubled E2M1 magnitudes (0, 1, 2, 3, 4, 6, 8, 12) as nibbles of one word,
-// so a code decodes in registers.
+// Doubled E2M1 magnitudes (0, 1, 2, 3, 4, 6, 8, 12) as the nibbles of one
+// word, so a code decodes in registers.
 constant constexpr uint kI2E2M1Doubled = 0xC8643210u;
 
 static inline float i2_e2m1_doubled(uint code) {
@@ -540,41 +726,45 @@ static inline float i2_e2m1_doubled(uint code) {
     return as_type<float>(as_type<uint>(magnitude) | ((code & 8u) << 28));
 }
 
-// The 8 weights of unit `u` (of k / 8) of a row against x, FP32. NVFP4: block
-// u / 8, sub-block (u % 8) / 2; bytes (u % 2) * 4 ..< + 4 of the sub-block
-// hold elements j (low nibbles) and j + 8 (high) for j in (u % 2) * 4 ..< + 4.
-static inline float i2_unit_dot(device const uchar* row, uint u, device const half* x) {
+// One 16-weight NVFP4 sub-block (codes in `lo4` = bytes 0..3, `hi4` = bytes
+// 4..7) against x[0..16): low nibbles are elements 0..7, high nibbles 8..15.
+static inline float i2_nvfp4_sub_dot(uint lo4, uint hi4, device const half4* x) {
+    const float4 a = float4(i2_e2m1_doubled(lo4), i2_e2m1_doubled(lo4 >> 8),
+                            i2_e2m1_doubled(lo4 >> 16), i2_e2m1_doubled(lo4 >> 24));
+    const float4 b = float4(i2_e2m1_doubled(hi4), i2_e2m1_doubled(hi4 >> 8),
+                            i2_e2m1_doubled(hi4 >> 16), i2_e2m1_doubled(hi4 >> 24));
+    const float4 c = float4(i2_e2m1_doubled(lo4 >> 4), i2_e2m1_doubled(lo4 >> 12),
+                            i2_e2m1_doubled(lo4 >> 20), i2_e2m1_doubled(lo4 >> 28));
+    const float4 d = float4(i2_e2m1_doubled(hi4 >> 4), i2_e2m1_doubled(hi4 >> 12),
+                            i2_e2m1_doubled(hi4 >> 20), i2_e2m1_doubled(hi4 >> 28));
+    return dot(a, float4(x[0])) + dot(b, float4(x[1])) + dot(c, float4(x[2])) + dot(d, float4(x[3]));
+}
+
+// Weights [32 g, 32 g + 32) of a row (half an NVFP4 block, or one Q8_0
+// block) against x, FP32.
+static inline float i2_group_dot(device const uchar* row, uint g, device const half* x) {
+    device const half4* xv = reinterpret_cast<device const half4*>(x + g * 32u);
     if (kI2Encoding == kI2NVFP4) {
-        const uint b = u / 8u, s = (u % 8u) / 2u, h = u % 2u;
-        device const uchar* block = row + b * 36u;
-        const uint codes = *reinterpret_cast<device const uint*>(block + 4u + s * 8u + h * 4u);
-        const uint k = b * 64u + s * 16u + h * 4u;
-        const float4 xl = float4(*reinterpret_cast<device const half4*>(x + k));
-        const float4 xh = float4(*reinterpret_cast<device const half4*>(x + k + 8u));
-        const float4 wl = float4(i2_e2m1_doubled(codes), i2_e2m1_doubled(codes >> 8),
-                                 i2_e2m1_doubled(codes >> 16), i2_e2m1_doubled(codes >> 24));
-        const float4 wh = float4(i2_e2m1_doubled(codes >> 4), i2_e2m1_doubled(codes >> 12),
-                                 i2_e2m1_doubled(codes >> 20), i2_e2m1_doubled(codes >> 28));
-        return (dot(wl, xl) + dot(wh, xh)) * (i2_ue4m3(block[s]) * 0.5f);
+        device const uchar* block = row + (g / 2u) * 36u;
+        const uint part = g % 2u;
+        const ushort scales = *reinterpret_cast<device const ushort*>(block + part * 2u);
+        const packed_uint4 q = *reinterpret_cast<device const packed_uint4*>(block + 4u + part * 16u);
+        return i2_nvfp4_sub_dot(q.x, q.y, xv) * (i2_ue4m3(scales & 0xFFu) * 0.5f)
+             + i2_nvfp4_sub_dot(q.z, q.w, xv + 4) * (i2_ue4m3(scales >> 8) * 0.5f);
     } else {
-        const uint b = u / 4u, part = (u % 4u) * 8u;
-        device const uchar* block = row + b * 34u;
+        device const uchar* block = row + g * 34u;
         const float scale = float(*reinterpret_cast<device const half*>(block));
-        device const ushort* q = reinterpret_cast<device const ushort*>(block + 2u + part);
-        const uint k = b * 32u + part;
-        const float4 x0 = float4(*reinterpret_cast<device const half4*>(x + k));
-        const float4 x1 = float4(*reinterpret_cast<device const half4*>(x + k + 4u));
-        const ushort q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
-        const float4 w0 = float4(float(as_type<char>(uchar(q0 & 0xFFu))), float(as_type<char>(uchar(q0 >> 8))),
-                                 float(as_type<char>(uchar(q1 & 0xFFu))), float(as_type<char>(uchar(q1 >> 8))));
-        const float4 w1 = float4(float(as_type<char>(uchar(q2 & 0xFFu))), float(as_type<char>(uchar(q2 >> 8))),
-                                 float(as_type<char>(uchar(q3 & 0xFFu))), float(as_type<char>(uchar(q3 >> 8))));
-        return (dot(w0, x0) + dot(w1, x1)) * scale;
+        device const packed_char4* q = reinterpret_cast<device const packed_char4*>(block + 2u);
+        float sum = 0.0f;
+        I2_UNROLL for (uint i = 0; i < 8; ++i) sum += dot(float4(char4(q[i])), float4(xv[i]));
+        return sum * scale;
     }
 }
 
 // Gate-up and SITU for one token's experts: grid (F / 16, top_k), four
-// simdgroups of four (gate, up) row pairs each. activation [top_k][F] half.
+// simdgroups of four (gate, up) row pairs. Lanes 0-15 read gate rows and
+// 16-31 the matching up rows, four lanes per row over 32-weight groups.
+// activation [top_k][F] half.
 kernel void inkling2_moe_decode_gate_up(
     device const half* x                 [[buffer(0)]],
     device const uint* ids               [[buffer(1)]],
@@ -587,28 +777,24 @@ kernel void inkling2_moe_decode_gate_up(
     ushort lane [[thread_index_in_simdgroup]]) {
     const uint expert = min(ids[tgid.y], p.experts - 1u);
     const uint row_bytes = i2_row_bytes(p.D);
-    device const uchar* gate = pool + ulong(expert) * p.expert_stride + p.gate_up_offset;
-    device const uchar* up = gate + ulong(p.F) * row_bytes;
-    const uint row0 = (tgid.x * 4u + sg) * kI2DecodeRows;
-    if (row0 >= p.F) return;
-    const uint units = p.D / 8u;
-    float g[kI2DecodeRows], u[kI2DecodeRows];
-    I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) { g[q] = 0.0f; u[q] = 0.0f; }
-    for (uint unit = lane; unit < units; unit += 32u) {
-        I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) {
-            g[q] += i2_unit_dot(gate + ulong(row0 + q) * row_bytes, unit, x);
-            u[q] += i2_unit_dot(up + ulong(row0 + q) * row_bytes, unit, x);
-        }
-    }
-    const float scale = gate_up_scales[expert];
-    I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) {
-        const float gs = simd_sum(g[q]) * scale, us = simd_sum(u[q]) * scale;
-        if (lane == 0) activation[ulong(tgid.y) * p.F + row0 + q] = half(i2_situ(gs, us));
+    const uint pair = (tgid.x * 4u + sg) * 4u + (lane / 4u) % 4u;
+    const uint row = lane < 16u ? pair : p.F + pair;
+    device const uchar* w = pool + ulong(expert) * p.expert_stride + p.gate_up_offset + ulong(row) * row_bytes;
+    const uint groups = p.D / 32u;
+    float acc = 0.0f;
+    for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, x);
+    acc += simd_shuffle_xor(acc, 1);
+    acc += simd_shuffle_xor(acc, 2);
+    const float up = simd_shuffle_down(acc, 16);
+    if (lane < 16u && lane % 4u == 0u) {
+        const float scale = gate_up_scales[expert];
+        activation[ulong(tgid.y) * p.F + pair] = half(i2_situ(acc * scale, up * scale));
     }
 }
 
-// Down for one token, the experts summed in rank order: grid D / 16, four
-// simdgroups of four output rows. out [D] float.
+// Down for one token: grid D / 8, eight output rows per threadgroup, four
+// lanes per row; simdgroup s takes ranks s, s + 4, ...; the ranks are summed
+// in order. out [D] float.
 kernel void inkling2_moe_decode_down(
     device const half* activation        [[buffer(0)]],
     device const uint* ids               [[buffer(1)]],
@@ -620,29 +806,175 @@ kernel void inkling2_moe_decode_down(
     uint tgid   [[threadgroup_position_in_grid]],
     ushort sg   [[simdgroup_index_in_threadgroup]],
     ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[32 * 8];
     const uint row_bytes = i2_row_bytes(p.F);
-    const uint row0 = (tgid * 4u + sg) * kI2DecodeRows;
-    if (row0 >= p.D) return;
-    const uint units = p.F / 8u;
-    float total[kI2DecodeRows];
-    I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) total[q] = 0.0f;
-    for (uint r = 0; r < p.top_k; ++r) {
+    const uint local = lane / 4u;
+    const uint row = tgid * 8u + local;
+    const uint groups = p.F / 32u;
+    for (uint r = sg; r < p.top_k; r += 4u) {
         const uint expert = min(ids[r], p.experts - 1u);
-        device const uchar* down = pool + ulong(expert) * p.expert_stride + p.down_offset;
+        device const uchar* w = pool + ulong(expert) * p.expert_stride + p.down_offset + ulong(row) * row_bytes;
         device const half* act = activation + ulong(r) * p.F;
-        float acc[kI2DecodeRows];
-        I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) acc[q] = 0.0f;
-        for (uint unit = lane; unit < units; unit += 32u) {
-            I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) {
-                acc[q] += i2_unit_dot(down + ulong(row0 + q) * row_bytes, unit, act);
-            }
-        }
-        const float scale = down_scales[expert], weight = route_weights[r];
-        I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) total[q] += (simd_sum(acc[q]) * scale) * weight;
+        float acc = 0.0f;
+        for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, act);
+        acc += simd_shuffle_xor(acc, 1);
+        acc += simd_shuffle_xor(acc, 2);
+        const float weight = (p.flags & 1u) != 0u ? 1.0f : route_weights[r];
+        if (lane % 4u == 0u) partial[r * 8u + local] = (acc * down_scales[expert]) * weight;
     }
-    if (lane == 0) {
-        I2_UNROLL for (uint q = 0; q < kI2DecodeRows; ++q) out[row0 + q] = total[q];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane < 8u) {
+        float total = 0.0f;
+        for (uint r = 0; r < p.top_k; ++r) total += partial[r * 8u + lane];
+        out[tgid * 8u + lane] = total;
     }
 }
+
+// MARK: - Tensor-ops grouped GEMMs (Metal 4 matmul2d; GPUs with tensor units)
+
+// The same work blocks, weight tiles and epilogues as the simdgroup kernels,
+// with each 32-deep step multiplied by `matmul2d` on the threadgroup tiles
+// (the pattern of `mpp_grouped_routed_moe_*`, which builds and passes on this
+// runtime's GPUs). Only compiled where the GPU has tensor support; the Swift
+// side falls back to the simdgroup kernels when these functions are absent,
+// and the calibration picks between the two where both exist.
+#if defined(__HAVE_TENSOR__)
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace mpp::tensor_ops;
+
+template <uint ROWS>
+static inline void i2_gate_up_block_tensor(
+    device const half* hidden, device const I2Pair* pairs, const I2Work w, device half* activation,
+    device const uchar* pool, device const float* gate_up_scales, constant I2Params& p, uint n_base,
+    threadgroup half* smem, threadgroup half2* lut, ushort tid) {
+    constexpr auto descriptor = matmul2d_descriptor(int(ROWS), int(kI2GateUpCols), int(kI2K), false, true, false);
+    matmul2d<descriptor, execution_simdgroups<4>> operation;
+    using tile_t = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>;
+    constexpr uint kThreadsPerRow = kI2Threads / ROWS;
+    device const uchar* gate = pool + ulong(w.expert) * p.expert_stride + p.gate_up_offset;
+    device const uchar* up = gate + ulong(p.F) * i2_row_bytes(p.D);
+    threadgroup half* rows_tile = smem;
+    threadgroup half* gate_tile = smem + kI2Rows * kI2Ld;
+    threadgroup half* up_tile = gate_tile + kI2GateUpCols * kI2Ld;
+    tile_t a(rows_tile, dextents<int32_t, 2>(int(kI2K), int(ROWS)), array<int32_t, 2>({1, int(kI2Ld)}));
+    tile_t g(gate_tile, dextents<int32_t, 2>(int(kI2K), int(kI2GateUpCols)), array<int32_t, 2>({1, int(kI2Ld)}));
+    tile_t u(up_tile, dextents<int32_t, 2>(int(kI2K), int(kI2GateUpCols)), array<int32_t, 2>({1, int(kI2Ld)}));
+    auto acc_gate = operation.template get_destination_cooperative_tensor<decltype(a), decltype(g), float>();
+    auto acc_up = operation.template get_destination_cooperative_tensor<decltype(a), decltype(u), float>();
+    auto product = operation.template get_destination_cooperative_tensor<decltype(a), decltype(g), float>();
+    for (int i = 0; i < acc_gate.get_capacity(); ++i) { acc_gate[i] = 0.0f; acc_up[i] = 0.0f; }
+
+    const uint a_row = tid / kThreadsPerRow, a_k = (tid % kThreadsPerRow) * (kI2K / kThreadsPerRow);
+    const bool a_valid = a_row < w.row_count;
+    device const half* a_src = hidden;
+    if (a_valid) a_src = hidden + ulong(pairs[w.pair_start + a_row].token) * p.hidden_stride + a_k;
+
+    for (uint k0 = 0; k0 < p.D; k0 += kI2K) {
+        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
+        if (tid < kI2GateUpCols) {
+            i2_dequant_tile(gate, p.D, n_base, kI2GateUpCols, k0, lut, gate_tile, tid, kI2GateUpCols);
+        } else {
+            i2_dequant_tile(up, p.D, n_base, kI2GateUpCols, k0, lut, up_tile, tid - kI2GateUpCols, kI2GateUpCols);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = 0; i < product.get_capacity(); ++i) product[i] = 0.0f;
+        operation.run(a, g, product);
+        for (int i = 0; i < acc_gate.get_capacity(); ++i) acc_gate[i] += product[i];
+        for (int i = 0; i < product.get_capacity(); ++i) product[i] = 0.0f;
+        operation.run(a, u, product);
+        for (int i = 0; i < acc_up.get_capacity(); ++i) acc_up[i] += product[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float scale = gate_up_scales[w.expert];
+    for (int i = 0; i < acc_gate.get_capacity(); ++i) {
+        if (!acc_gate.is_valid_element(i)) continue;
+        const auto position = acc_gate.get_multidimensional_index(i);
+        const uint n = uint(position[0]), m = uint(position[1]);
+        if (m < w.row_count) {
+            activation[ulong(w.pair_start + m) * p.F + n_base + n] =
+                half(i2_situ(acc_gate[i] * scale, acc_up[i] * scale));
+        }
+    }
+}
+
+template <uint ROWS>
+static inline void i2_down_block_tensor(
+    device const half* activation, device const I2Pair* pairs, const I2Work w, device float* partials,
+    device const uchar* pool, device const float* down_scales, constant I2Params& p, uint n_base,
+    threadgroup half* smem, threadgroup half2* lut, ushort tid) {
+    constexpr auto descriptor = matmul2d_descriptor(int(ROWS), int(kI2DownCols), int(kI2K), false, true, false);
+    matmul2d<descriptor, execution_simdgroups<4>> operation;
+    using tile_t = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>;
+    constexpr uint kThreadsPerRow = kI2Threads / ROWS;
+    device const uchar* down = pool + ulong(w.expert) * p.expert_stride + p.down_offset;
+    threadgroup half* rows_tile = smem;
+    threadgroup half* weight_tile = smem + kI2Rows * kI2Ld;
+    tile_t a(rows_tile, dextents<int32_t, 2>(int(kI2K), int(ROWS)), array<int32_t, 2>({1, int(kI2Ld)}));
+    tile_t b(weight_tile, dextents<int32_t, 2>(int(kI2K), int(kI2DownCols)), array<int32_t, 2>({1, int(kI2Ld)}));
+    auto acc = operation.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
+    auto product = operation.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
+    for (int i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
+
+    const uint a_row = tid / kThreadsPerRow, a_k = (tid % kThreadsPerRow) * (kI2K / kThreadsPerRow);
+    const bool a_valid = a_row < w.row_count;
+    device const half* a_src = activation + ulong(w.pair_start + (a_valid ? a_row : 0u)) * p.F + a_k;
+
+    for (uint k0 = 0; k0 < p.F; k0 += kI2K) {
+        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
+        i2_dequant_tile(down, p.F, n_base, kI2DownCols, k0, lut, weight_tile, tid, kI2Threads);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = 0; i < product.get_capacity(); ++i) product[i] = 0.0f;
+        operation.run(a, b, product);
+        for (int i = 0; i < acc.get_capacity(); ++i) acc[i] += product[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float scale = down_scales[w.expert];
+    for (int i = 0; i < acc.get_capacity(); ++i) {
+        if (!acc.is_valid_element(i)) continue;
+        const auto position = acc.get_multidimensional_index(i);
+        const uint n = uint(position[0]), m = uint(position[1]);
+        if (m < w.row_count) {
+            const I2Pair pair = pairs[w.pair_start + m];
+            const float weight = (p.flags & 1u) != 0u ? 1.0f : pair.weight;
+            partials[ulong(pair.token * p.top_k + pair.rank) * p.D + n_base + n] = (acc[i] * scale) * weight;
+        }
+    }
+}
+
+#define I2_TENSOR_KERNEL(NAME, BODY, IN_T, IN_NAME, OUT_T, OUT_NAME, SCALES, ROWS, COUNT, BASE, COLS) \
+kernel void NAME(                                                                           \
+    device const IN_T* IN_NAME           [[buffer(0)]],                                     \
+    device const I2Pair* pairs           [[buffer(1)]],                                     \
+    device const I2Work* work            [[buffer(2)]],                                     \
+    device const uint* work_count        [[buffer(3)]],                                     \
+    device OUT_T* OUT_NAME               [[buffer(4)]],                                     \
+    device const uchar* pool             [[buffer(5)]],                                     \
+    device const float* SCALES           [[buffer(6)]],                                     \
+    constant I2Params& p                 [[buffer(7)]],                                     \
+    uint2 tgid  [[threadgroup_position_in_grid]],                                           \
+    ushort tid  [[thread_index_in_threadgroup]]) {                                          \
+    if (tgid.y >= work_count[COUNT]) return;                                                \
+    threadgroup half smem[3 * kI2Rows * kI2Ld];                                             \
+    threadgroup half2 lut[256];                                                             \
+    if (kI2Encoding == kI2NVFP4) {                                                          \
+        i2_fill_lut(lut, tid, kI2Threads);                                                  \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
+    }                                                                                       \
+    BODY<ROWS>(IN_NAME, pairs, work[BASE + tgid.y], OUT_NAME, pool, SCALES, p, tgid.x * COLS, smem, lut, tid); \
+}
+
+I2_TENSOR_KERNEL(inkling2_moe_gate_up_tensor, i2_gate_up_block_tensor, half, hidden, half, activation,
+                 gate_up_scales, 64, 0, 0u, kI2GateUpCols)
+I2_TENSOR_KERNEL(inkling2_moe_gate_up_tail_tensor, i2_gate_up_block_tensor, half, hidden, half, activation,
+                 gate_up_scales, 32, 1, p.work_tail_base, kI2GateUpCols)
+I2_TENSOR_KERNEL(inkling2_moe_down_tensor, i2_down_block_tensor, half, activation, float, partials,
+                 down_scales, 64, 0, 0u, kI2DownCols)
+I2_TENSOR_KERNEL(inkling2_moe_down_tail_tensor, i2_down_block_tensor, half, activation, float, partials,
+                 down_scales, 32, 1, p.work_tail_base, kI2DownCols)
+
+#undef I2_TENSOR_KERNEL
+#endif
 
 #undef I2_UNROLL
