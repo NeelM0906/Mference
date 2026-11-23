@@ -362,18 +362,17 @@ def forced_report(root, pid, tdir):
             return {"status": "malformed", "why": "; ".join(problems), "path": path}
         trace = os.path.join(tdir, pid, "trace.json") if tdir else None
         sha = hashlib.sha256(open(trace, "rb").read()).hexdigest() if trace and os.path.isfile(trace) else None
-        if sha is not None:
-            with open(trace) as f:
-                rt = json.load(f)
-            if len(rt["visits"]) != len(visits) or any(len(v["experts"]) != n for v in rt["visits"]):
-                return {"status": "malformed", "why": f"depth or visit count differs from the runner's trace "
-                                                      f"({len(rt['visits'])} visits)", "path": path}
         cand = os.path.basename(os.path.dirname(os.path.abspath(tdir))) if tdir else None
         if sha != d.get("runner_trace_sha256"):
             return {"status": "stale", "why": f"the runner's trace differs from the one this run was forced on "
                                               f"({d.get('candidate')}, sha256 {str(d.get('runner_trace_sha256'))[:12]}; "
                                               f"judging {cand}, {str(sha)[:12]}): report to the coordinator before C1",
                     "path": path}
+        with open(trace) as f:
+            rt = json.load(f)
+        if len(rt["visits"]) != len(visits) or any(len(v["experts"]) != n for v in rt["visits"]):
+            return {"status": "malformed", "why": f"depth or visit count differs from the runner's trace "
+                                                  f"({len(rt['visits'])} visits)", "path": path}
         per_layer = {}
         for x in dis:
             per_layer[x["layer"]] = per_layer.get(x["layer"], 0) + 1
@@ -694,6 +693,7 @@ def reference_check(root):
         if any(len(v[k]) != n for v in visits for k in ("increment_rel_l2", "differs", "shortfalls")):
             problems.append("a per-visit list is not n_tokens long")
         incs = [(t, x) for v in visits for t, x in enumerate(v["increment_rel_l2"])]
+        per_visit = [v["increment_rel_l2"] for v in visits]
         margins, sources = [], set()
         for x in dis:
             m = x.get("runner_margin")
@@ -722,7 +722,11 @@ def reference_check(root):
         fails["margin"] = f"a disagreement at llama.cpp margin {fmt4(res['max_margin'])} >= {REF_MARGIN_MAX}"
     if any(b["max"] > REF_INCREMENT_MAX for b in bins):
         first = bins[0]["mean"]
-        flat = first > REF_INCREMENT_MAX and all(b["mean"] <= FLAT_TOLERANCE * first for b in bins[1:])
+        def visit_flat(row):  # no later bin's mean above 1.2 x this visit's bin-0 mean (or 0.02, if larger)
+            means = [sum(row[lo:min(hi, n)]) / len(row[lo:min(hi, n)]) for lo, hi in POS_BINS if row[lo:min(hi, n)]]
+            return all(m <= max(FLAT_TOLERANCE * means[0], REF_INCREMENT_MAX) for m in means[1:])
+        flat = (first > REF_INCREMENT_MAX and all(b["mean"] <= FLAT_TOLERANCE * first for b in bins[1:])
+                and all(visit_flat(row) for row in per_visit))
         what = "flat from position 0 (for the coordinator: the mode, not the model)" if flat else "grows with position"
         fails["increment"] = (f"per-bin max {', '.join(fmt4(b['max']) for b in bins)}, mean "
                               f"{', '.join(fmt4(b['mean']) for b in bins)}; above {REF_INCREMENT_MAX}: {what}")

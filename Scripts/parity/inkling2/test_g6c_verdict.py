@@ -486,6 +486,27 @@ class V116Tests(unittest.TestCase):
         # past position 400 still counts
         far = self.ref(shortfall=0.01, positions=450, inc=lambda t: 0.5 if t == 420 else 0.001)
         self.assertFalse(far["pass"])
+        # one visit grows while the others stay flat above 0.02: growth, not flat
+        self.forced(where=os.path.join(self.root, gv.REF_LLAMA), precision="llamaExperts", positions=300, shortfall=0.01,
+                    inc=0.05, extra={})
+        import json as _j
+        refp = os.path.join(self.root, gv.REF_LLAMA)
+        with open(refp) as f:
+            d = _j.load(f)
+        d["visits"][1]["increment_rel_l2"] = [0.05 + 0.0015 * t for t in range(300)]
+        dump(d, refp)
+        one = gv.reference_check(self.root)
+        self.assertFalse(one["flat_miss"])
+        self.assertFalse(one["pass"])
+        # a NaN shortfall row and scalar extras
+        d["visits"][1]["increment_rel_l2"] = [0.001] * 300
+        d["visits"][0]["element_rel_max"] = 0.001
+        dump(d, refp)
+        self.assertEqual(gv.reference_check(self.root)["status"], "ok")
+        with open(refp) as f:
+            raw = f.read()
+        open(refp, "w").write(raw.replace('"shortfall": 0.01', '"shortfall": NaN', 1))
+        self.assertEqual(gv.reference_check(self.root)["status"], "malformed")
         self.assertEqual(self.ref(precision="llamaCPU")["status"], "malformed")
         self.assertEqual(self.ref(positions=20)["status"], "malformed")
         self.assertEqual(self.ref(extra={"visits": [], "token_visits": 0})["status"], "malformed")
