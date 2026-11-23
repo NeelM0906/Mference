@@ -26,12 +26,13 @@ import Foundation
         #expect(a.sharedExpertGated == false)
         #expect(a.ropeNeoxSubdim == false)
         #expect(a.qkNorm == true)
+        #expect(a.inkling2 == .none)
     }
 
     /// Only the kept families have baselines.
     @Test func knownArchitecturesAreTheKeptFamilies() {
         #expect(Set(ArchConfig.knownArchitectures.keys)
-                == [.qwen36, .qwen38, .maple, .minicpm5])
+                == [.qwen36, .qwen38, .maple, .minicpm5, .inkling2Loop])
         #expect(Set(ModelFamily.allCases) == Set(ArchConfig.knownArchitectures.keys))
         for (family, config) in ArchConfig.knownArchitectures {
             #expect(config.family == family)
@@ -100,8 +101,9 @@ import Foundation
     /// `qkNorm` defaults to the Gemma behavior so every existing baseline —
     /// and every manifest that omits the key — keeps its meaning.
     @Test func qkNormDefaultsToTrueForEveryShippedFamily() {
-        // MiniCPM5 is plain-llama attention.
-        let plainQK: Set<ModelFamily> = [.minicpm5]
+        // MiniCPM5 is plain-llama attention; Inkling 2 clips q and k
+        // (`inkling2.qkClipThreshold`) instead of norming them.
+        let plainQK: Set<ModelFamily> = [.minicpm5, .inkling2Loop]
         for (family, config) in ArchConfig.knownArchitectures where !plainQK.contains(family) {
             #expect(config.qkNorm, "\(family.rawValue) should keep q/k norms")
         }

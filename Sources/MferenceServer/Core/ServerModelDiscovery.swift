@@ -14,6 +14,7 @@ public enum ServerFamilyModelID {
         case .qwen38: "qwen3.8-27b-4bit"
         case .maple: "maple-preview-2bit-mlx"
         case .minicpm5: "minicpm5-2b-int4g64"
+        case .inkling2Loop: "inkling-2-mini-ud-q4_k_xl"
         }
     }
 

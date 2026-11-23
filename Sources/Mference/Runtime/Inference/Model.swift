@@ -165,6 +165,8 @@ public struct Model {
         case .qwen36, .qwen38: return "language_model.model."
         case .maple: return "model."
         case .minicpm5: return "model."
+        // Installed under the GGUF's own names (`blk.N.*`, `token_embd`).
+        case .inkling2Loop: return ""
         }
     }
     private var lmHeadName: String {
@@ -172,6 +174,7 @@ public struct Model {
         case .qwen36, .qwen38: return "language_model.lm_head.weight"
         case .maple: return "lm_head.weight"
         case .minicpm5: return "lm_head.weight"
+        case .inkling2Loop: return Self.inkling2OutputHeadName
         }
     }
     /// Maple names the token embedding `word_embeddings`, not `embed_tokens`.
@@ -183,6 +186,8 @@ public struct Model {
             return "\(trunkPrefix)word_embeddings.weight"
         case .minicpm5:
             return "\(trunkPrefix)embed_tokens.weight"
+        case .inkling2Loop:
+            return Self.inkling2EmbeddingName
         }
     }
 
@@ -223,6 +228,8 @@ public struct Model {
             // Dense: no router tensor exists; the accessor throws
             // tensorNotFound if a caller ever asks.
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp.gate.weight")
+        case .inkling2Loop:
+            return try inkling2Router(layer: L)
         }
     }
     /// Shared-expert FFN. Qwen 3.6 and Maple keep the source's
@@ -249,6 +256,10 @@ public struct Model {
         case .minicpm5:
             // Dense llama: the per-layer MLP under the bare `.mlp.` names.
             return "\(trunkPrefix)layers.\(L).mlp.\(proj).weight"
+        case .inkling2Loop:
+            // No shared expert: llama.cpp's shared-expert name, which the
+            // install never carries, so the accessor throws tensorNotFound.
+            return Self.inkling2LayerName(L, "ffn_\(proj.replacingOccurrences(of: "_proj", with: ""))_shexp.weight")
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`

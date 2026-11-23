@@ -123,6 +123,11 @@ public struct QuantBitPolicy: Sendable, Equatable {
             // family arriving here should confirm its conversion's overrides
             // before trusting it.
             return .uniformInt4
+        case .inkling2Loop:
+            // Never reached: the family installs from a GGUF, copied without
+            // quantizing (`Inkling2GGUFPlanner`), and `ArchInfo.load` never
+            // yields it from a `config.json`.
+            return .uniformInt4
         }
     }
 

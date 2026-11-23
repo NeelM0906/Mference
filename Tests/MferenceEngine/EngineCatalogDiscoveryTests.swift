@@ -277,6 +277,7 @@ struct EngineCatalogDiscoveryTests {
             .qwen38: "qwen3.8-27b-4bit",
             .maple: "maple-preview-2bit-mlx",
             .minicpm5: "minicpm5-2b-int4g64",
+            .inkling2Loop: "inkling-2-mini-ud-q4_k_xl",
         ]
         #expect(Set(expected.keys) == Set(ModelFamily.allCases))
         for (family, id) in expected {

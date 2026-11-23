@@ -12,6 +12,39 @@ enum RepackModelFamily: String, Sendable, Equatable {
     /// MLX INT4 conversion (pre-quantized path). Bare `model.` prefix and a
     /// top-level `lm_head.weight` on both.
     case minicpm5 = "minicpm5"
+    /// Inkling 2 Mini, copied byte for byte from Unsloth's UD-Q4_K_XL GGUF
+    /// (`Inkling2GGUFPlanner`); never planned from safetensors.
+    case inkling2Loop = "inkling2Loop"
+}
+
+/// Inkling 2's axes, mirrored from the runtime's `ArchConfig`: the
+/// relative-position, short-convolution, router, vocabulary and sink fields it
+/// shares with the retired Inkling-Small baseline, and the runtime's
+/// `Inkling2Config`. Nil for every other family; `GTurboJSON` emits these keys
+/// only when it is set, so every other manifest stays byte-identical.
+struct Inkling2Axes: Sendable, Equatable {
+    let relDRel: Int
+    let relExtent: Int
+    let relProjDim: Int
+    let relLogScalingFloor: Int
+    let relLogScalingAlpha: Double
+    let sconvKernelSize: Int
+    let embedNormEnabled: Bool
+    let routerGateBias: Bool
+    let unpaddedVocabSize: Int
+    let attentionSinks: Bool
+    let loopCoreStart: Int
+    let loopCoreEnd: Int
+    let loopNumPasses: Int
+    let loopGateRank: Int
+    let attnResBlockSize: Int
+    let qkClipThreshold: Double
+    let relClipThreshold: Double
+    let attentionSinkProjected: Bool
+    let expertGateSoftcap: Double
+    let expertUpSoftcap: Double
+    /// One GGML block format name per stored layer.
+    let routedExpertFormats: [String]
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -74,6 +107,9 @@ struct ArchInfo: Sendable, Equatable {
     /// families (MiniCPM5) set it false.
     let qkNorm: Bool
 
+    /// Inkling 2's axes; nil for every other family.
+    let inkling2: Inkling2Axes?
+
     init(hiddenSize: Int,
          intermediateSize: Int,
          moeIntermediateSize: Int,
@@ -115,7 +151,8 @@ struct ArchInfo: Sendable, Equatable {
          numDenseLayers: Int = 0,
          denseIntermediateSize: Int = 0,
          routerNormAfterTopK: Bool = false,
-         qkNorm: Bool = true) {
+         qkNorm: Bool = true,
+         inkling2: Inkling2Axes? = nil) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -158,6 +195,7 @@ struct ArchInfo: Sendable, Equatable {
         self.denseIntermediateSize = denseIntermediateSize
         self.routerNormAfterTopK = routerNormAfterTopK
         self.qkNorm = qkNorm
+        self.inkling2 = inkling2
     }
 
     static func load(configPath: String) throws -> ArchInfo {
