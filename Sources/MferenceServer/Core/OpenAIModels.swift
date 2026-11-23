@@ -347,9 +347,7 @@ public enum OpenAIRequestValidator {
         // Inkling 2 also takes its template's other names: minimal (0.1),
         // high (0.9) and max (0.99). Every other dialect keeps the four.
         let inkling2Effort: MFTokenizer.Inkling2Effort? = dialect == .inkling2 && explicitEffort == nil
-            ? request.reasoningEffort.flatMap {
-                MFTokenizer.Inkling2Effort.namedLevels[$0] != nil ? .named($0) : nil
-            }
+            ? request.reasoningEffort.flatMap(MFTokenizer.Inkling2Effort.knownName)
             : nil
         guard request.reasoningEffort == nil || explicitEffort != nil || inkling2Effort != nil else {
             throw invalid(dialect == .inkling2

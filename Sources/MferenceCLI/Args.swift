@@ -63,6 +63,11 @@ public struct Args: Equatable, Sendable {
     // are explicit overrides even when they equal a shared default or zero.
     var omittedSamplingOptions: Set<SamplingOption> = []
     public var reasoningEffort: QwenReasoningEffort?
+    /// `--reasoning-effort` given one of Inkling 2's own names beyond the
+    /// shared four (minimal, high, max; `Inkling2Effort.knownName`). Parsing
+    /// cannot know the model; `run` refuses it for any other dialect exactly
+    /// as parsing refuses an unknown value (`inkling2EffortRefusal`).
+    public var inkling2Effort: MFTokenizer.Inkling2Effort?
     public var model: String
     public var prompt: String?
     public var messagesFile: String?
@@ -290,6 +295,7 @@ extension Args {
       --reasoning-effort <mode>  Qwen chat: xhigh, medium, low, or none.
                                 Qwen 3.6 uses binary on/off aliases. Not
                                 applied to raw prompts.
+                                Inkling 2 also takes minimal, high, or max.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -330,6 +336,7 @@ extension Args {
         var kvPoolPages: Int? = nil
         var reserveFullKV = false
         var reasoningEffort: QwenReasoningEffort?
+        var inkling2Effort: MFTokenizer.Inkling2Effort?
 
         var index = 0
         while index < argv.count {
@@ -412,10 +419,15 @@ extension Args {
                 temperature = parsed
             case "--reasoning-effort":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = QwenReasoningEffort(rawValue: value) else {
+                if let parsed = QwenReasoningEffort(rawValue: value) {
+                    reasoningEffort = parsed
+                    inkling2Effort = nil
+                } else if let own = MFTokenizer.Inkling2Effort.knownName(value) {
+                    inkling2Effort = own
+                    reasoningEffort = nil
+                } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
-                reasoningEffort = parsed
             case "--top-k":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), (0...256).contains(parsed) else {
@@ -519,7 +531,7 @@ extension Args {
         }
 
         guard let model else { throw ArgsError.requiredMissing("--model") }
-        if reasoningEffort != nil && prompt != nil {
+        if (reasoningEffort != nil || inkling2Effort != nil) && prompt != nil {
             throw ArgsError.invalidValue(flag: "--reasoning-effort", value: "requires chat or messages, not raw --prompt")
         }
         if prompt != nil && messagesFile != nil {
@@ -577,6 +589,7 @@ extension Args {
                     kvPoolPages: kvPoolPages,
                     reserveFullKV: reserveFullKV,
                     reasoningEffort: reasoningEffort)
+        result.inkling2Effort = inkling2Effort
         result.omittedSamplingOptions = Set(SamplingOption.allCases).subtracting(providedSamplingOptions)
         result.usesModelMaxContext = usesModelMaxContext
         return result
