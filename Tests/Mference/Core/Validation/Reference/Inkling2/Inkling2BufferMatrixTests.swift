@@ -17,6 +17,8 @@ struct Inkling2BufferMatrixTests {
     }
 
     private func maxRelative(_ got: [Float], _ want: [Float]) -> Float {
+        // `max` skips NaN, so a non-finite value must not reach it.
+        guard got.allSatisfy(\.isFinite), want.allSatisfy(\.isFinite) else { return .infinity }
         let scale = max(want.map(abs).max()!, 1e-6)
         return zip(got, want).map { abs($0 - $1) }.max()! / scale
     }

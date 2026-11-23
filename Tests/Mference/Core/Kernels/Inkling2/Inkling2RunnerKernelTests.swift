@@ -53,7 +53,10 @@ struct Inkling2RunnerKernelTests {
         return (0..<count).map { _ in rng.uniform(lo, hi) }
     }
 
+    /// Infinite when either side holds a non-finite value: `max` skips NaN,
+    /// so a NaN must not reach it.
     private func maxRelative(_ got: [Float], _ want: [Float]) -> Float {
+        guard got.allSatisfy(\.isFinite), want.allSatisfy(\.isFinite) else { return .infinity }
         let scale = max(want.map(abs).max() ?? 0, 1e-6)
         return zip(got, want).map { abs($0 - $1) }.max()! / scale
     }

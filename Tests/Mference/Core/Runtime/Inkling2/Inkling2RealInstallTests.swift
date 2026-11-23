@@ -20,8 +20,11 @@ struct Inkling2RealInstallTests {
     static let prompt: [Int32] = [371, 151451, 149879, 151194, 149884]
     static let goldenNext = 152717
 
+    /// Infinite when either side holds a non-finite value: `max` skips NaN,
+    /// so a NaN must not reach it.
     private func relative(_ got: [Float], _ want: [Float]) -> Float {
-        zip(got, want).map { abs($0 - $1) }.max()! / max(want.map(abs).max()!, 1e-6)
+        guard got.allSatisfy(\.isFinite), want.allSatisfy(\.isFinite) else { return .infinity }
+        return zip(got, want).map { abs($0 - $1) }.max()! / max(want.map(abs).max()!, 1e-6)
     }
 
     @Test(.enabled(if: install != nil, "needs MFERENCE_INKLING2_GTURBO"))
@@ -139,6 +142,11 @@ struct Inkling2RealInstallTests {
             if index == 0 {
                 print("inkling2 real next token after the prompt: \(argmax) (K0 Metal golden \(Self.goldenNext))")
                 #expect(argmax == Self.goldenNext)
+            } else {
+                // K0: "." (13) after " Paris" is not a near-tie; the token
+                // after it is (0.014 nats), so nothing is asserted there.
+                print("inkling2 real next token after \(Self.goldenNext): \(argmax) (K0 Metal golden 13)")
+                #expect(argmax == 13)
             }
             position += n
         }

@@ -58,8 +58,11 @@ struct Inkling2ForwardRunnerToyTests {
     private func argmax(_ v: [Float]) -> Int { v.indices.max { v[$0] < v[$1] }! }
 
     /// Largest difference relative to the reference's largest magnitude.
+    /// Infinite when either side holds a non-finite value: `max` skips NaN,
+    /// so a NaN must not reach it.
     private func relative(_ got: [Float], _ want: [Float]) -> Float {
-        zip(got, want).map { abs($0 - $1) }.max()! / max(want.map(abs).max()!, 1e-6)
+        guard got.allSatisfy(\.isFinite), want.allSatisfy(\.isFinite) else { return .infinity }
+        return zip(got, want).map { abs($0 - $1) }.max()! / max(want.map(abs).max()!, 1e-6)
     }
 
     /// Chunks of 2 split the 3-token prefill into 2 + 1 (the 1-row span runs
