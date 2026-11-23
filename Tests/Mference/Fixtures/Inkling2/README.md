@@ -122,13 +122,16 @@ llama.cpp b12641, `ink-golden --ngl 0`, this repository's build:
    `llama-graph.cpp:3134` sets `use_flash_attn = cparams.flash_attn &&
    kq_b == nullptr` (the log's "Flash Attention enabled" is the context
    setting only). K and V are cached in F16. KQ is `ggml_vec_dot_f16_f32`: K
-   widened to F32, Q unrounded F32, an F32 dot. The bias is added in F32, then
-   `soft_max_ext` in F32 with the scale 1/sqrt(128) applied to (KQ + bias).
+   widened to F32, Q unrounded F32, an F32 dot in 64-value chunks whose sums
+   are added in double. The bias is added in F32, then `soft_max_ext` in F32
+   with the scale 1/sqrt(128) applied to (KQ + bias), the F16 mask added, and
+   a zero sink term (exp(0 - max)) in the denominator.
    KQV is the same F16-by-F32 dot with F32 probabilities.
 2. Under 32 tokens in a batch everything runs on the CPU backend: inputs to
    Q8_0 products (dense and routed experts) and to NVFP4 expert products
    are rounded to Q8_0 (32-value blocks, FP16 scale), inputs to BF16
-   products to BF16.
+   products to BF16; each NVFP4 expert's per-expert `.scale` multiplies its
+   output in F32 after the product.
 3. From 32 tokens up, the Accelerate BLAS backend the build links takes the
    contiguous dense products with all three dimensions >= 32 and the KQV
    product, as F32 with unrounded activations; KQ, the routed experts and
