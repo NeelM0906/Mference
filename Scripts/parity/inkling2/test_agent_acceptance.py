@@ -14,6 +14,8 @@ fail, so each rubric is satisfiable and not trivially passed.
 
 import http.server
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -273,6 +275,63 @@ class Unit(Base):
         self.assertEqual(AA.wilson(0, 0), (None, None))
         lo, hi = AA.wilson(8, 10)
         self.assertTrue(0.4 < lo < 0.5 and 0.9 < hi < 0.97)
+
+    def test_inkling_only_cases(self):
+        d = tempfile.mkdtemp()
+        cases = [{"id": i, "block": "C", "messages": [{"role": "user", "content": "q"}],
+                  "check": {"final_must": ["^\\s*7\\s*$"], "final_must_not": []}, "gate": False}
+                 for i in ("c01-4k-fact", "c09-30k-cross-doc")]
+        json.dump({"cases": cases}, open(os.path.join(d, "cases-c.json"), "w"))
+        json.dump({"full": {"C": ["c01-4k-fact", "c09-30k-cross-doc"], "seeds": [1], "warmups": 0}},
+                  open(os.path.join(d, "tiers.json"), "w"))
+        mach = os.path.join(d, "machine.txt")
+        open(mach, "w").write("test machine")
+        runs = {}
+        for model in (AA.INKLING_MODEL, "qwen3.8-27b"):
+            prof = os.path.join(d, model + ".json")
+            json.dump([dict(PROFILE, model=model)], open(prof, "w"))
+            out = runs[model] = os.path.join(d, model + ".jsonl")
+            self.srv.model = model
+            self.srv.replies = [{"content": "7"}, {"content": "7"}]
+            AA.main(["run", "--corpus", d, "--tier", "full", "--profiles", prof, "--engine-commit", "abc",
+                     "--machine-record", mach, "--output", out, "--port", str(self.srv.server_address[1]),
+                     "--blocks", "C"])
+        _, ink = AA.measured(runs[AA.INKLING_MODEL])
+        _, deep = AA.measured(runs["qwen3.8-27b"])
+        self.assertEqual([(r["case"], r["unpaired"]) for r in ink], [("c01-4k-fact", False), ("c09-30k-cross-doc", True)])
+        self.assertEqual([r["case"] for r in deep], ["c01-4k-fact"])  # skipped for Deep
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            AA.main(["summarize", runs[AA.INKLING_MODEL]])
+            AA.main(["paired", runs[AA.INKLING_MODEL], runs["qwen3.8-27b"]])
+        text = buf.getvalue()
+        self.assertIn("| p | C, Inkling only | 1/1 |", text)
+        self.assertIn("| p | all | 1/1 |", text)  # the unpaired case is not in "all"
+        self.assertIn("1 paired cases; 0 present in only one run.", text)
+
+    def test_cases_filter(self):
+        d = tempfile.mkdtemp()
+        cases = [{"id": i, "block": "C", "messages": [{"role": "user", "content": "q"}],
+                  "check": {"final_must": ["^\\s*7\\s*$"], "final_must_not": []}, "gate": True}
+                 for i in ("c01-4k-fact", "c02-4k-two-hop")]
+        json.dump({"cases": cases}, open(os.path.join(d, "cases-c.json"), "w"))
+        json.dump({"gate": {"C": ["c01-4k-fact", "c02-4k-two-hop"], "seeds": [1], "warmups": 0}},
+                  open(os.path.join(d, "tiers.json"), "w"))
+        prof = os.path.join(d, "p.json")
+        json.dump([PROFILE], open(prof, "w"))
+        mach = os.path.join(d, "machine.txt")
+        open(mach, "w").write("test machine")
+        base = ["run", "--corpus", d, "--tier", "gate", "--profiles", prof, "--engine-commit", "abc",
+                "--machine-record", mach, "--port", str(self.srv.server_address[1]), "--blocks", "C"]
+        out = os.path.join(d, "one.jsonl")
+        self.srv.replies = [{"content": "7"}]
+        AA.main(base + ["--output", out, "--cases", "c02-4k-two-hop"])
+        with open(out) as f:
+            rows = [json.loads(l) for l in f]
+        self.assertEqual(rows[0]["cases"], ["c02-4k-two-hop"])
+        self.assertEqual([r["case"] for r in rows[1:]], ["c02-4k-two-hop"])
+        with self.assertRaises(SystemExit):
+            AA.main(base + ["--output", os.path.join(d, "bad.jsonl"), "--cases", "c09-30k-cross-doc"])
 
 
 # ---------------------------------------------------------------- gold replies for the real corpus
