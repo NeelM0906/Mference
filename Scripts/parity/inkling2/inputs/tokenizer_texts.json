@@ -1,0 +1,90 @@
+[
+ {
+  "id": "t01-hello",
+  "text": "Hello, world!"
+ },
+ {
+  "id": "t02-capital",
+  "text": "The capital of France is"
+ },
+ {
+  "id": "t03-edge-spaces",
+  "text": "  two leading spaces and two trailing  "
+ },
+ {
+  "id": "t04-newlines-tabs",
+  "text": "line one\nline two\n\n\tindented\r\nwindows line"
+ },
+ {
+  "id": "t05-numbers",
+  "text": "In 2026, 3.14159 x 10^9 = 3,141,590,000; 007; 1e-5; 0x1F; 12345678901234567890"
+ },
+ {
+  "id": "t06-code",
+  "text": "def square(x):\n    return x ** 2  # the square\n\nprint(square(12))\n"
+ },
+ {
+  "id": "t07-json",
+  "text": "{\"name\": \"get_weather\", \"args\": {\"city\": \"Paris\", \"unit\": \"celsius\"}}"
+ },
+ {
+  "id": "t08-accents",
+  "text": "naïve café, résumé, Zürich, Ærøskøbing, São Paulo"
+ },
+ {
+  "id": "t09-cjk",
+  "text": "東京は日本の首都です。北京是中国的首都。"
+ },
+ {
+  "id": "t10-scripts",
+  "text": "안녕하세요 مرحبا بالعالم नमस्ते दुनिया Привет, мир"
+ },
+ {
+  "id": "t11-emoji",
+  "text": "🙂👍🏽 👨‍👩‍👧‍👦 🇫🇷 ✅"
+ },
+ {
+  "id": "t12-contractions",
+  "text": "I'm sure you'll see they've done it, isn't it? We'd rather not."
+ },
+ {
+  "id": "t13-repeat",
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hahahahahahahahahahahahahahahahahahahaha"
+ },
+ {
+  "id": "t14-long-words",
+  "text": "antidisestablishmentarianism supercalifragilisticexpialidocious pneumonoultramicroscopicsilicovolcanoconiosis"
+ },
+ {
+  "id": "t15-url",
+  "text": "https://example.com/a/b/c?query=1&x=y#frag and mailto:someone@example.org"
+ },
+ {
+  "id": "t16-special-markup",
+  "text": "<|message_user|><|content_text|>hi there<|end_message|>"
+ },
+ {
+  "id": "t17-whitespace-runs",
+  "text": "a  b   c    d\n\n\n e\t\tf"
+ },
+ {
+  "id": "t18-latex",
+  "text": "$\\int_0^1 x^2\\,dx = \\frac{1}{3}$ and $e^{i\\pi} + 1 = 0$"
+ },
+ {
+  "id": "t19-markdown",
+  "text": "## Title\n- item **bold** and _italic_\n```swift\nlet x = 1\n```\n"
+ },
+ {
+  "id": "t20-single-space",
+  "text": " "
+ },
+ {
+  "id": "t21-common-words",
+  "text": " the quick brown fox jumps over the lazy dog. The Quick Brown Fox!"
+ },
+ {
+  "id": "t22-paragraph",
+  "text": "Coastal wetlands reduce flood damage by slowing storm surge, absorbing wave energy and storing water. Their effect depends on the width of the marsh, the density of vegetation and the duration of the storm, so they lower risk rather than remove it. Engineers increasingly pair them with levees and sea walls."
+ }
+]
