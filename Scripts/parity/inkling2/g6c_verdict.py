@@ -301,6 +301,55 @@ def expert_rule(root, pid, tdir):
     return fails, ex, fm, src
 
 
+def forced_report(root, pid, tdir):
+    """Option (i), report only (K4's `inkling2-forced-routing-v1`, <root>/<pid>/forced/<pid>.json): the
+    exact reference routed at the runner's own state per visit. None when there is no file; otherwise
+    {status: ok|stale|malformed, why, ...}. Stale: written from another candidate or trace."""
+    import hashlib
+    path = os.path.join(root, pid, "forced", f"{pid}.json") if root else None
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            d = json.load(f, parse_constant=lambda c: float("nan"))
+        n, visits = d["n_tokens"], d["visits"]
+        dis = d["disagreements"]
+        flat = lambda key: [x for v in visits for x in v[key]]
+        problems = []
+        if d.get("schema") != "inkling2-forced-routing-v1":
+            problems.append(f"schema {d.get('schema')}")
+        if len(visits) * n != d["token_visits"]:
+            problems.append("visits x n_tokens != token_visits")
+        if any(len(v[k]) != n for v in visits for k in ("own_experts", "fp32_margins", "shortfalls", "differs", "increment_rel_l2")):
+            problems.append("a per-visit list is not n_tokens long")
+        if not (d["disagreement_count"] == sum(map(bool, flat("differs"))) == len(dis)):
+            problems.append("disagreement_count, differs and disagreements disagree")
+        if d["not_near_tie_count"] != sum(1 for x in dis if not x["near_tie"]):
+            problems.append("not_near_tie_count disagrees with the rows")
+        if not all(finite(x) for k in ("fp32_margins", "shortfalls", "increment_rel_l2") for x in flat(k)):
+            problems.append("a non-finite float")
+        if problems:
+            return {"status": "malformed", "why": "; ".join(problems), "path": path}
+        trace = os.path.join(tdir, pid, "trace.json") if tdir else None
+        sha = hashlib.sha256(open(trace, "rb").read()).hexdigest() if trace and os.path.isfile(trace) else None
+        cand = os.path.basename(os.path.dirname(os.path.abspath(tdir))) if tdir else None
+        if sha != d.get("runner_trace_sha256") or cand != d.get("candidate"):
+            return {"status": "stale", "why": f"written from {d.get('candidate')} (trace sha256 "
+                                              f"{str(d.get('runner_trace_sha256'))[:12]}), judging {cand} ({str(sha)[:12]})",
+                    "path": path}
+        per_layer = {}
+        for x in dis:
+            per_layer[x["layer"]] = per_layer.get(x["layer"], 0) + 1
+        return {"status": "ok", "token_visits": d["token_visits"], "disagreements": d["disagreement_count"],
+                "rate": d["disagreement_count"] / d["token_visits"], "not_near_tie": d["not_near_tie_count"],
+                "max_shortfall": max([x["shortfall"] for x in dis], default=0.0),
+                "max_increment_rel_l2": max(flat("increment_rel_l2"), default=0.0),
+                "per_layer": dict(sorted(per_layer.items())), "runner_tip": d.get("runner_tip"),
+                "reference_commit": d.get("reference_commit")}
+    except (ValueError, KeyError, TypeError, OSError) as e:
+        return {"status": "malformed", "why": f"{type(e).__name__}: {e}", "path": path}
+
+
 def addendum_bound(k, v, n):
     floor = max(FLOORS[k], 2 / n) if k in ("top1", "top1_m02") and n else FLOORS[k]
     return max(1.5 * v, floor), floor
@@ -405,6 +454,12 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
         else:
             rec["flip_margins"] = {"flips": len(fm), "source": src,
                                    "max": max(fm) if fm and all(finite(m) for m in fm) else (None if not fm else float("nan"))}
+    # option (i), report only: forced routing per visit, where K4 wrote it
+    out["a"]["forced"] = {}
+    for pid in list(TRACE_GOLDENS) + [p for p in a_cover if p not in TRACE_GOLDENS]:
+        fr = forced_report(root, pid, tdir)
+        if fr is not None:
+            out["a"]["forced"][pid] = fr
     out["a"]["measured_worst"] = worst
     # printed for the record; the tool gates on EXACT_BOUNDS. A re-derivation that
     # loosens a listed number goes to the coordinator and maintainer first (spec v1.12).
@@ -496,6 +551,14 @@ def print_rebased(rb):
                 ("no flips" if not fm["flips"] else f"{fm['flips']} flips, max margin {fmt4(fm['max'])} "
                  f"(< {FLIP_MARGIN_MAX}; {fm['source']} margins)")
             print(f"  (a) {pid} expert sets: agreement {fmt4(v['expert_set_agreement'])} (>= {EXPERT_AGREEMENT_MIN}); {fm_s}")
+    for pid, fr in a.get("forced", {}).items():
+        if fr["status"] != "ok":
+            print(f"  (a) {pid} forced routing (option i, report only): {fr['status'].upper()}: {fr['why']}")
+        else:
+            print(f"  (a) {pid} forced routing (option i, report only): {fr['disagreements']}/{fr['token_visits']} "
+                  f"token-visits differ ({fr['rate']:.4f}), {fr['not_near_tie']} not near-ties (shortfall >= "
+                  f"{FLIP_MARGIN_MAX}), max shortfall {fmt4(fr['max_shortfall'])}, max increment rel L2 "
+                  f"{fmt4(fr['max_increment_rel_l2'])}; per layer {fr['per_layer']}")
     print("  (a) measured worst over the prompts judged: "
           + ", ".join(f"{k} {fmt4(v)}" for k, v in a["measured_worst"].items())
           + "; re-derived bounds max(3 x worst, listed): "
@@ -513,7 +576,8 @@ def print_rebased(rb):
         print(f"(d) quality ({d['measure']}, {d['positions']} positions, {', '.join(d['prompts'])}"
               + (f"; missing {', '.join(d['missing'])}" if d["missing"] else "") + f"): {pairs}; "
               + f"llama.cpp Metal - CPU {mc['mean']:+.4f} [{mc['ci95'][0]:+.4f}, {mc['ci95'][1]:+.4f}]: "
-              + ("pass" if d["pass"] else "FAIL")
+              + (f"incomplete (missing {', '.join(d['missing'])}; the rule needs all its prompts)" if d["missing"]
+                 else "pass" if d["pass"] else "FAIL")
               + f" (mean >= {QUALITY_MEAN_MIN}, lower bound >= llama.cpp's own)")
         print("    positions judged per prompt: " + ", ".join(f"{k} {v['judged']}/{v['natural']}" for k, v in d["per_prompt"].items())
               + ("; FAIL, not every natural position judged: " + "; ".join(d["incomplete_positions"])

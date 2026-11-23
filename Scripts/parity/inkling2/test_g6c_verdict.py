@@ -3,6 +3,8 @@
 unittest on a synthetic world (no model, no program files):
 python3 -I Scripts/parity/inkling2/test_g6c_verdict.py"""
 
+import contextlib
+import io
 import json
 import math
 import os
@@ -223,9 +225,16 @@ class RebasedTests(unittest.TestCase):
     def test_missing_quality_prompt_is_incomplete(self):
         w = World(self.tmp)
         ntq.DEFAULT = [World.MID, World.LONG, "absent"]
-        state, _, missing = gv.rebased_state(w.run())
+        rb = w.run()
+        state, _, missing = gv.rebased_state(rb)
         self.assertEqual(state, "incomplete")
         self.assertIn("d", missing)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gv.print_rebased(rb)
+        line = next(l for l in out.getvalue().splitlines() if l.startswith("(d)"))
+        self.assertIn("incomplete (missing absent", line)
+        self.assertNotIn("FAIL", line)
 
 
     def test_truncated_runner_output_fails(self):
@@ -336,6 +345,56 @@ class VerdictTests(unittest.TestCase):
     def test_pooled_skips_prompts_without_positions(self):
         empty = {"logprobs": {"positions": 0, "top1_agreement": None, "top1_at_margin": {"2.0": {"positions": 0, "agree": 0}}}}
         self.assertFalse(gv.pooled([empty])["pass"])
+
+
+class ForcedReportTests(unittest.TestCase):
+    """Option (i), report only: K4's inkling2-forced-routing-v1 files."""
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self._tmp.name, "precision")
+        self.tdir = os.path.join(self._tmp.name, "cand-x", "traces")
+        write_trace(self.tdir, "t", experts_with(0, visits=2, tokens=3))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def forced(self, **override):
+        import hashlib
+        with open(os.path.join(self.tdir, "t", "trace.json"), "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        visits = [{"visit": v, "layer": v, "slot": 0, "own_experts": [list(range(8))] * 3, "fp32_margins": [0.01] * 3,
+                   "shortfalls": [0.0, 0.004, 0.0] if v == 1 else [0.0] * 3, "differs": [False, v == 1, False],
+                   "increment_rel_l2": [0.001] * 3} for v in range(2)]
+        d = {"schema": "inkling2-forced-routing-v1", "id": "t", "candidate": "cand-x", "runner_tip": "abc",
+             "runner_trace_sha256": sha, "reference_commit": "def", "n_tokens": 3, "top_k": 8,
+             "near_tie_bound": 0.0258, "token_visits": 6, "disagreement_count": 1, "disagreement_rate": 1 / 6,
+             "not_near_tie_count": 0, "visits": visits,
+             "disagreements": [{"visit": 1, "layer": 1, "pos": 1, "shortfall": 0.004, "fp32_margin": 0.002,
+                                "runner_margin": None, "runner_only": [9], "fp32_only": [7], "near_tie": True}]}
+        d.update(override)
+        os.makedirs(os.path.join(self.root, "t", "forced"), exist_ok=True)
+        dump(d, os.path.join(self.root, "t", "forced", "t.json"))
+
+    def test_ok(self):
+        self.forced()
+        r = gv.forced_report(self.root, "t", self.tdir)
+        self.assertEqual((r["status"], r["disagreements"], r["not_near_tie"], r["per_layer"]), ("ok", 1, 0, {1: 1}))
+        self.assertAlmostEqual(r["max_shortfall"], 0.004)
+
+    def test_stale_and_malformed(self):
+        self.forced(candidate="cand-other")
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
+        self.forced(runner_trace_sha256="0" * 64)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
+        self.forced(disagreement_count=2)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "malformed")
+        self.forced(not_near_tie_count=1)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "malformed")
+        self.forced(token_visits=7)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "malformed")
+
+    def test_absent_is_none(self):
+        self.assertIsNone(gv.forced_report(self.root, "t", self.tdir))
 
 
 class ExpertRuleTests(unittest.TestCase):
