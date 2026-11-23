@@ -31,16 +31,18 @@ struct Inkling2G6aTests {
         environment["MFERENCE_INKLING2_G6A_TRACES"]?.split(separator: ",").map(String.init)
             ?? ["generate/cpu/trace01", "generate2/cpu/trace02"]
     }
-    /// Per visit: relative L2 of the visit's own increment (output minus
-    /// the record it continued; the whole output at a block start), and the
-    /// largest element difference relative to the record's largest
-    /// magnitude. Provisional, until the first measurement sets them (spec
-    /// section 8, G6a).
+    /// G6a thresholds (spec section 8, approved 2026-11-23 from the first
+    /// measurements: worst increment L2 8.3e-3, element maximum 1.6e-2, route
+    /// weights 2.2e-3 over trace01, trace01b and trace02). Per visit: the
+    /// relative L2 of the visit's own increment (output minus the record it
+    /// continued; the whole output at a block start), and the largest element
+    /// difference relative to the record's largest magnitude.
     static let incrementTolerance: Float = 0.02
-    static let visitTolerance: Float = 0.05
-    static let routeWeightTolerance: Float = 0.01
-    /// Router: the reference's own top-8 may differ from the trace's only at
-    /// near-ties, on at most 1% of token-visits.
+    static let visitTolerance: Float = 0.04
+    static let routeWeightTolerance: Float = 0.006
+    /// Router: the reference's own top-8 may differ from the trace's set only
+    /// at near-ties (shortfall under 0.01), on at most 1% of token-visits; a
+    /// differing set with a larger shortfall fails.
     static let tieMargin: Float = 0.01
     static let flipFraction: Float = 0.01
 
@@ -164,7 +166,7 @@ struct Inkling2G6aTests {
             #expect(worstMax < Self.visitTolerance, "\(name)")
             #expect(normErr < Self.visitTolerance, "\(name)")
             #expect(worstWeight < Self.routeWeightTolerance, "\(name)")
-            #expect(worstShortfall <= Self.tieMargin, "\(name)")
+            #expect(worstShortfall < Self.tieMargin, "\(name)")
             #expect(Float(flips) <= Self.flipFraction * Float(48 * n), "\(name)")
         }
     }
