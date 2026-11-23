@@ -269,6 +269,18 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     }
     var visitTrace: VisitTrace?
 
+    /// Golden hook (G6c): while set, every chunk also runs the head for each
+    /// of its tokens whose position is in `positions` and writes that
+    /// token's logits, as the head writes the last token's (FP16, `vocab`
+    /// values, with the weights' softcap: none from an install), into
+    /// `buffer` at row `position - positions.lowerBound` of `vocabRows`
+    /// halves. Off on every production path.
+    struct PositionLogits {
+        let buffer: MTLBuffer
+        let positions: Range<Int>
+    }
+    var positionLogits: PositionLogits?
+
     /// The most routed-expert bytes the runner lets its expert source make
     /// resident: 40% of the host's memory. 12.8 GB on 32 GB, where K2's plan
     /// binds 9.07 GB (layers 6-17 resident plus two slabs) and every layer
@@ -582,6 +594,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             precondition(start + t <= trace.rows && trace.outputs.length >= 48 * trace.rows * d * 4
                          && trace.routes.length >= 48 * trace.rows * topK * 4, "visit trace too small")
         }
+        if let hook = positionLogits {
+            precondition(hook.positions.lowerBound >= 0
+                         && hook.buffer.length >= hook.positions.count * w.vocabRows * 2, "position logits too small")
+        }
         var visitIndex = 0
         func record(_ output: Int) {
             defer { visitIndex += 1 }
@@ -652,21 +668,24 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 record(cur)
             }
 
+            if let hook = positionLogits {
+                // G6c: the head over every token of the chunk the hook asks for.
+                let lower = max(start, hook.positions.lowerBound)
+                let upper = min(start + t, hook.positions.upperBound)
+                if lower < upper {
+                    encode { enc in
+                        for position in lower..<upper {
+                            encodeFinalHead(enc, row: position - start, blocks: blocks, cur: cur,
+                                            logits: hook.buffer,
+                                            logitsOffset: (position - hook.positions.lowerBound) * w.vocabRows * 2)
+                        }
+                    }
+                }
+            }
             if let logits {
-                // The head reads only the last token: mix its block states, norm, project.
-                let last = t - 1
+                // The head reads only the last token.
                 encode { enc in
-                    kernels.encodeDepthMix(enc, arena: s.arena,
-                                           stateOffsets: (blocks + [cur]).map { s.arenaFloats($0) + last * d },
-                                           stateStride: d, queries: w.outputResQuery.buffer,
-                                           queriesOffset: w.outputResQuery.offset, queryCount: 1,
-                                           out: s.finalRow, outStride: d, outQueryStride: d, d: d, tokens: 1)
-                    kernels.encodeRMSNorm(enc, x: s.finalRow, xStride: d, weight: w.outputNorm.buffer,
-                                          weightOffset: w.outputNorm.offset, eps: w.rmsEps,
-                                          out: s.finalRow, outOffset: d * 4, outStride: d, d: d, tokens: 1)
-                    kernels.encodeHead(enc, x: s.finalRow, xOffset: d * 4, table: w.dense, tableOffset: w.output,
-                                       rowBytes: d / 32 * 34, rows: w.vocab, softcap: w.finalLogitSoftcap,
-                                       logits: logits, d: d)
+                    encodeFinalHead(enc, row: t - 1, blocks: blocks, cur: cur, logits: logits, logitsOffset: 0)
                 }
                 if w.vocabRows > w.vocab, let blit = cb.makeBlitCommandEncoder() {
                     // 0xFBFB is about -65376 in FP16: never sampled, never the argmax.
@@ -706,6 +725,26 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         }
         state.advance(by: t)
         chunkState.markCommitted()
+    }
+
+    /// Encodes the head for the chunk's token at `row`: the final depth mix
+    /// of its block states and running sum, the output norm, and the FP16
+    /// logits of the first `vocab` head rows at `logitsOffset`.
+    private func encodeFinalHead(_ enc: MTLComputeCommandEncoder, row: Int, blocks: [Int], cur: Int,
+                                 logits: MTLBuffer, logitsOffset: Int) {
+        let s = scratch
+        let d = Self.d
+        kernels.encodeDepthMix(enc, arena: s.arena,
+                               stateOffsets: (blocks + [cur]).map { s.arenaFloats($0) + row * d },
+                               stateStride: d, queries: w.outputResQuery.buffer,
+                               queriesOffset: w.outputResQuery.offset, queryCount: 1,
+                               out: s.finalRow, outStride: d, outQueryStride: d, d: d, tokens: 1)
+        kernels.encodeRMSNorm(enc, x: s.finalRow, xStride: d, weight: w.outputNorm.buffer,
+                              weightOffset: w.outputNorm.offset, eps: w.rmsEps,
+                              out: s.finalRow, outOffset: d * 4, outStride: d, d: d, tokens: 1)
+        kernels.encodeHead(enc, x: s.finalRow, xOffset: d * 4, table: w.dense, tableOffset: w.output,
+                           rowBytes: d / 32 * 34, rows: w.vocab, softcap: w.finalLogitSoftcap,
+                           logits: logits, logitsOffset: logitsOffset, d: d)
     }
 
     // MARK: One visit
