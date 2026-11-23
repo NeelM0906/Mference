@@ -80,17 +80,26 @@ import MferenceValidationSupport
 
         let pairCount = tokens * shape.topK
         let pairs = Inkling2MoETestSupport.read(scratch.pairs, as: Inkling2RoutedPair.self, count: pairCount)
-        let workCount = Int(Inkling2MoETestSupport.read(scratch.workCount, as: UInt32.self, count: 1)[0])
-        let work = Inkling2MoETestSupport.read(scratch.work, as: Inkling2WorkBlock.self, count: workCount)
-        let dispatch = Inkling2MoETestSupport.read(scratch.dispatch, as: UInt32.self, count: 6)
-        #expect(dispatch == [UInt32(shape.f / 64), UInt32(workCount), 1, UInt32(shape.d / 128), UInt32(workCount), 1])
+        let counts2 = Inkling2MoETestSupport.read(scratch.workCount, as: UInt32.self, count: 2)
+        let (fullCount, tailCount) = (Int(counts2[0]), Int(counts2[1]))
+        let all = Inkling2MoETestSupport.read(scratch.work, as: Inkling2WorkBlock.self,
+                                              count: scratch.fullBlockCapacity + shape.experts)
+        let full = Array(all[0..<fullCount])
+        let tail = Array(all[scratch.fullBlockCapacity..<(scratch.fullBlockCapacity + tailCount)])
+        let dispatch = Inkling2MoETestSupport.read(scratch.dispatch, as: UInt32.self, count: 12)
+        let gu = UInt32(shape.f / 64), dn = UInt32(shape.d / 128)
+        #expect(dispatch == [gu, UInt32(fullCount), 1, gu, UInt32(tailCount), 1,
+                             dn, UInt32(fullCount), 1, dn, UInt32(tailCount), 1])
 
+        // An expert's remainder of 33-63 rows is one more full block; 1-32 rows a tail block.
         var counts = [Int](repeating: 0, count: shape.experts)
         for id in routes.ids { counts[Int(id)] += 1 }
-        #expect(workCount == counts.reduce(0) { $0 + ($1 + 63) / 64 })
+        #expect(fullCount == counts.reduce(0) { $0 + $1 / 64 + ($1 % 64 > 32 ? 1 : 0) })
+        #expect(tailCount == counts.filter { $0 % 64 > 0 && $0 % 64 <= 32 }.count)
+        for block in tail { #expect(block.rowCount > 0 && block.rowCount <= 32) }
         var seen = Set<UInt32>()
         var covered = 0
-        for block in work {
+        for block in full + tail {
             #expect(block.rowCount > 0 && block.rowCount <= 64)
             for i in 0..<Int(block.rowCount) {
                 let pair = pairs[Int(block.pairStart) + i]

@@ -131,10 +131,11 @@ import MferenceValidationSupport
                         kernels.encodePrefill($0, hidden: hidden, hiddenStride: Self.shape.d, pool: pool,
                                               scratch: scratch, tokens: tokens, out: out, outStride: Self.shape.d)
                     }
-                    let work = Int(Inkling2MoETestSupport.read(scratch.workCount, as: UInt32.self, count: 1)[0])
+                    let blockCounts = Inkling2MoETestSupport.read(scratch.workCount, as: UInt32.self, count: 2)
+                    let work = Int(blockCounts[0]), tails = Int(blockCounts[1])
                     let flops = 2.0 * Double(tokens * Self.shape.topK) * Double(Self.shape.macsPerPair)
-                    print(String(format: "[inkling2-moe-kbench] rows=%d routes=%@ enc=%@ blocks=%d plan %.3f ms experts %.3f ms (%.2f TFLOP/s) reduce %.3f ms total %.3f ms (%.2f TFLOP/s)",
-                                 tokens, skewed ? "skewed" : "uniform", pool.encoding == .nvfp4 ? "nvfp4" : "q8_0", work,
+                    print(String(format: "[inkling2-moe-kbench] rows=%d routes=%@ enc=%@ blocks=%d+%d tail plan %.3f ms experts %.3f ms (%.2f TFLOP/s) reduce %.3f ms total %.3f ms (%.2f TFLOP/s)",
+                                 tokens, skewed ? "skewed" : "uniform", pool.encoding == .nvfp4 ? "nvfp4" : "q8_0", work, tails,
                                  plan * 1000, experts * 1000, flops / experts / 1e12, reduce * 1000,
                                  total * 1000, flops / total / 1e12))
                 }
@@ -142,35 +143,162 @@ import MferenceValidationSupport
         }
     }
 
+    /// The one-token decode step under sustained load: 32 steps per command
+    /// buffer, each with its own 8 random experts of a full 128-expert layer,
+    /// as a decode loop keeps the GPU busy (a lone 0.3 ms command buffer runs
+    /// at idle clocks). Also the gate-up half on its own.
     @Test(.enabled(if: enabled))
     func decodeStep() throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
         let device = context.device
+        let steps = 32
         let (x, _) = Inkling2MoETestSupport.halfBuffer(device, rows: 1, stride: Self.shape.d, d: Self.shape.d, seed: 0xB6, range: 1)
-        let ids = device.makeBuffer(length: 32, options: .storageModeShared)!
-        let weights = device.makeBuffer(length: 32, options: .storageModeShared)!
-        let r = Inkling2MoETestSupport.randomRoutes(tokens: 1, experts: Self.shape.experts, topK: 8, seed: 0xB7)
+        let ids = device.makeBuffer(length: steps * 32, options: .storageModeShared)!
+        let weights = device.makeBuffer(length: steps * 32, options: .storageModeShared)!
+        let r = Inkling2MoETestSupport.randomRoutes(tokens: steps, experts: Self.shape.experts, topK: 8, seed: 0xB7)
         Inkling2MoETestSupport.write(r.ids, to: ids)
         Inkling2MoETestSupport.write(r.weights, to: weights)
         let activation = device.makeBuffer(length: 8 * Self.shape.f * 2, options: .storageModeShared)!
         let out = device.makeBuffer(length: Self.shape.d * 4, options: .storageModeShared)!
         for encoding in Inkling2MoEEncoding.allCases {
             let pool = try Self.pool(device, encoding)
-            let warmStart = Date()
-            while Date().timeIntervalSince(warmStart) < 1 {
-                _ = Inkling2MoETestSupport.run(context) {
-                    kernels.encodeDecode($0, shape: Self.shape, x: x, ids: ids, routeWeights: weights, pool: pool,
-                                         activation: activation, out: out)
+            func batch(_ gateUpOnly: Bool) -> (MTLComputeCommandEncoder) -> Void {
+                return { encoder in
+                    for step in 0..<steps {
+                        if gateUpOnly {
+                            kernels.encodeDecodeGateUp(encoder, shape: Self.shape, x: x, ids: ids, idsOffset: step * 32,
+                                                       pool: pool, activation: activation)
+                        } else {
+                            kernels.encodeDecode(encoder, shape: Self.shape, x: x, ids: ids, idsOffset: step * 32,
+                                                 routeWeights: weights, routeWeightsOffset: step * 32, pool: pool,
+                                                 activation: activation, out: out)
+                        }
+                    }
                 }
             }
-            let t = Self.best(context) {
-                kernels.encodeDecode($0, shape: Self.shape, x: x, ids: ids, routeWeights: weights, pool: pool,
-                                     activation: activation, out: out)
-            }
+            let warmStart = Date()
+            while Date().timeIntervalSince(warmStart) < 2 { _ = Inkling2MoETestSupport.run(context, batch(false)) }
+            let t = Self.best(context, batch(false)) / Double(steps)
+            let gateUp = Self.best(context, batch(true)) / Double(steps)
             let bytes = Double(8 * Self.shape.expertBytes(encoding))
-            print(String(format: "[inkling2-moe-kbench] decode enc=%@ %.3f ms (%.0f GB/s of expert weights)",
-                         encoding == .nvfp4 ? "nvfp4" : "q8_0", t * 1000, bytes / t / 1e9))
+            print(String(format: "[inkling2-moe-kbench] decode enc=%@ %.3f ms per step (gate-up %.3f, down %.3f; %.0f GB/s of expert weights)",
+                         encoding == .nvfp4 ? "nvfp4" : "q8_0", t * 1000, gateUp * 1000, (t - gateUp) * 1000,
+                         bytes / t / 1e9))
+        }
+    }
+
+    /// Staging a full-size layer through the file cache: synthetic layer
+    /// files of the install's sizes (NVFP4 574.6 MB, Q8_0 1,084.2 MB),
+    /// written in 32 MiB chunks, read back into a slab after the first read
+    /// warmed the cache; deleted afterwards. The steady state of a 32 GB
+    /// prefill re-reads 12 such layers per chunk.
+    @Test(.enabled(if: enabled))
+    func stagingThroughput() throws {
+        let context = try MetalContext()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inkling2-staging-bench-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var files: [Int: Inkling2ExpertLayerFile] = [:]
+        var rng = SeedTree(0xBA).key("staging")
+        let chunk = Inkling2SyntheticPool.randomBlocks(encoding: .q8_0, bytes: 34 * 987_000, rng: &rng)
+        for (layer, bytes) in [(0, 128 * 4_489_216), (1, 128 * 8_470_528)] {
+            let url = directory.appendingPathComponent("layer_\(layer).bin")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: url)
+            var written = 0
+            while written < bytes {
+                let n = min(chunk.count, bytes - written)
+                try handle.write(contentsOf: chunk[0..<n])
+                written += n
+            }
+            try handle.close()
+            files[layer] = Inkling2ExpertLayerFile(path: url.path, offset: 0, bytes: bytes)
+        }
+        let staged = try Inkling2StagedExpertLayers(device: context.device, files: files, slabs: 2)
+        for layer in [0, 1] {
+            // First read warms the cache; then time three reads.
+            for _ in 0..<4 {
+                let cb = context.queue.makeCommandBuffer()!
+                let ticket = try staged.stage(layer: layer)
+                staged.encodeWait(ticket, commandBuffer: cb)
+                staged.encodeRelease(ticket, commandBuffer: cb)
+                cb.commit()
+                cb.waitUntilCompleted()
+            }
+        }
+        staged.drain()
+        #expect(staged.error == nil)
+        print(String(format: "[inkling2-moe-kbench] staging %.2f GB in %.3f s (%.1f GB/s, first reads included)",
+                     Double(staged.bytesRead) / 1e9, staged.secondsReading,
+                     Double(staged.bytesRead) / 1e9 / staged.secondsReading))
+    }
+
+    /// Decode on a staged layer without readback or copy: the layer file
+    /// mapped and wrapped whole (`makeBuffer(bytesNoCopy:)`), warm in the
+    /// file cache, against the same bytes in an anonymous buffer. Times one
+    /// step per command buffer (GPU time and wall time from commit to
+    /// completion, which includes Metal making the buffer resident) and 32
+    /// steps per command buffer.
+    @Test(.enabled(if: enabled))
+    func decodeOnMappedLayer() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let device = context.device
+        let encoding = Inkling2MoEEncoding.nvfp4
+        let anonymous = try Self.pool(device, encoding)
+        let bytes = anonymous.expertStride * Self.shape.experts
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("inkling2-mapped-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: url) }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        let chunk = 32 << 20
+        var written = 0
+        while written < bytes {
+            let n = min(chunk, bytes - written)
+            try handle.write(contentsOf: Data(bytesNoCopy: anonymous.buffer.contents() + written, count: n, deallocator: .none))
+            written += n
+        }
+        try handle.close()
+        let fd = open(url.path, O_RDONLY)
+        #expect(fd >= 0)
+        defer { close(fd) }
+        guard let base = mmap(nil, bytes, PROT_READ, MAP_SHARED, fd, 0), base != MAP_FAILED else {
+            Issue.record("mmap failed"); return
+        }
+        defer { munmap(base, bytes) }
+        nonisolated(unsafe) let mapped = base
+        guard let buffer = device.makeBuffer(bytesNoCopy: mapped, length: bytes, options: .storageModeShared,
+                                             deallocator: nil) else { Issue.record("wrap failed"); return }
+        let mappedPool = try anonymous.rebound(to: buffer)
+
+        let steps = 32
+        let (x, _) = Inkling2MoETestSupport.halfBuffer(device, rows: 1, stride: Self.shape.d, d: Self.shape.d, seed: 0xBB, range: 1)
+        let ids = device.makeBuffer(length: steps * 32, options: .storageModeShared)!
+        let weights = device.makeBuffer(length: steps * 32, options: .storageModeShared)!
+        let r = Inkling2MoETestSupport.randomRoutes(tokens: steps, experts: Self.shape.experts, topK: 8, seed: 0xBC)
+        Inkling2MoETestSupport.write(r.ids, to: ids)
+        Inkling2MoETestSupport.write(r.weights, to: weights)
+        let activation = device.makeBuffer(length: 8 * Self.shape.f * 2, options: .storageModeShared)!
+        let out = device.makeBuffer(length: Self.shape.d * 4, options: .storageModeShared)!
+        for (label, pool) in [("anonymous", anonymous), ("mapped", mappedPool)] {
+            func step(_ s: Int) -> (MTLComputeCommandEncoder) -> Void {
+                { kernels.encodeDecode($0, shape: Self.shape, x: x, ids: ids, idsOffset: s * 32, routeWeights: weights,
+                                       routeWeightsOffset: s * 32, pool: pool, activation: activation, out: out) }
+            }
+            let warmStart = Date()
+            while Date().timeIntervalSince(warmStart) < 2 { _ = Inkling2MoETestSupport.run(context, step(0)) }
+            var gpu = Double.infinity, wall = Double.infinity
+            for s in 0..<steps {
+                let begin = DispatchTime.now().uptimeNanoseconds
+                let cb = Inkling2MoETestSupport.run(context, step(s))
+                wall = min(wall, Double(DispatchTime.now().uptimeNanoseconds - begin) / 1e9)
+                gpu = min(gpu, cb.gpuEndTime - cb.gpuStartTime)
+            }
+            let batched = Self.best(context) { encoder in for s in 0..<steps { step(s)(encoder) } } / Double(steps)
+            print(String(format: "[inkling2-moe-kbench] decode on %@ layer: one step per buffer GPU %.3f ms, wall %.3f ms; batched %.3f ms per step",
+                         label, gpu * 1000, wall * 1000, batched * 1000))
         }
     }
 }

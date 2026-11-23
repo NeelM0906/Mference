@@ -116,6 +116,17 @@ struct Inkling2ExpertPool {
     }
 }
 
+extension Inkling2ExpertPool {
+    /// The same layout over another buffer: a staging slab that holds this
+    /// layer's experts at `offset`.
+    func rebound(to other: MTLBuffer, offset newOffset: Int = 0) throws -> Inkling2ExpertPool {
+        try Inkling2ExpertPool(buffer: other, offset: newOffset, encoding: encoding, shape: shape,
+                               expertStride: expertStride, gateUpOffset: gateUpOffset, downOffset: downOffset,
+                               gateUpScales: gateUpScales, gateUpScalesOffset: gateUpScalesOffset,
+                               downScales: downScales, downScalesOffset: downScalesOffset)
+    }
+}
+
 /// Layout-identical to `I2Params` in `inkling2_moe.metal`.
 struct Inkling2MoEParams {
     var d: UInt32
@@ -126,6 +137,7 @@ struct Inkling2MoEParams {
     var gateUpOffset: UInt32
     var downOffset: UInt32
     var experts: UInt32
+    var workTailBase: UInt32
 }
 
 /// Layout-identical to `I2PlanParams`.
@@ -153,7 +165,11 @@ struct Inkling2WorkBlock: Equatable {
     var reserved: UInt32
 }
 
-/// Device scratch for one prefill chunk of up to `maxTokens` rows. Every
+/// Device scratch for one prefill chunk of up to `maxTokens` rows. The work
+/// list holds `fullBlockCapacity` 64-row blocks, then up to `experts` tail
+/// blocks of at most 32 rows; `workCount` holds both counts and `dispatch`
+/// four indirect argument records (gate-up full, gate-up tail, down full,
+/// down tail). Every
 /// buffer is written and read on the GPU only; the shared storage mode is
 /// for tests and inspection.
 final class Inkling2MoEPrefillScratch {
@@ -170,15 +186,18 @@ final class Inkling2MoEPrefillScratch {
     let activation: MTLBuffer
     let partials: MTLBuffer
 
-    /// Upper bound of 64-row blocks: every expert's last block may be partial.
-    var workCapacity: Int { (maxTokens * shape.topK + Inkling2MoEKernels.rowsPerBlock - 1) / Inkling2MoEKernels.rowsPerBlock + shape.experts }
+    /// Upper bound of full (up to 64-row) blocks: every expert's last block
+    /// may be partial. Tail blocks start at this index.
+    var fullBlockCapacity: Int {
+        (maxTokens * shape.topK + Inkling2MoEKernels.rowsPerBlock - 1) / Inkling2MoEKernels.rowsPerBlock + shape.experts
+    }
 
     /// Bytes this scratch allocates; the activation and FP32 partials dominate
     /// (2 * T * topK * (F + 2D) bytes).
     static func bytes(shape: Inkling2MoEShape, maxTokens: Int) -> Int {
         let pairs = maxTokens * shape.topK
-        let work = (pairs + Inkling2MoEKernels.rowsPerBlock - 1) / Inkling2MoEKernels.rowsPerBlock + shape.experts
-        return pairs * (4 + 4 + 16 + 2 * shape.f + 4 * shape.d) + shape.experts * 8 + work * 16 + 4 + 24
+        let work = (pairs + Inkling2MoEKernels.rowsPerBlock - 1) / Inkling2MoEKernels.rowsPerBlock + 2 * shape.experts
+        return pairs * (4 + 4 + 16 + 2 * shape.f + 4 * shape.d) + shape.experts * 8 + work * 16 + 8 + 48
     }
 
     init(device: MTLDevice, shape: Inkling2MoEShape, maxTokens: Int) throws {
@@ -199,9 +218,9 @@ final class Inkling2MoEPrefillScratch {
         cursors = try buffer(shape.experts * 4, "cursors")
         self.pairs = try buffer(pairs * MemoryLayout<Inkling2RoutedPair>.stride, "pairs")
         let capacity = (pairs + Inkling2MoEKernels.rowsPerBlock - 1) / Inkling2MoEKernels.rowsPerBlock + shape.experts
-        work = try buffer(capacity * MemoryLayout<Inkling2WorkBlock>.stride, "work")
-        workCount = try buffer(4, "work-count")
-        dispatch = try buffer(6 * 4, "dispatch")
+        work = try buffer((capacity + shape.experts) * MemoryLayout<Inkling2WorkBlock>.stride, "work")
+        workCount = try buffer(2 * 4, "work-count")
+        dispatch = try buffer(12 * 4, "dispatch")
         activation = try buffer(pairs * shape.f * 2, "activation")
         partials = try buffer(pairs * shape.d * 4, "partials")
     }
@@ -221,11 +240,15 @@ final class Inkling2MoEKernels {
     static let threads = 128
     static let routerTokens = 32
     static let routerExperts = 128
+    /// Decode gate-up: 16 (gate, up) row pairs per threadgroup; down: 8 rows.
     static let decodeRowsPerThreadgroup = 16
+    static let decodeDownRowsPerThreadgroup = 8
 
     private struct Encoded {
         let gateUp: MTLComputePipelineState
+        let gateUpTail: MTLComputePipelineState
         let down: MTLComputePipelineState
+        let downTail: MTLComputePipelineState
         let decodeGateUp: MTLComputePipelineState
         let decodeDown: MTLComputePipelineState
     }
@@ -262,21 +285,24 @@ final class Inkling2MoEKernels {
         for encoding in Inkling2MoEEncoding.allCases {
             encoded[encoding] = Encoded(
                 gateUp: try make("inkling2_moe_gate_up", encoding: encoding),
+                gateUpTail: try make("inkling2_moe_gate_up_tail", encoding: encoding),
                 down: try make("inkling2_moe_down", encoding: encoding),
+                downTail: try make("inkling2_moe_down_tail", encoding: encoding),
                 decodeGateUp: try make("inkling2_moe_decode_gate_up", encoding: encoding),
                 decodeDown: try make("inkling2_moe_decode_down", encoding: encoding))
         }
         self.encoded = encoded
     }
 
-    private static func params(_ shape: Inkling2MoEShape, pool: Inkling2ExpertPool, hiddenStride: Int) -> Inkling2MoEParams {
+    private static func params(_ shape: Inkling2MoEShape, pool: Inkling2ExpertPool, hiddenStride: Int,
+                               workTailBase: Int = 0) -> Inkling2MoEParams {
         Inkling2MoEParams(d: UInt32(shape.d), f: UInt32(shape.f), topK: UInt32(shape.topK),
                           hiddenStride: UInt32(hiddenStride), expertStride: UInt32(pool.expertStride),
                           gateUpOffset: UInt32(pool.gateUpOffset), downOffset: UInt32(pool.downOffset),
-                          experts: UInt32(pool.experts))
+                          experts: UInt32(pool.experts), workTailBase: UInt32(workTailBase))
     }
 
-    /// Router logits (FP32, `weight` is `[128][d]` F32), sigmoid, top-k of
+    /// Router logits (FP32, `weight` is `[experts][d]` F32, up to 128 experts), sigmoid, top-k of
     /// sigmoid + `bias`, normalized weights times `routeScale`, for `tokens`
     /// rows of `x` (F32, `xStride` floats apart). Writes `ids` and
     /// `routeWeights` (`[tokens][topK]`, uint32 and float).
@@ -285,13 +311,14 @@ final class Inkling2MoEKernels {
                       weight: MTLBuffer, weightOffset: Int = 0, bias: MTLBuffer, biasOffset: Int = 0,
                       ids: MTLBuffer, idsOffset: Int = 0, routeWeights: MTLBuffer, routeWeightsOffset: Int = 0,
                       tokens: Int, routeScale: Float = 8) {
-        precondition(shape.experts == Self.routerExperts, "the router kernel is built for 128 experts")
+        precondition(shape.experts <= Self.routerExperts && shape.topK <= shape.experts,
+                     "the router kernel handles up to 128 experts")
         precondition(shape.d % 32 == 0 && xStride % 4 == 0 && xStride >= shape.d && tokens > 0)
         precondition(shape.topK <= 32, "one lane per rank")
         precondition(xOffset % 16 == 0 && weightOffset % 16 == 0, "the router reads float4")
         precondition(biasOffset % 4 == 0 && idsOffset % 4 == 0 && routeWeightsOffset % 4 == 0)
         var t = UInt32(tokens), d = UInt32(shape.d), stride = UInt32(xStride), k = UInt32(shape.topK)
-        var scale = routeScale
+        var scale = routeScale, experts = UInt32(shape.experts)
         encoder.setComputePipelineState(router)
         encoder.setBuffer(x, offset: xOffset, index: 0)
         encoder.setBuffer(weight, offset: weightOffset, index: 1)
@@ -303,6 +330,7 @@ final class Inkling2MoEKernels {
         encoder.setBytes(&stride, length: 4, index: 7)
         encoder.setBytes(&k, length: 4, index: 8)
         encoder.setBytes(&scale, length: 4, index: 9)
+        encoder.setBytes(&experts, length: 4, index: 10)
         encoder.dispatchThreadgroups(
             MTLSize(width: (tokens + Self.routerTokens - 1) / Self.routerTokens, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: Self.threads, height: 1, depth: 1))
@@ -335,7 +363,7 @@ final class Inkling2MoEKernels {
         var planParams = Inkling2RoutePlanParams(
             experts: experts, rowsPerBlock: UInt32(Self.rowsPerBlock),
             gateUpColumns: UInt32(shape.f / Self.gateUpColumns), downColumns: UInt32(shape.d / Self.downColumns),
-            workCapacity: UInt32(scratch.workCapacity))
+            workCapacity: UInt32(scratch.fullBlockCapacity))
         encoder.setComputePipelineState(plan)
         encoder.setBuffer(scratch.counts, offset: 0, index: 0)
         encoder.setBuffer(scratch.cursors, offset: 0, index: 1)
@@ -366,7 +394,7 @@ final class Inkling2MoEKernels {
         precondition(pool.shape == shape, "pool and scratch shapes differ")
         precondition(hiddenStride % 4 == 0 && hiddenStride >= shape.d && hiddenOffset % 8 == 0)
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
-        var p = Self.params(shape, pool: pool, hiddenStride: hiddenStride)
+        var p = Self.params(shape, pool: pool, hiddenStride: hiddenStride, workTailBase: scratch.fullBlockCapacity)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)
 
         encoder.setComputePipelineState(kernels.gateUp)
@@ -380,12 +408,18 @@ final class Inkling2MoEKernels {
         encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 7)
         encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 0,
                                      threadsPerThreadgroup: threads)
+        encoder.setComputePipelineState(kernels.gateUpTail)
+        encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 12,
+                                     threadsPerThreadgroup: threads)
 
         encoder.setComputePipelineState(kernels.down)
         encoder.setBuffer(scratch.activation, offset: 0, index: 0)
         encoder.setBuffer(scratch.partials, offset: 0, index: 4)
         encoder.setBuffer(pool.downScales, offset: pool.downScalesOffset, index: 6)
-        encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 12,
+        encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 24,
+                                     threadsPerThreadgroup: threads)
+        encoder.setComputePipelineState(kernels.downTail)
+        encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 36,
                                      threadsPerThreadgroup: threads)
     }
 
@@ -416,6 +450,24 @@ final class Inkling2MoEKernels {
         encodeReduce(encoder, scratch: scratch, tokens: tokens, out: out, outOffset: outOffset, outStride: outStride)
     }
 
+    /// The first half of `encodeDecode`: gate-up and SITU into `activation`.
+    func encodeDecodeGateUp(_ encoder: MTLComputeCommandEncoder, shape: Inkling2MoEShape,
+                            x: MTLBuffer, xOffset: Int = 0, ids: MTLBuffer, idsOffset: Int = 0,
+                            pool: Inkling2ExpertPool, activation: MTLBuffer, activationOffset: Int = 0) {
+        guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
+        var p = Self.params(shape, pool: pool, hiddenStride: shape.d)
+        encoder.setComputePipelineState(kernels.decodeGateUp)
+        encoder.setBuffer(x, offset: xOffset, index: 0)
+        encoder.setBuffer(ids, offset: idsOffset, index: 1)
+        encoder.setBuffer(activation, offset: activationOffset, index: 2)
+        encoder.setBuffer(pool.buffer, offset: pool.offset, index: 3)
+        encoder.setBuffer(pool.gateUpScales, offset: pool.gateUpScalesOffset, index: 4)
+        encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 5)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: shape.f / Self.decodeRowsPerThreadgroup, height: shape.topK, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.threads, height: 1, depth: 1))
+    }
+
     /// One token's routed branch: `x` (FP16, `d` values), `ids` and
     /// `routeWeights` (`topK` each, as the router writes them), `activation`
     /// scratch of `topK * f` halves; `out` gets `d` FP32 values, the experts
@@ -433,16 +485,8 @@ final class Inkling2MoEKernels {
         var p = Self.params(shape, pool: pool, hiddenStride: shape.d)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)
 
-        encoder.setComputePipelineState(kernels.decodeGateUp)
-        encoder.setBuffer(x, offset: xOffset, index: 0)
-        encoder.setBuffer(ids, offset: idsOffset, index: 1)
-        encoder.setBuffer(activation, offset: activationOffset, index: 2)
-        encoder.setBuffer(pool.buffer, offset: pool.offset, index: 3)
-        encoder.setBuffer(pool.gateUpScales, offset: pool.gateUpScalesOffset, index: 4)
-        encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 5)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: shape.f / Self.decodeRowsPerThreadgroup, height: shape.topK, depth: 1),
-            threadsPerThreadgroup: threads)
+        encodeDecodeGateUp(encoder, shape: shape, x: x, xOffset: xOffset, ids: ids, idsOffset: idsOffset,
+                           pool: pool, activation: activation, activationOffset: activationOffset)
 
         encoder.setComputePipelineState(kernels.decodeDown)
         encoder.setBuffer(activation, offset: activationOffset, index: 0)
@@ -452,7 +496,7 @@ final class Inkling2MoEKernels {
         encoder.setBuffer(pool.buffer, offset: pool.offset, index: 4)
         encoder.setBuffer(pool.downScales, offset: pool.downScalesOffset, index: 5)
         encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 6)
-        encoder.dispatchThreadgroups(MTLSize(width: shape.d / Self.decodeRowsPerThreadgroup, height: 1, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: shape.d / Self.decodeDownRowsPerThreadgroup, height: 1, depth: 1),
                                      threadsPerThreadgroup: threads)
     }
 }
