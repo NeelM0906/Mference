@@ -23,9 +23,13 @@ and 4 as in v1.8; rule 2 is:
   trace01, trace02, lp09-chat-default and trace03-tool-result: per prompt at
   most 0.5% of token-visits with a different expert set, every disagreement
   a near-tie with shortfall below 1e-3, every per-visit increment within 1e-2
-  relative L2. The runner's trace for each must be byte-identical to the one
-  the run was forced on (SHA-256); otherwise that prompt is STALE and the
-  verdict incomplete ("report to the coordinator before C1").
+  relative L2. The runner's trace for each must be the one the run was
+  forced on: byte-identical, or (spec v1.18) equal as content, meaning the
+  hidden-state file byte for byte and trace.json equal as parsed content with
+  every float exact (the forced-on trace is read from the sibling candidate
+  directory the file names); a raw-byte difference that is key order only is
+  printed, not counted. Any content difference makes that prompt STALE and
+  the verdict incomplete ("report to the coordinator before C1").
 - the reference against llama.cpp: K4's `.llamaExperts` forced on llama.cpp's
   CPU trace of trace03 (<precision-root>/trace03-llama/forced/...): every
   routing disagreement at a llama.cpp margin below 0.0258, and the per-bin
@@ -363,11 +367,15 @@ def forced_report(root, pid, tdir):
         trace = os.path.join(tdir, pid, "trace.json") if tdir else None
         sha = hashlib.sha256(open(trace, "rb").read()).hexdigest() if trace and os.path.isfile(trace) else None
         cand = os.path.basename(os.path.dirname(os.path.abspath(tdir))) if tdir else None
-        if sha != d.get("runner_trace_sha256"):
+        # spec v1.18: "byte-identical" means the content: the hidden-state file byte for byte and trace.json
+        # equal as parsed content, every float exact; a raw difference that is key order only is printed
+        same, why = same_trace_content(tdir, pid, d) if sha is not None else (False, "no runner trace")
+        trace_note = why if same else None
+        if not same:
             return {"status": "stale", "why": f"the runner's trace differs from the one this run was forced on "
                                               f"({d.get('candidate')}, sha256 {str(d.get('runner_trace_sha256'))[:12]}; "
-                                              f"judging {cand}, {str(sha)[:12]}): report to the coordinator before C1",
-                    "path": path}
+                                              f"judging {cand}, {str(sha)[:12]}): {why}; report to the coordinator "
+                                              "before C1", "path": path}
         with open(trace) as f:
             rt = json.load(f)
         if len(rt["visits"]) != len(visits) or any(len(v["experts"]) != n for v in rt["visits"]):
@@ -381,10 +389,40 @@ def forced_report(root, pid, tdir):
                 "max_shortfall": max([x["shortfall"] for x in dis], default=0.0),
                 "max_increment_rel_l2": max(flat("increment_rel_l2"), default=0.0),
                 "per_layer": dict(sorted(per_layer.items())), "runner_tip": d.get("runner_tip"),
-                "forced_on": d.get("candidate"),
+                "forced_on": d.get("candidate"), "trace_note": trace_note,
                 "reference_commit": d.get("reference_commit")}
     except (ValueError, KeyError, TypeError, OSError) as e:
         return {"status": "malformed", "why": f"{type(e).__name__}: {e}", "path": path}
+
+
+def same_trace_content(tdir, pid, d):
+    """Spec v1.18: is the runner's trace the one a forced file was forced on, by content? The forced-on trace is
+    found beside the judged candidate (<candidate dir>/../<d["candidate"]>/traces/<pid>) and must match the
+    file's recorded raw SHA-256; then trace.json must be equal as canonical content (sorted keys; floats by
+    exact repr, so -0.0, 1 against 1.0 and true against 1 all differ) and the hidden-state file byte-identical.
+    Without the forced-on trace on disk the hidden file cannot be verified, so the answer is no. (same, why)."""
+    import hashlib
+    cand_dir = os.path.dirname(os.path.abspath(tdir))
+    orig = os.path.join(os.path.dirname(cand_dir), str(d.get("candidate")), "traces", pid)
+    sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+    ot, nt = os.path.join(orig, "trace.json"), os.path.join(tdir, pid, "trace.json")
+    if not os.path.isfile(ot):
+        return False, f"the forced-on trace {orig} is not on disk, so the hidden-state file cannot be verified"
+    if sha(ot) != d.get("runner_trace_sha256"):
+        return False, f"the forced-on trace at {orig} no longer has the recorded SHA-256"
+    with open(ot) as f:
+        a = json.load(f)
+    with open(nt) as f:
+        b = json.load(f)
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return False, "a trace.json is not a JSON object"
+    canon = lambda x: json.dumps(x, sort_keys=True, separators=(",", ":"))
+    if canon(a) != canon(b):
+        return False, "trace.json content differs (experts, margins or a float)"
+    ha, hb = os.path.join(orig, str(a.get("hidden_file"))), os.path.join(tdir, pid, str(b.get("hidden_file")))
+    if not a.get("hidden_file") or not (os.path.isfile(ha) and os.path.isfile(hb)) or sha(ha) != sha(hb):
+        return False, "the hidden-state file differs or is missing"
+    return True, (None if sha(ot) == sha(nt) else "raw bytes differ, key order only")
 
 
 def addendum_bound(k, v, n):
@@ -783,7 +821,8 @@ def print_v116(v):
             print(f"  (a) {pid}, forced per visit: {p['disagreements']}/{p['token_visits']} token-visits differ "
                   f"({p['rate']:.4f}, <= {FORCED_RATE_MAX}), max shortfall {fmt4(p['max_shortfall'])} "
                   f"(< {FORCED_SHORTFALL_MAX}), max increment rel L2 {fmt4(p['max_increment_rel_l2'])} "
-                  f"(<= {FORCED_INCREMENT_MAX}); forced on {p.get('forced_on')}: {res}")
+                  f"(<= {FORCED_INCREMENT_MAX}); forced on {p.get('forced_on')}"
+                  + (f" ({p['trace_note']})" if p.get("trace_note") else "") + f": {res}")
     t = a["total"]
     print(f"  (a) all four: {t['disagreements']}/{t['token_visits']} token-visits differ")
     r = v["reference"]
