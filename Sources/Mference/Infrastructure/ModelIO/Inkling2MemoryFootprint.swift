@@ -13,8 +13,10 @@ public struct Inkling2MemoryFootprint: Sendable, Equatable {
     /// Routed experts read once and kept (the looped core's layers on 30 to
     /// 47 GB hosts, every layer from 48 GB).
     public let expertResidentBytes: UInt64
-    /// Staging slabs for the layers read through the file cache one layer
-    /// ahead (their files are file-cache backed, not counted).
+    /// Staging slabs for the layers read one layer ahead. The staged layers'
+    /// files are not counted: wherever the plan stages, the runtime reads
+    /// them uncached (`Inkling2StagedReadMode.forHost`), so their pages do
+    /// not stay in the file cache.
     public let expertStagingBytes: UInt64
     /// `model_weights.bin` and the sidecars: the install less its expert pool.
     public let denseBytes: UInt64
@@ -26,8 +28,15 @@ public struct Inkling2MemoryFootprint: Sendable, Equatable {
     public let globalKVBytesPerToken: UInt64
 
     /// K3's sliding-window rings (480 MiB) and the runner's and MoE's scratch
-    /// at chunk 2,048 (about 800 MiB), as measured on 2026-11-23;
-    /// provisional until a measured whole-model footprint.
+    /// at chunk 2,048 (about 800 MiB), as K3 and K4 sized them on 2026-11-23.
+    /// Provisional until the C2 run with a 4K-token prompt reports its
+    /// footprint. The only whole-model measurement so far (K4's CLI on the
+    /// real install, bounded path, 5-token prompt, context 4,096): peak
+    /// footprint 9.47 GB and max RSS 9.34 GB against 9.07 GB of resident
+    /// experts and slabs; the footprint does not count the 1.82 GB of mapped
+    /// dense weights. So for short prompts this estimate (12.24 GB before
+    /// context on a 32 GB Mac) is about 1 GB conservative: a 5-token prompt
+    /// does not exercise the chunk-2,048 scratch.
     public static let stateBytes: UInt64 = (480 << 20) + (800 << 20)
 
     /// Everything but the context's global KV.

@@ -68,4 +68,45 @@ import Testing
             #expect(family.memoryContextCap(physicalMemory: 8 << 30) == nil)
         }
     }
+
+    /// The footprint is the residency plan's own output, slab count and sizes
+    /// included, for every host size: a change to `make` moves it with no
+    /// edit here.
+    @Test func footprintIsTheResidencyPlansOwnOutput() throws {
+        let layerBytes = try #require(Inkling2MemoryFootprint.expertLayerBytes(config: .inkling2Mini))
+        let ink = ArchConfig.inkling2Mini.inkling2
+        for gigabytes: UInt64 in [16, 24, 30, 32, 36, 47, 48, 64, 128] {
+            let memory = gigabytes << 30
+            let plan = Inkling2ExpertResidencyPlan.make(layerBytes: layerBytes.map { Int($0) },
+                                                        loopedLayers: ink.loopCoreStart..<ink.loopCoreEnd,
+                                                        physicalMemory: memory)
+            let f = try #require(Inkling2MemoryFootprint.estimate(installBytes: Self.installBytes,
+                                                                  physicalMemory: memory))
+            #expect(f.expertResidentBytes == UInt64(plan.residentBytes), "\(gigabytes) GB")
+            #expect(f.expertStagingBytes == UInt64(plan.stagingBytes), "\(gigabytes) GB")
+            #expect((f.expertStagingBytes == 0) == (plan.stagingSlabs == 0), "\(gigabytes) GB")
+        }
+    }
+
+    /// Nothing in the footprint assumes cached reads: wherever the plan
+    /// stages a layer, the runtime's default read mode
+    /// (`Inkling2StagedReadMode.forHost`, which every staged reader uses
+    /// unless a caller overrides it) is uncached, so the staged files' pages
+    /// are rightly not counted; where it reads through the cache, nothing is
+    /// staged.
+    @Test func stagedLayersAreReadUncachedWhereverThePlanStages() throws {
+        let layerBytes = try #require(Inkling2MemoryFootprint.expertLayerBytes(config: .inkling2Mini))
+        let ink = ArchConfig.inkling2Mini.inkling2
+        for gigabytes: UInt64 in [16, 24, 30, 32, 36, 47, 48, 64, 128] {
+            let memory = gigabytes << 30
+            let plan = Inkling2ExpertResidencyPlan.make(layerBytes: layerBytes.map { Int($0) },
+                                                        loopedLayers: ink.loopCoreStart..<ink.loopCoreEnd,
+                                                        physicalMemory: memory)
+            let stages = plan.placements.contains(.staged)
+            switch Inkling2StagedReadMode.forHost(physicalMemory: memory) {
+            case .uncached: break
+            case .cached: #expect(!stages, "\(gigabytes) GB: staged layers read through the file cache")
+            }
+        }
+    }
 }
