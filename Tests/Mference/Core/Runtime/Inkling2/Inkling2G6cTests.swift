@@ -572,3 +572,66 @@ struct Inkling2G6cTests {
         }
     }
 }
+
+/// G6c's gate as a test (spec v1.12): `Scripts/parity/inkling2/g6c_verdict.py`
+/// on a runner candidate (`<candidate>/tf` and `<candidate>/traces`, as
+/// `Inkling2G6cTests` writes them), against K0's goldens and the reference
+/// runs under the precision root. The gate is the re-based tier: rules 1, 3
+/// and 4, and rule 2 as (a) the runner against the exact `.fp32` reference,
+/// (b) the reference in llama.cpp's rounding against the Metal goldens, (c1)
+/// and (c2) the runner against the CPU goldens, (d) next-token quality. The
+/// tool exits 0 when it passes, 1 when a rule fails and 4 when a rule's
+/// inputs are missing (incomplete, never a pass). The v1.8 rule as written,
+/// which the exact model fails where llama.cpp's own 8-bit rounding of the
+/// experts' input separates them, is recorded as a known issue, not gated.
+///
+/// Model-free (it reads files), but it needs the candidate and the goldens:
+/// `MFERENCE_INKLING2_G6C_CANDIDATE` and `MFERENCE_INKLING2_GOLDENS_DIR`;
+/// `MFERENCE_INKLING2_PRECISION_ROOT` overrides the tool's default reference
+/// root (`$INK/results/k4/precision`).
+@Suite("Inkling2 G6c verdict")
+struct Inkling2G6cVerdictTests {
+    static let environment = ProcessInfo.processInfo.environment
+    static var candidate: URL? { environment["MFERENCE_INKLING2_G6C_CANDIDATE"].map { URL(fileURLWithPath: $0) } }
+    static var goldens: URL? { environment["MFERENCE_INKLING2_GOLDENS_DIR"].map { URL(fileURLWithPath: $0) } }
+
+    @Test(.enabled(if: candidate != nil && goldens != nil,
+                   "needs MFERENCE_INKLING2_G6C_CANDIDATE and MFERENCE_INKLING2_GOLDENS_DIR"))
+    func reBasedGatePassesWithV18AsWrittenOnRecord() throws {
+        let candidate = try #require(Self.candidate), goldens = try #require(Self.goldens)
+        let script = Inkling2G6cTests.repositoryRoot.appendingPathComponent("Scripts/parity/inkling2/g6c_verdict.py")
+        let report = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inkling2-g6c-verdict-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: report) }
+        var arguments = ["-I", script.path, candidate.appendingPathComponent("tf").path,
+                         "--traces", candidate.appendingPathComponent("traces").path,
+                         "--goldens", goldens.path, "--json", report.path]
+        if let root = Self.environment["MFERENCE_INKLING2_PRECISION_ROOT"] {
+            arguments += ["--precision-root", root]
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        print(String(decoding: output, as: UTF8.self))
+
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any])
+        let rule2 = json["rule2_state"] as? [String: Any] ?? [:]
+        // The gate.
+        #expect(process.terminationStatus == 0,
+                "g6c_verdict exit \(process.terminationStatus) (1: a rule fails, 4: incomplete); rule 2: \(rule2)")
+        #expect(json["gate_pass"] as? Bool == true)
+        // For the record: v1.8 as written.
+        withKnownIssue("""
+            v1.8 as written fails where llama.cpp rounds the experts' input to 8 bits and the exact model \
+            does not (spec v1.12, section 8)
+            """) {
+            #expect(json["as_written_v18_pass"] as? Bool == true)
+        }
+    }
+}
