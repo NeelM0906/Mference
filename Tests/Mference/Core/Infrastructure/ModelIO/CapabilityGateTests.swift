@@ -206,8 +206,9 @@ import Testing
     /// family in the table must still be refused at the funnel, whatever
     /// machinery has been built for it.
     ///
-    /// It holds `inkling2Loop` while that runner is built, so this goes end to
-    /// end through a real `manifest.json` and `peekFamily` for it.
+    /// The table is empty today (it held `inkling2Loop` until its runner
+    /// landed); this goes end to end through a real `manifest.json` and
+    /// `peekFamily` for whatever it holds next.
     /// `anInjectedEntryStillProducesTheNamedRefusal` covers the lookup itself
     /// whatever the table holds.
     @Test func gateTableCoversOnlyFamiliesWithoutARunner() throws {
@@ -229,7 +230,7 @@ import Testing
     /// The families the runtime does run must never appear in the table: an
     /// entry here disables a shipped family at every entry point.
     @Test func shippedFamiliesAreNotGated() {
-        for family in ModelFamily.allCases where family != .inkling2Loop {
+        for family in ModelFamily.allCases {
             #expect(ManifestReader.familiesWithoutRunner[family.rawValue] == nil,
                     "\(family.rawValue) has a runner; remove it from the gate table")
         }

@@ -543,11 +543,8 @@ struct Inkling2Shape {
         let nvfp4Blob = UnsafeRawBufferPointer(start: nvfp4.buffer.contents().advanced(by: Int(nvfp4.offset)),
                                                count: Int(gateUp.size))
         #expect(nvfp4Blob.elementsEqual(gguf.data[Int(gateUpSrc)..<Int(gateUpSrc + gateUp.size)]))
-        // The family stays gated at the product entry point.
-        #expect(throws: ModelError.familyRunnerNotImplemented(
-            family: "inkling2Loop", missingAxes: ManifestReader.inkling2RequiredAxes)) {
-            _ = try ManifestReader.peekFamily(directoryURL: URL(fileURLWithPath: output))
-        }
+        // The product entry point detects the family (its runner has landed).
+        #expect(try ManifestReader.peekFamily(directoryURL: URL(fileURLWithPath: output)) == .inkling2Loop)
     }
 
     @Test func localCopyMustMatchThePin() async throws {

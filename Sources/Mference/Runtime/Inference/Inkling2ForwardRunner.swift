@@ -1,6 +1,46 @@
 import Foundation
 import Metal
 
+/// Where each layer's routed experts come from. Prefill visits are begun and
+/// ended in visit order around the encoder that reads the pool (a staged
+/// layer waits there for its slab and releases it after); decode visits read
+/// `decodePool`. K2's `Inkling2ExpertStore` (resident and staged layers) for
+/// an install, `Inkling2FixedExperts` for buffers already in memory.
+protocol Inkling2ExpertSource: AnyObject {
+    var shape: Inkling2MoEShape { get }
+    func beginPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool
+    func endPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws
+    func decodePool(layer: Int) -> Inkling2ExpertPool
+    /// Releases visits begun and not ended (their command buffer is lost).
+    func abandonOpenVisits() throws
+    /// Set when staging failed; the source is then unusable.
+    var stagingFailure: String? { get }
+}
+
+extension Inkling2ExpertStore: Inkling2ExpertSource {
+    var stagingFailure: String? { staging?.error.map { "\($0)" } }
+}
+
+/// One pool per stored layer, all in memory already (a synthetic model).
+final class Inkling2FixedExperts: Inkling2ExpertSource {
+    let pools: [Inkling2ExpertPool]
+    let shape: Inkling2MoEShape
+
+    init(pools: [Inkling2ExpertPool]) throws {
+        guard let first = pools.first, pools.allSatisfy({ $0.shape == first.shape }) else {
+            throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 experts: no pools, or pools of differing shapes")
+        }
+        self.pools = pools
+        self.shape = first.shape
+    }
+
+    func beginPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool { pools[layer] }
+    func endPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws {}
+    func decodePool(layer: Int) -> Inkling2ExpertPool { pools[layer] }
+    func abandonOpenVisits() throws {}
+    var stagingFailure: String? { nil }
+}
+
 /// Every tensor the Inkling 2 runner reads, as buffer views. Built from an
 /// install (`Model`'s `inkling2*` accessors) or, in tests, from synthetic
 /// buffers. Dense Q8_0 and BF16 weights are byte offsets into `dense`, the
@@ -41,7 +81,6 @@ struct Inkling2RunnerWeights {
         var ffnNorm: Inkling2BufferRef
         var router: Inkling2BufferRef
         var routerBias: Inkling2BufferRef
-        var experts: Inkling2ExpertPool
         /// Core layers only.
         var loop: Loop?
     }
@@ -55,6 +94,8 @@ struct Inkling2RunnerWeights {
     /// Q8_0 `[vocabRows][d]` in `dense`.
     var output: Int
     var layers: [Layer]
+    /// The routed experts of every layer.
+    var experts: any Inkling2ExpertSource
     /// Rows of the embedding and head, and logits the head produces.
     var vocabRows: Int
     var vocab: Int
@@ -167,7 +208,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         state = try Inkling2AttentionState(device: context.device,
                                            configuration: .init(maxContext: maxContext,
                                                                 maxChunkTokens: maxChunkTokens))
-        moeShape = weights.layers[0].experts.shape
+        moeShape = weights.experts.shape
         scratch = try Scratch(device: context.device, tokens: maxChunkTokens, maxContext: maxContext,
                               moeShape: moeShape)
     }
@@ -175,7 +216,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// What the schedule and the kernels assume of the weights, checked
     /// once: the layer kinds the visit plan (and K3's state) use, the
     /// tensors each kind and the core need, the vocabulary, the gate rank
-    /// the message-gate kernel holds, and one expert shape for every layer.
+    /// the message-gate kernel holds, and the experts' hidden width.
     static func validate(_ w: Inkling2RunnerWeights) throws {
         func invalid(_ detail: String) -> Inkling2ForwardRunnerError { .invalidInput("Inkling 2 weights: " + detail) }
         guard w.layers.count == Inkling2VisitPlan.storedLayers else {
@@ -185,8 +226,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         guard (1...Inkling2RunnerKernels.maxGateRank).contains(w.gateRank) else {
             throw invalid("gate rank \(w.gateRank)")
         }
-        let shape = w.layers[0].experts.shape
-        guard shape.d == d else { throw invalid("expert width \(shape.d), hidden \(d)") }
+        guard w.experts.shape.d == d else { throw invalid("expert hidden \(w.experts.shape.d), hidden \(d)") }
         for (layer, lw) in w.layers.enumerated() {
             guard lw.isGlobal == Inkling2VisitPlan.isGlobal(layer: layer) else {
                 throw invalid("layer \(layer) is \(lw.isGlobal ? "global" : "sliding"), the visit plan says otherwise")
@@ -207,7 +247,6 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             if let loop = lw.loop, loop.down.count != 4 || loop.gain.count != 4 || loop.forget.count != 4 {
                 throw invalid("core layer \(layer) needs four message gates")
             }
-            guard lw.experts.shape == shape else { throw invalid("layer \(layer) expert shape differs") }
         }
     }
 
@@ -392,17 +431,24 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         var slots = Slots()
         var cb = try commandBuffer()
         var committed: [MTLCommandBuffer] = []
-        /// Commits the buffer being encoded and starts the next; if that
-        /// fails, the committed ones finish before the error leaves.
+        var pending: MTLCommandBuffer? = cb
+        /// Commits the buffer being encoded and starts the next.
         func nextBuffer() throws {
             cb.commit()
             committed.append(cb)
-            do {
-                cb = try commandBuffer()
-            } catch {
-                committed.forEach { $0.waitUntilCompleted() }
-                throw error
+            pending = nil
+            cb = try commandBuffer()
+            pending = cb
+        }
+        /// Commits what is encoded and waits for every buffer. Encoded work
+        /// is never dropped: a staged expert slab's release is in it.
+        func finish() {
+            if let open = pending {
+                open.commit()
+                committed.append(open)
+                pending = nil
             }
+            committed.forEach { $0.waitUntilCompleted() }
         }
         func encode(_ body: (MTLComputeCommandEncoder) -> Void) {
             let enc = cb.makeComputeCommandEncoder()!
@@ -426,88 +472,96 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             blit.endEncoding()
         }
 
-        // Embedding.
-        let embedded = slots.take()
-        encode { enc in
-            kernels.encodeEmbedding(enc, ids: s.ids, table: w.dense, tableOffset: w.embedding,
-                                    rowBytes: d / 32 * 34, weight: w.embeddingNorm.buffer,
-                                    weightOffset: w.embeddingNorm.offset, eps: w.rmsEps,
-                                    out: s.arena, outOffset: s.arenaRef(embedded).offset,
-                                    outStride: d, d: d, tokens: t)
-        }
-
-        var cur = embedded
-        var blocks: [Int] = []
-        // Prelude.
-        for layer in 0..<Self.coreStart {
-            cur = encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
-                              cur: cur, blocks: &blocks, bank: nil, slots: &slots)
-            record(cur)
-        }
-        let preludeCur = cur
-        let preludeBlocks = blocks
-        slots.retain(preludeCur)
-        preludeBlocks.forEach { slots.retain($0) }
-
-        var bank: [Int]? = nil
-        for pass in 0..<Self.passes {
-            if pass > 0 {
-                // The previous pass's bank: its first core block and its output.
-                let newBank = Array(blocks[(preludeBlocks.count + 1)...]) + [cur]
-                newBank.forEach { slots.retain($0) }
-                if let old = bank { slots.release(old) }
-                bank = newBank
-                slots.release(blocks)
-                slots.release(cur)
-                cur = preludeCur
-                blocks = preludeBlocks
-                slots.retain(cur)
-                blocks.forEach { slots.retain($0) }
+        do {
+            // Embedding.
+            let embedded = slots.take()
+            encode { enc in
+                kernels.encodeEmbedding(enc, ids: s.ids, table: w.dense, tableOffset: w.embedding,
+                                        rowBytes: d / 32 * 34, weight: w.embeddingNorm.buffer,
+                                        weightOffset: w.embeddingNorm.offset, eps: w.rmsEps,
+                                        out: s.arena, outOffset: s.arenaRef(embedded).offset,
+                                        outStride: d, d: d, tokens: t)
             }
-            for layer in Self.coreStart..<Self.coreEnd {
-                let slot = Inkling2VisitPlan.slot(layer: layer, pass: pass)
-                cur = encodeVisit(cb, layer: layer, slot: slot, tokens: t, start: start,
-                                  cur: cur, blocks: &blocks, bank: bank, slots: &slots)
+
+            var cur = embedded
+            var blocks: [Int] = []
+            // Prelude.
+            for layer in 0..<Self.coreStart {
+                cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
+                                      cur: cur, blocks: &blocks, bank: nil, slots: &slots)
                 record(cur)
             }
-            // Keep each command buffer to about a third of the visits.
-            try nextBuffer()
-        }
-        if let old = bank { slots.release(old) }
-        slots.release(preludeCur)
-        slots.release(preludeBlocks)
-        // Coda.
-        for layer in Self.coreEnd..<24 {
-            cur = encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
-                              cur: cur, blocks: &blocks, bank: nil, slots: &slots)
-            record(cur)
-        }
+            let preludeCur = cur
+            let preludeBlocks = blocks
+            slots.retain(preludeCur)
+            preludeBlocks.forEach { slots.retain($0) }
 
-        if let logits {
-            // The head reads only the last token: mix its block states, norm, project.
-            let last = t - 1
-            encode { enc in
-                kernels.encodeDepthMix(enc, arena: s.arena,
-                                       stateOffsets: (blocks + [cur]).map { s.arenaFloats($0) + last * d },
-                                       stateStride: d, queries: w.outputResQuery.buffer,
-                                       queriesOffset: w.outputResQuery.offset, queryCount: 1,
-                                       out: s.finalRow, outStride: d, outQueryStride: d, d: d, tokens: 1)
-                kernels.encodeRMSNorm(enc, x: s.finalRow, xStride: d, weight: w.outputNorm.buffer,
-                                      weightOffset: w.outputNorm.offset, eps: w.rmsEps,
-                                      out: s.finalRow, outOffset: d * 4, outStride: d, d: d, tokens: 1)
-                kernels.encodeHead(enc, x: s.finalRow, xOffset: d * 4, table: w.dense, tableOffset: w.output,
-                                   rowBytes: d / 32 * 34, rows: w.vocab, softcap: w.finalLogitSoftcap,
-                                   logits: logits, d: d)
+            var bank: [Int]? = nil
+            for pass in 0..<Self.passes {
+                if pass > 0 {
+                    // The previous pass's bank: its first core block and its output.
+                    let newBank = Array(blocks[(preludeBlocks.count + 1)...]) + [cur]
+                    newBank.forEach { slots.retain($0) }
+                    if let old = bank { slots.release(old) }
+                    bank = newBank
+                    slots.release(blocks)
+                    slots.release(cur)
+                    cur = preludeCur
+                    blocks = preludeBlocks
+                    slots.retain(cur)
+                    blocks.forEach { slots.retain($0) }
+                }
+                for layer in Self.coreStart..<Self.coreEnd {
+                    let slot = Inkling2VisitPlan.slot(layer: layer, pass: pass)
+                    cur = try encodeVisit(cb, layer: layer, slot: slot, tokens: t, start: start,
+                                          cur: cur, blocks: &blocks, bank: bank, slots: &slots)
+                    record(cur)
+                }
+                // Keep each command buffer to about a third of the visits.
+                try nextBuffer()
             }
-            if w.vocabRows > w.vocab, let blit = cb.makeBlitCommandEncoder() {
-                // 0xFBFB is about -65376 in FP16: never sampled, never the argmax.
-                blit.fill(buffer: logits, range: (w.vocab * 2)..<(w.vocabRows * 2), value: 0xFB)
-                blit.endEncoding()
+            if let old = bank { slots.release(old) }
+            slots.release(preludeCur)
+            slots.release(preludeBlocks)
+            // Coda.
+            for layer in Self.coreEnd..<24 {
+                cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
+                                      cur: cur, blocks: &blocks, bank: nil, slots: &slots)
+                record(cur)
             }
+
+            if let logits {
+                // The head reads only the last token: mix its block states, norm, project.
+                let last = t - 1
+                encode { enc in
+                    kernels.encodeDepthMix(enc, arena: s.arena,
+                                           stateOffsets: (blocks + [cur]).map { s.arenaFloats($0) + last * d },
+                                           stateStride: d, queries: w.outputResQuery.buffer,
+                                           queriesOffset: w.outputResQuery.offset, queryCount: 1,
+                                           out: s.finalRow, outStride: d, outQueryStride: d, d: d, tokens: 1)
+                    kernels.encodeRMSNorm(enc, x: s.finalRow, xStride: d, weight: w.outputNorm.buffer,
+                                          weightOffset: w.outputNorm.offset, eps: w.rmsEps,
+                                          out: s.finalRow, outOffset: d * 4, outStride: d, d: d, tokens: 1)
+                    kernels.encodeHead(enc, x: s.finalRow, xOffset: d * 4, table: w.dense, tableOffset: w.output,
+                                       rowBytes: d / 32 * 34, rows: w.vocab, softcap: w.finalLogitSoftcap,
+                                       logits: logits, d: d)
+                }
+                if w.vocabRows > w.vocab, let blit = cb.makeBlitCommandEncoder() {
+                    // 0xFBFB is about -65376 in FP16: never sampled, never the argmax.
+                    blit.fill(buffer: logits, range: (w.vocab * 2)..<(w.vocabRows * 2), value: 0xFB)
+                    blit.endEncoding()
+                }
+            }
+        } catch {
+            // A visit begun and not ended would hold its slab forever.
+            try? w.experts.abandonOpenVisits()
+            finish()
+            throw error
         }
-        cb.commit()
-        committed.append(cb)
-        committed.forEach { $0.waitUntilCompleted() }
+        finish()
+        if let failure = w.experts.stagingFailure {
+            throw Inkling2ForwardRunnerError.commandFailed("Inkling 2 expert staging failed: \(failure)")
+        }
         if let failed = committed.first(where: { $0.status != .completed }) {
             throw Inkling2ForwardRunnerError.commandFailed(
                 failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
@@ -521,7 +575,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// Encodes one layer visit over the chunk and returns the arena slot of
     /// the new running sum. `blocks` gains the visit's input at a block start.
     private func encodeVisit(_ cb: MTLCommandBuffer, layer: Int, slot: Int, tokens t: Int, start: Int,
-                             cur: Int, blocks: inout [Int], bank: [Int]?, slots: inout Slots) -> Int {
+                             cur: Int, blocks: inout [Int], bank: [Int]?, slots: inout Slots) throws -> Int {
         let s = scratch
         let d = Self.d
         let lw = w.layers[layer]
@@ -688,12 +742,19 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                              tokens: t, routeScale: w.routeScale)
             if t == 1 {
                 moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, ids: s.moeScratch.ids,
-                                 routeWeights: s.moeScratch.routeWeights, pool: lw.experts,
+                                 routeWeights: s.moeScratch.routeWeights, pool: w.experts.decodePool(layer: layer),
                                  activation: s.decodeActivation, out: s.moeOut)
-            } else {
-                moe.encodePrefill(enc, hidden: s.moeInHalf, hiddenStride: d, pool: lw.experts,
+            }
+        }
+        if t > 1 {
+            // A staged layer's command buffer waits here for its slab and
+            // releases it after the experts' encoder.
+            let pool = try w.experts.beginPrefillVisit(layer: layer, commandBuffer: cb)
+            encode { enc in
+                moe.encodePrefill(enc, hidden: s.moeInHalf, hiddenStride: d, pool: pool,
                                   scratch: s.moeScratch, tokens: t, out: s.moeOut, outStride: d)
             }
+            try w.experts.endPrefillVisit(layer: layer, commandBuffer: cb)
         }
 
         // 9. Post-MoE convolution with the residual, its tail.

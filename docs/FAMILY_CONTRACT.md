@@ -60,9 +60,9 @@ runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
 machinery is reached.
 
-That table holds one family today: `inkling2Loop` (IK2), refused by the axis
-names in `ManifestReader.inkling2RequiredAxes` until `Inkling2ForwardRunner`
-lands. IK2 is not the retired INK (`inklingSmall`, still refused): it is a
+That table is empty today. It held `inkling2Loop` (IK2), refused by the axis
+names in `ManifestReader.inkling2RequiredAxes`, until `Inkling2ForwardRunner`
+landed. IK2 is not the retired INK (`inklingSmall`, still refused): it is a
 different checkpoint and layer graph that reuses some of INK's axes.
 
 FNU has no column of its own in the field tables below: every value equals

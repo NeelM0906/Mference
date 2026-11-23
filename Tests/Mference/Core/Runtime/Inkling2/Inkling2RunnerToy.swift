@@ -225,6 +225,7 @@ struct Inkling2RunnerToy {
         func v(_ at: Int, _ count: Int) -> [Float] { Inkling2BufferMatrix.floats(f, offset: at, count: count) }
 
         var layers: [Inkling2RunnerWeights.Layer] = []
+        var pools: [Inkling2ExpertPool] = []
         var refLayers: [Inkling2ReferenceLayerWeights] = []
         var loopLayers: [Inkling2ReferenceLoopWeights] = []
         for (layer, o) in offsets.enumerated() {
@@ -236,6 +237,7 @@ struct Inkling2RunnerToy {
                                               gateUpScales: scaleBuffer, gateUpScalesOffset: scaleBase,
                                               downScales: scaleBuffer,
                                               downScalesOffset: scaleBase + c.numExperts * 4)
+            pools.append(pool)
             let loop = o.msgQueries.map { mq in
                 Inkling2RunnerWeights.Loop(messageQueries: ref(mq), down: o.down.map(ref),
                                            gain: o.gain.map(ref), forget: o.forget.map(ref))
@@ -248,7 +250,7 @@ struct Inkling2RunnerToy {
                 kConv: ref(o.kConv), vConv: ref(o.vConv), attnPostConv: ref(o.attnPostConv),
                 ffnPostConv: ref(o.ffnPostConv), attnResQuery: o.attnRes.map(ref), ffnResQuery: ref(o.ffnRes),
                 ffnNorm: ref(o.ffnNorm), router: ref(o.router), routerBias: ref(o.routerBias),
-                experts: pool, loop: loop))
+                loop: loop))
 
             let scales = Inkling2BufferMatrix.floats(scaleBuffer, offset: scaleBase, count: 2 * c.numExperts)
             func expert(_ e: Int, down: Bool) -> Inkling2BufferMatrix {
@@ -291,7 +293,8 @@ struct Inkling2RunnerToy {
         runnerWeights = Inkling2RunnerWeights(
             dense: dense, embedding: embedding, embeddingNorm: ref(embeddingNorm),
             outputResQuery: ref(outputRes), outputNorm: ref(outputNorm), output: output,
-            layers: layers, vocabRows: c.vocabPadded, vocab: c.vocabUnpadded, gateRank: c.gateRank,
+            layers: layers, experts: try Inkling2FixedExperts(pools: pools),
+            vocabRows: c.vocabPadded, vocab: c.vocabUnpadded, gateRank: c.gateRank,
             routeScale: c.routeScale, finalLogitSoftcap: c.finalLogitSoftcap, rmsEps: c.rmsEps)
         referenceWeights = Inkling2ReferenceWeights(
             embedding: m(dense, embedding, c.vocabPadded, d, .q8_0),
