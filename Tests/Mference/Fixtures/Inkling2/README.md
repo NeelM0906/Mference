@@ -30,6 +30,25 @@ Notes for the native side:
   special-token parsing, so a `<|end_message|>` typed by the user becomes the
   special token. That is the reference's behaviour, recorded as it is.
 
-Larger goldens (greedy continuations, top-20 log-probabilities, the 48-visit
-hidden states and routed experts) live outside the repository with the
-program's results.
+## `generate/`: greedy, log-probability and routing goldens
+
+From `ink-golden generate` with `-ngl 99` (the default offload: NVFP4 expert
+products on the CPU, everything else on Metal), n_ctx 4096, n_ubatch 512,
+8 threads, F16 KV, flash attention auto, inputs
+`Scripts/parity/inkling2/inputs/generate_prompts.json`.
+
+- `<id>/golden.json` for 10 prompts (5 raw, 5 chat: effort none, default,
+  low, a tool turn, after a tool result) and `trace01`: prompt text and ids,
+  greedy generated ids (argmax, ties to the lower id), text, pieces, stop.
+- `g01-capital`, `g05-wetlands`, `g06-chat-none`: `logprobs.json`, the top 20
+  log-probabilities (log-softmax over the 200,058 real tokens) at every
+  prompt and generated position, `[[id, logprob], ...]` plus the next token.
+- `trace01/trace.json`: for each of the 48 layer visits (layers 0-5, the
+  core 6-17 three times, 18-23) the cache slot, the physical layer, and per
+  position the 8 routed expert ids with their weights (normalized, scaled by
+  8). The per-visit hidden states themselves (2.2 MB) are kept with the
+  program's results, not here.
+- `noise-metal-vs-cpu.json`: the same prompts run CPU-only (no GPU device,
+  no op offload, no weight repacking) compared with these: the reference's
+  own backend noise, from which the G6 tolerances were proposed. Metal run
+  twice is bit-identical.
