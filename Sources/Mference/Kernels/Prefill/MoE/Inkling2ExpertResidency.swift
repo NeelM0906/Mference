@@ -1092,10 +1092,14 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// then reads the layer whole (`beginPrefillVisit`), which empties only
     /// the caches in the slab it overwrites. End a returned visit with
     /// `endDecodeVisit` after the encoder that reads its slots; the slots are
-    /// that command buffer's until it completes.
-    func beginShortPrefillVisit(layer: Int, expertIDs: [Int]) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])? {
+    /// that command buffer's until it completes. With `maxMisses`, also nil
+    /// (still before any slot is assigned) when more than that many of the
+    /// chunk's distinct experts are not in the slots.
+    func beginShortPrefillVisit(layer: Int, expertIDs: [Int],
+                                maxMisses: Int? = nil) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])? {
         precondition(!expertIDs.isEmpty && expertIDs.count % shape.topK == 0)
-        guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: expertIDs, refuseWhenFull: true) else {
+        guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: expertIDs, refuseWhenFull: true,
+                                                     maxMisses: maxMisses) else {
             return nil
         }
         return (binding, slots.map { UInt32($0) })
@@ -1105,10 +1109,13 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// entries): hits keep their slots, misses take the least recently used
     /// slots no entry of this visit needs and are read from the layer file,
     /// the slot scales follow. With `refuseWhenFull`, returns nil before
-    /// touching anything when the distinct experts outnumber the slots.
-    /// Before refilling, waits for the GPU to finish the prefill visits that
-    /// wrote this cache's slab and the last visit that read this layer's slots.
-    private func assignSlots(layer: Int, expertIDs: [Int], refuseWhenFull: Bool,
+    /// touching anything when the distinct experts outnumber the slots, and
+    /// with `maxMisses` when more of them than that are not in the slots
+    /// (counted after a prefill's overwritten slots are emptied, before any
+    /// assignment). Before refilling, waits for the GPU to finish the prefill
+    /// visits that wrote this cache's slab and the last visit that read this
+    /// layer's slots.
+    private func assignSlots(layer: Int, expertIDs: [Int], refuseWhenFull: Bool, maxMisses: Int? = nil,
                              refillAfter: UInt64? = nil) throws -> (Inkling2DecodeBinding, [Int])? {
         guard let cache = caches[layer] else { throw StoreError.notStaged(layer: layer) }
         precondition(expertIDs.allSatisfy { $0 >= 0 && $0 < shape.experts })
@@ -1133,6 +1140,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             for c in caches.values where staleSlabs.contains(ObjectIdentifier(c.slab)) { c.clear() }
             staleSlabs.removeAll()
         }
+        if let maxMisses, Set(expertIDs).filter({ cache.slotOf[$0] == nil }).count > maxMisses { return nil }
 
         cache.clock += 1
         var slotFor = [Int](repeating: -1, count: expertIDs.count)

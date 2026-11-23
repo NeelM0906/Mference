@@ -629,12 +629,21 @@ import MferenceValidationSupport
         #expect(Inkling2MoETestSupport.read(scratch.ids, as: UInt32.self, count: routed.count) == routed.map(UInt32.init))
         // Ten distinct experts do not fit 8 slots: refused, and nothing moved.
         #expect(try store.beginShortPrefillVisit(layer: 2, expertIDs: [0, 1, 4, 6, 8, 10, 12, 13, 15, 2, 9, 5]) == nil)
-        let again = try #require(try store.beginShortPrefillVisit(layer: 2, expertIDs: [2, 9, 5, 14]))
+        // The cold-chunk cap: three of these four are not in the slots, so a cap
+        // of 2 refuses before any slot moves, and a cap of 3 takes them.
+        #expect(try store.beginShortPrefillVisit(layer: 2, expertIDs: [2, 0, 1, 4], maxMisses: 2) == nil)
+        let again = try #require(try store.beginShortPrefillVisit(layer: 2, expertIDs: [2, 9, 5, 14], maxMisses: 0))
         #expect(again.binding.hits == 4 && again.binding.misses == 0)
         let done = context.queue.makeCommandBuffer()!
         store.endDecodeVisit(again.binding, commandBuffer: done)
         done.commit()
         done.waitUntilCompleted()
+        let capped = try #require(try store.beginShortPrefillVisit(layer: 2, expertIDs: [2, 0, 1, 4], maxMisses: 3))
+        #expect(capped.binding.hits == 1 && capped.binding.misses == 3)
+        let last = context.queue.makeCommandBuffer()!
+        store.endDecodeVisit(capped.binding, commandBuffer: last)
+        last.commit()
+        last.waitUntilCompleted()
     }
 
     /// Deferred decode visits: many staged visits encoded into one command

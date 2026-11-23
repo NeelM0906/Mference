@@ -254,13 +254,15 @@ struct Inkling2ForwardRunnerToyTests {
                                                  readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
                                                  decodeSlots: .perLayer(24))
 
-        func run(_ weights: Inkling2RunnerWeights, shortPrefill: Int? = nil, deferredReadbacks: Bool = false) async throws
+        func run(_ weights: Inkling2RunnerWeights, shortPrefill: Int? = nil, deferredReadbacks: Bool = false,
+                 coldMisses: Int? = nil) async throws
             -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], routerLogits: [Float],
                 cache: Inkling2ForwardRunner.DecodeCacheStats, short: Inkling2ForwardRunner.ShortPrefillStats) {
             let runner = try Inkling2ForwardRunner(weights: weights, context: context,
                                                    maxContext: 64, maxChunkTokens: 4)
             if let shortPrefill { runner.shortPrefillMaxTokens = shortPrefill }
             runner.defersDecodeReadback = deferredReadbacks
+            runner.shortPrefillColdMisses = coldMisses
             let device = context.device
             let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
             let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
@@ -299,6 +301,12 @@ struct Inkling2ForwardRunnerToyTests {
         let swept = try await run(stored, shortPrefill: 0)
         #expect(swept.logits == fixed.logits && swept.outputs == fixed.outputs)
         #expect(swept.short.visits == 0 && staged.short.visits > staged.short.fallbacks)
+        // The cold-chunk rule at a cap of 0: a short chunk whose first staged
+        // visit misses at all reads the rest of its staged layers whole, with
+        // no further readbacks. The same bits.
+        let cold = try await run(stored, coldMisses: 0)
+        #expect(cold.logits == fixed.logits && cold.outputs == fixed.outputs && cold.routerLogits == fixed.routerLogits)
+        #expect(cold.short.coldChunks > 0 && staged.short.coldChunks == 0)
         // Decode visits deferred (the GPU waits on a CPU-signalled event; the
         // switch's other arm) against split readbacks (the default): the same
         // bits, the same caching.
