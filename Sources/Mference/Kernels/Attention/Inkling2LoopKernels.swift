@@ -183,14 +183,14 @@ public final class Inkling2MessageGateKernels {
         encoder.setBuffer(weights, offset: 0, index: 1)
         encoder.setBuffer(activations, offset: 0, index: 2)
         encoder.setBuffer(z.buffer, offset: z.offset, index: 3)
-        encoder.dispatchThreadgroups(MTLSize(width: controllers.count, height: rank / 8, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: controllers.count, height: rank / 2, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.setComputePipelineState(combineDecode)
         bytes.withUnsafeBytes { encoder.setBytes($0.baseAddress!, length: $0.count, index: 0) }
         encoder.setBuffer(weights, offset: 0, index: 1)
         encoder.setBuffer(activations, offset: 0, index: 2)
         encoder.setBuffer(z.buffer, offset: z.offset, index: 3)
-        encoder.dispatchThreadgroups(MTLSize(width: (width + 255) / 256, height: controllers.count, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: width / 16, height: controllers.count, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
 

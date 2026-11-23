@@ -1546,6 +1546,11 @@ struct Inkling2GateDecodeParams {
     Inkling2GateController c[4];
 };
 
+// Down product: each z row's dot product is split over 4 simdgroups (x first
+// half, x second half, m first half, m second half), two rows per threadgroup of
+// 8; every threadgroup also reduces the RMS of x and m. Grid: (controllers,
+// rank / 2), 256 threads. (One simdgroup per row measured 46 us per three
+// controllers with the old combine; this form and the combine below, 28 us.)
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_gate_down_decode(
     constant Inkling2GateDecodeParams& p [[buffer(0)]],
@@ -1558,53 +1563,70 @@ void inkling2_gate_down_decode(
     ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
     threadgroup float partial[8][2];
+    threadgroup float dots[8];
     const Inkling2GateController c = p.c[tg.x];
     device const float* x = acts + c.x;
     device const float* m = acts + c.m;
+    const uint row = tg.y * 2u + sgitg / 4u, quarter = sgitg % 4u;
+    const uint halfWidth = p.width / 2u;
+    float d = 0.0f;
+    if (row < p.rank) {
+        device const float* w = (device const float*)(weights + c.down) + ulong(row) * 2u * p.width
+                                + (quarter / 2u) * p.width + (quarter % 2u) * halfWidth;
+        device const float* v = (quarter < 2u ? x : m) + (quarter % 2u) * halfWidth;
+        for (uint i = lane * 4u; i < halfWidth; i += 128u) {
+            d += dot(*((device const float4*)(w + i)), *((device const float4*)(v + i)));
+        }
+    }
+    d = simd_sum(d);
     float ax = 0.0f, am = 0.0f;
     for (uint i = tid; i < p.width; i += 256u) { ax = fma(x[i], x[i], ax); am = fma(m[i], m[i], am); }
     ax = simd_sum(ax);
     am = simd_sum(am);
-    if (lane == 0) { partial[sgitg][0] = ax; partial[sgitg][1] = am; }
+    if (lane == 0) { partial[sgitg][0] = ax; partial[sgitg][1] = am; dots[sgitg] = d; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid >= 2u) { return; }
     float tx = 0.0f, tm = 0.0f;
     for (short s = 0; s < 8; ++s) { tx += partial[s][0]; tm += partial[s][1]; }
     const float ix = rsqrt(tx / float(p.width) + p.eps), im = rsqrt(tm / float(p.width) + p.eps);
-    const uint row = tg.y * 8u + sgitg;
-    if (row >= p.rank) { return; }
-    device const float* w = (device const float*)(weights + c.down) + ulong(row) * 2u * p.width;
-    float dx = 0.0f, dm = 0.0f;
-    for (uint i = lane * 4u; i < p.width; i += 128u) {
-        dx += dot(*((device const float4*)(w + i)), *((device const float4*)(x + i)));
-        dm += dot(*((device const float4*)(w + p.width + i)), *((device const float4*)(m + i)));
+    const uint r = tg.y * 2u + tid;
+    if (r < p.rank) {
+        const uint s0 = tid * 4u;
+        z[tg.x * p.rank + r] = ix * (dots[s0] + dots[s0 + 1u]) + im * (dots[s0 + 2u] + dots[s0 + 3u]);
     }
-    dx = simd_sum(dx);
-    dm = simd_sum(dm);
-    if (lane == 0) { z[tg.x * p.rank + row] = ix * dx + im * dm; }
 }
 
+// Forget, gain and the mix: 16 lanes per channel read its forget and gain rows
+// as float4 (rank / 4 of them), two channels per simdgroup, 16 per threadgroup.
+// Grid: (width / 16, controllers), 256 threads.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_gate_combine_decode(
     constant Inkling2GateDecodeParams& p [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],
     device float*       acts    [[buffer(2)]],
     device const float* z       [[buffer(3)]],
-    uint2  tg  [[threadgroup_position_in_grid]],
-    ushort tid [[thread_index_in_threadgroup]])
+    uint2  tg    [[threadgroup_position_in_grid]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
-    threadgroup float4 zs[32];
     const Inkling2GateController c = p.c[tg.y];
-    for (uint r = tid; r < p.rank / 4u; r += 256u) { zs[r] = ((device const float4*)(z + tg.y * p.rank))[r]; }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint i = tg.x * 256u + tid;
-    if (i >= p.width) { return; }
+    const uint part = lane % 16u;
+    const uint i = tg.x * 16u + sgitg * 2u + lane / 16u;          // channel; width % 16 == 0
+    device const float4* zv = (device const float4*)(z + tg.y * p.rank);
     device const float4* fr = (device const float4*)((device const float*)(weights + c.forget) + ulong(i) * p.rank);
     device const float4* gr = (device const float4*)((device const float*)(weights + c.gain) + ulong(i) * p.rank);
     float f = 0.0f, g = 0.0f;
-    for (uint r = 0; r < p.rank / 4u; ++r) { f += dot(fr[r], zs[r]); g += dot(gr[r], zs[r]); }
-    const float xv = acts[c.x + i], mv = acts[c.m + i];
-    const float tf = tanh(clamp(f, -20.0f, 20.0f)), tgv = tanh(clamp(g, -20.0f, 20.0f));
-    acts[c.out + i] = xv - tf * xv + tgv * mv;
+    for (uint q = part; q < p.rank / 4u; q += 16u) {
+        const float4 zq = zv[q];
+        f += dot(fr[q], zq);
+        g += dot(gr[q], zq);
+    }
+    for (ushort off = 8; off > 0; off >>= 1) { f += simd_shuffle_xor(f, off); g += simd_shuffle_xor(g, off); }
+    if (part == 0u) {
+        const float xv = acts[c.x + i], mv = acts[c.m + i];
+        const float tf = tanh(clamp(f, -20.0f, 20.0f)), tgv = tanh(clamp(g, -20.0f, 20.0f));
+        acts[c.out + i] = xv - tf * xv + tgv * mv;
+    }
 }
 
 // ============================================================================
