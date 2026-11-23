@@ -324,6 +324,32 @@ struct Inkling2ForwardRunnerToyTests {
         #expect(staged.routes == fixed.routes)
         #expect(staged.routerLogits == fixed.routerLogits)
         #expect(fixed.routerLogits.allSatisfy(\.isFinite) && fixed.routerLogits.contains { $0 != 0 })
+        // Seeding (`Inkling2SlotSeeding`). The 24 slots above sit wholly under
+        // the fill line (the toy's slabs are a Q8_0 layer's size), so a store
+        // of 64 slots a layer, whose slabs reach past it: with the sweep
+        // forced, the prompts of two or more chunks seed the surviving slots
+        // before their last chunk; with seeding off the fills empty every
+        // slot of their slabs. The same bits either way. (Nothing is resident
+        // at 24 GB, so nothing hides the seed reads and none are made.)
+        if plan.placements.contains(.resident) {
+            let roomy = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                                readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
+                                                decodeSlots: .perLayer(64), seeding: .seed)
+            var weights = toy.runnerWeights
+            weights.experts = roomy
+            let seeded = try await run(weights, shortPrefill: 0)
+            let report = try #require(roomy.seedReport)
+            roomy.seeding = .off
+            let unseeded = try await run(weights, shortPrefill: 0)
+            #expect(seeded.logits == fixed.logits && seeded.outputs == fixed.outputs)
+            #expect(unseeded.logits == fixed.logits && unseeded.outputs == fixed.outputs)
+            #expect(seeded.routerLogits == fixed.routerLogits && unseeded.routerLogits == fixed.routerLogits)
+            #expect(report.layers > 0 && report.loaded > 0 && !report.cancelled && !report.failed)
+            print("inkling2 toy seeding at \(hostGigabytes) GB, 64 slots: last seed \(report.layers) layers, "
+                  + "\(report.loaded) experts read, \(report.kept) in place; decode \(seeded.cache.hits) hits, "
+                  + "\(seeded.cache.misses) misses seeded against \(unseeded.cache.hits) hits, "
+                  + "\(unseeded.cache.misses) misses off")
+        }
         // Every decode step's staged visits went through the slot caches.
         let decodeSteps = steps.filter(\.decode).count
         /// The stored layer of visit `v`: prelude 0-5, three passes of 6-17, coda 18-23.

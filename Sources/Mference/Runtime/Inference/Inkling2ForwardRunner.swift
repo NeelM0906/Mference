@@ -55,9 +55,19 @@ protocol Inkling2ExpertSource: AnyObject {
     func commandBufferFailed()
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
+    /// After a staged layer's whole-layer prefill visit, in its command
+    /// buffer: keeps the chunk's per-expert route counts (`counts`) for
+    /// `seedDecodeSlots`.
+    func encodeRouteCounts(layer: Int, counts: MTLBuffer, commandBuffer: MTLCommandBuffer)
+    /// Before a long prompt's last chunk, the chunk before it completed:
+    /// starts loading the decode slots that survive prefill with the
+    /// experts that chunk routed most (in the background; outputs unchanged).
+    func seedDecodeSlots()
 }
 
 extension Inkling2ExpertSource {
+    func encodeRouteCounts(layer: Int, counts: MTLBuffer, commandBuffer: MTLCommandBuffer) {}
+    func seedDecodeSlots() {}
     func recoverAfterFailedCommands() {}
     func prefetchFirstStagedVisit() throws {}
     func cancelPrefetch() throws {}
@@ -664,6 +674,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             // Every chunk but the last starts the next one's first staged read
             // early (not for a short chunk, which reads through the slots).
             prefetchesNextChunk = i < spans.count - 1 && spans[i + 1].tokenCount > max(1, shortPrefillMaxTokens)
+            // Before a long last chunk: seed the decode slots that survive
+            // prefill from the chunk before (its reads hide under this chunk).
+            if i > 0, i == spans.count - 1, span.tokenCount > max(1, shortPrefillMaxTokens) {
+                w.experts.seedDecodeSlots()
+            }
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try run(tokens: Array(tokens[lower..<upper]), start: span.startPosition,
@@ -1358,6 +1373,9 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 }
             }
             try w.experts.endVisit(layer: layer, commandBuffer: cb)
+            if t > 1, w.experts.decodeNeedsRoutes(layer: layer) {
+                w.experts.encodeRouteCounts(layer: layer, counts: s.moeScratch.counts, commandBuffer: cb)
+            }
         }
 
         // 9. Post-MoE convolution with the residual, its tail.

@@ -753,6 +753,110 @@ import MferenceValidationSupport
         }
     }
 
+    /// Slots above the fill line survive prefill, and seeding loads them.
+    /// Three staged NVFP4 layers of 16 experts with 16 slots each on two
+    /// slabs: layers 1 and 3 share slab 0 (layer 3's slots from one layer's
+    /// bytes up, so all of them above any fill), layer 2 has slab 1. A decode
+    /// visit, then two prefill chunks (the first keeping its route counts);
+    /// the seed is requested between them.
+    /// - `.off`: every slot the chunks' slabs hold is emptied.
+    /// - `.keep`: layer 3's slots keep the decode's experts.
+    /// - `.seed`: they also take the first chunk's most routed experts of
+    ///   layer 3, those already there staying put, read once the second
+    ///   chunk's fills reach the gate.
+    /// - A seed whose gate never comes is cancelled by the next slot use, its
+    ///   slots emptied.
+    /// Every decode equals the resident pool bit for bit.
+    @Test func survivingSlotsKeepTheirExpertsAndTakeSeeds() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let pools = try (0..<4).map {
+            try Inkling2SyntheticPool.make(device: context.device, encoding: .nvfp4, shape: shape,
+                                           seed: 0x2BC0 + UInt64($0), quantized: true)
+        }
+        let (directory, files) = try Self.writeLayers(pools, header: 4096)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let specs = pools.enumerated().map { layer, pool in
+            Inkling2ExpertLayerSpec(file: files[layer]!, encoding: .nvfp4, expertStride: pool.pool.expertStride,
+                                    gateUpScales: (pool.pool.gateUpScales, pool.pool.gateUpScalesOffset),
+                                    downScales: (pool.pool.downScales, pool.pool.downScalesOffset))
+        }
+        let plan = Inkling2ExpertResidencyPlan(placements: [.resident, .staged, .staged, .staged], stagingSlabs: 2,
+                                               residentBytes: files[0]!.bytes, stagingBytes: 0)
+        let (x, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: 1, stride: shape.d, d: shape.d, seed: 0x2BC8)
+        let weights = context.device.makeBuffer(length: 16, options: .storageModeShared)!
+        Inkling2MoETestSupport.write([Float]([0.4, 0.3, 0.2, 0.1]), to: weights)
+        let ids = context.device.makeBuffer(length: 16, options: .storageModeShared)!
+        // Layer 3's route counts in the first chunk: 5, 9, 2 and 14 routed, in that order.
+        var routed = [UInt32](repeating: 0, count: shape.experts)
+        routed[5] = 10; routed[9] = 7; routed[2] = 3; routed[14] = 1
+        let counts = context.device.makeBuffer(length: shape.experts * 4, options: .storageModeShared)!
+        Inkling2MoETestSupport.write(routed, to: counts)
+
+        func visit(_ store: Inkling2ExpertStore, _ layer: Int, _ experts: [Int]) throws -> (Int, Int) {
+            let binding = try store.prepareDecodeVisit(layer: layer, expertIDs: experts)
+            Inkling2MoETestSupport.write(experts.map { UInt32($0) }, to: ids)
+            let want = Self.decode(context, kernels, shape: shape, x: x, xOffset: 0, weights: weights, weightsOffset: 0,
+                                   pool: pools[layer].pool, ids: ids, idsOffset: 0)
+            let got = Self.decode(context, kernels, shape: shape, x: x, xOffset: 0, weights: weights, weightsOffset: 0,
+                                  binding: binding, store: store)
+            #expect(got == want, "layer \(layer) experts \(experts)")
+            return (binding.hits, binding.misses)
+        }
+        func chunk(_ store: Inkling2ExpertStore, keepCounts: Bool) throws {
+            let cb = context.queue.makeCommandBuffer()!
+            for layer in 1...3 {
+                _ = try store.beginPrefillVisit(layer: layer, commandBuffer: cb)
+                try store.endPrefillVisit(layer: layer, commandBuffer: cb)
+                if keepCounts { store.encodeRouteCounts(layer: layer, counts: counts, commandBuffer: cb) }
+            }
+            cb.commit()
+            cb.waitUntilCompleted()
+            store.drainStaging()
+            #expect(cb.status == .completed && store.stagingError == nil)
+        }
+        func store(_ seeding: Inkling2SlotSeeding, seedBetweenChunks: Bool = true,
+                   secondChunk: Bool = true) throws -> Inkling2ExpertStore {
+            let store = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                                decodeSlots: .perLayer(16), seeding: seeding)
+            store.waitTimeoutMS = 10_000
+            let page = Int(getpagesize())
+            #expect(store.seeding == seeding && store.fillLine == (files[3]!.bytes + page - 1) / page * page)
+            for layer in 1...3 { #expect(store.decodeSlots(layer: layer) == 16) }
+            #expect(try visit(store, 3, [0, 1, 2, 3]) == (0, 4))
+            #expect(try visit(store, 1, [0, 1, 2, 3]) == (0, 4))
+            try chunk(store, keepCounts: true)
+            if seedBetweenChunks { store.seedDecodeSlots() }
+            if secondChunk { try chunk(store, keepCounts: false) }
+            return store
+        }
+
+        let off = try store(.off)
+        #expect(try visit(off, 3, [0, 1, 2, 3]) == (0, 4))
+        #expect(off.seedReport == nil)
+
+        let keep = try store(.keep)
+        #expect(try visit(keep, 3, [0, 1, 2, 3]) == (4, 0))          // above the fill line: kept
+        #expect(try visit(keep, 1, [0, 1, 2, 3]) == (0, 4))          // below it: overwritten
+        #expect(try visit(keep, 3, [5, 9, 2, 14]) == (1, 3))
+        #expect(keep.seedReport == nil)
+
+        let seeded = try store(.seed)
+        let seed = try #require(seeded.seedReport)
+        #expect(seed.layers == 1 && seed.loaded == 3 && seed.kept == 1 && seed.bytes == 3 * shape.expertBytes(.nvfp4)
+                && !seed.cancelled && !seed.failed)
+        #expect(try visit(seeded, 3, [5, 9, 2, 14]) == (4, 0))
+        #expect(try visit(seeded, 3, [0, 1, 3, 5]) == (4, 0))        // seeds took empty slots first
+        #expect(try visit(seeded, 1, [5, 9, 2, 14]) == (0, 4))       // no slots above the line
+
+        // Requested, and the next slot use comes before the gate (no second chunk).
+        let cancelled = try store(.seed, secondChunk: false)
+        #expect(try visit(cancelled, 3, [5, 9, 2, 14]) == (1, 3))
+        let report = try #require(cancelled.seedReport)
+        #expect(report.cancelled && report.loaded == 3 && !report.failed)
+    }
+
     /// Looped layers on the staged path (llama.cpp issue 32710: with a looped
     /// layer's experts not resident, passes 2 and 3 computed with the experts
     /// loaded for pass 1). Layers 1 and 2 stand for a looped block visited
