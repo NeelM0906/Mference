@@ -83,10 +83,95 @@ public final class Inkling2DepthMix {
 public final class Inkling2MessageGateKernels {
     private let inputs: MTLComputePipelineState
     private let combine: MTLComputePipelineState
+    private let downDecode: MTLComputePipelineState
+    private let combineDecode: MTLComputePipelineState
 
     public init(library: Inkling2KernelLibrary) throws {
         inputs = try library.pipeline("inkling2_gate_inputs")
         combine = try library.pipeline("inkling2_gate_combine")
+        downDecode = try library.pipeline("inkling2_gate_down_decode")
+        combineDecode = try library.pipeline("inkling2_gate_combine_decode")
+    }
+
+    /// One controller of a single-row (decode) gate: byte offsets of its F32
+    /// weights in the weight buffer, float offsets of its rows in the
+    /// activation buffer.
+    public struct DecodeController: Sendable, Equatable {
+        public var down: Int
+        public var forget: Int
+        public var gain: Int
+        public var x: Int
+        public var message: Int
+        public var output: Int
+
+        public init(down: Int, forget: Int, gain: Int, x: Int, message: Int, output: Int) {
+            self.down = down
+            self.forget = forget
+            self.gain = gain
+            self.x = x
+            self.message = message
+            self.output = output
+        }
+    }
+
+    /// The gate for one row and up to four controllers in two dispatches (the
+    /// many-row path takes about ten for three controllers). `z` is FP32
+    /// scratch of `controllers.count * rank` floats, 16-byte aligned. An output
+    /// may alias its own `x` only; it may not overlap any other row of the call.
+    /// Not byte-identical to the many-row path (the down product sums
+    /// `inv_x (W_x . x) + inv_m (W_m . m)` per simdgroup); agreement is within
+    /// FP32 rounding.
+    public func encodeDecode(commandBuffer: MTLCommandBuffer, weights: MTLBuffer, activations: MTLBuffer,
+                             z: Inkling2BufferRef, controllers: [DecodeController],
+                             width: Int = Inkling2AttentionShape.hidden, rank: Int = 64,
+                             eps: Float = Inkling2AttentionShape.rmsEps) {
+        precondition((1...4).contains(controllers.count) && width % 128 == 0 && rank % 8 == 0 && rank <= 128)
+        precondition(z.offset % 16 == 0 && z.buffer.length - z.offset >= controllers.count * rank * 4)
+        func overlaps(_ a: Int, _ b: Int) -> Bool { a < b + width && b < a + width }
+        for (i, c) in controllers.enumerated() {
+            precondition([c.down, c.forget, c.gain].allSatisfy { $0 % 16 == 0 })
+            precondition([c.x, c.message, c.output].allSatisfy { $0 % 4 == 0 })
+            precondition(!overlaps(c.output, c.message), "controller \(i) output overwrites its message")
+            for (j, other) in controllers.enumerated() where j != i {
+                precondition(!overlaps(c.output, other.x) && !overlaps(c.output, other.message)
+                             && !overlaps(c.output, other.output),
+                             "controller \(i) output overlaps controller \(j) rows")
+            }
+        }
+        var bytes = [UInt8](repeating: 0, count: 16 + 4 * 40)
+        func put32(_ v: Int, _ o: Int) { for k in 0..<4 { bytes[o + k] = UInt8(truncatingIfNeeded: UInt32(v) >> (8 * UInt32(k))) } }
+        func put64(_ v: Int, _ o: Int) { for k in 0..<8 { bytes[o + k] = UInt8(truncatingIfNeeded: UInt64(v) >> (8 * UInt64(k))) } }
+        put32(width, 0)
+        put32(rank, 4)
+        put32(controllers.count, 8)
+        withUnsafeBytes(of: eps.bitPattern) { for k in 0..<4 { bytes[12 + k] = $0[k] } }
+        for (i, c) in controllers.enumerated() {
+            let base = 16 + i * 40
+            put64(c.down, base)
+            put64(c.forget, base + 8)
+            put64(c.gain, base + 16)
+            put32(c.x, base + 24)
+            put32(c.message, base + 28)
+            put32(c.output, base + 32)
+        }
+        let first = commandBuffer.makeComputeCommandEncoder()!
+        first.setComputePipelineState(downDecode)
+        bytes.withUnsafeBytes { first.setBytes($0.baseAddress!, length: $0.count, index: 0) }
+        first.setBuffer(weights, offset: 0, index: 1)
+        first.setBuffer(activations, offset: 0, index: 2)
+        first.setBuffer(z.buffer, offset: z.offset, index: 3)
+        first.dispatchThreadgroups(MTLSize(width: controllers.count, height: rank / 8, depth: 1),
+                                   threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        first.endEncoding()
+        let second = commandBuffer.makeComputeCommandEncoder()!
+        second.setComputePipelineState(combineDecode)
+        bytes.withUnsafeBytes { second.setBytes($0.baseAddress!, length: $0.count, index: 0) }
+        second.setBuffer(weights, offset: 0, index: 1)
+        second.setBuffer(activations, offset: 0, index: 2)
+        second.setBuffer(z.buffer, offset: z.offset, index: 3)
+        second.dispatchThreadgroups(MTLSize(width: (width + 255) / 256, height: controllers.count, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        second.endEncoding()
     }
 
     public func encodeInputs(commandBuffer: MTLCommandBuffer,

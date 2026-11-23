@@ -6,7 +6,8 @@ import Metal
 /// convolutions (static, or static plus per-token taps on global layers), the
 /// key clip and value norm, and the FP16 stores into the visit's KV cache.
 /// It reads the convolution tails but does not advance them: encode
-/// `Inkling2ConvTail` on the same key and value columns afterwards.
+/// `Inkling2ConvTail` on the same key and value columns afterwards, or, for a
+/// single row (decode), set `advanceTails` and skip that dispatch.
 public final class Inkling2QKVEpilogue {
     /// Column offsets (floats) inside one row of the FP32 projection output.
     public struct Columns: Sendable, Equatable {
@@ -51,6 +52,8 @@ public final class Inkling2QKVEpilogue {
         public var cache: Inkling2KVView
         public var rows: Int
         public var startPosition: Int
+        /// One row only: advance the key and value tails in place in the same dispatch.
+        public var advanceTails: Bool
 
         public init(projections: Inkling2BufferRef, projectionStride: Int, columns: Columns,
                     queryScale: Inkling2BufferRef, relativeScale: Inkling2BufferRef,
@@ -58,7 +61,7 @@ public final class Inkling2QKVEpilogue {
                     keyTail: Inkling2BufferRef, valueTail: Inkling2BufferRef,
                     queries: Inkling2BufferRef, queryStride: Int = Inkling2AttentionShape.qWidth,
                     relative: Inkling2BufferRef, relativeStride: Int = Inkling2AttentionShape.relWidth,
-                    cache: Inkling2KVView, rows: Int, startPosition: Int) {
+                    cache: Inkling2KVView, rows: Int, startPosition: Int, advanceTails: Bool = false) {
             self.projections = projections
             self.projectionStride = projectionStride
             self.columns = columns
@@ -75,6 +78,7 @@ public final class Inkling2QKVEpilogue {
             self.cache = cache
             self.rows = rows
             self.startPosition = startPosition
+            self.advanceTails = advanceTails
         }
     }
 
@@ -87,6 +91,7 @@ public final class Inkling2QKVEpilogue {
     public func encode(commandBuffer: MTLCommandBuffer, _ a: Arguments) {
         precondition(a.rows > 0)
         precondition((a.columns.keyTaps == nil) == (a.columns.valueTaps == nil))
+        precondition(!a.advanceTails || a.rows == 1, "in-place tail advance needs one row")
         // float4 reads of the projection rows and half4 stores.
         precondition(a.projectionStride % 4 == 0 && a.projections.offset % 16 == 0)
         precondition([a.columns.queries, a.columns.keys, a.columns.values].allSatisfy { $0 % 4 == 0 })
@@ -101,6 +106,7 @@ public final class Inkling2QKVEpilogue {
             dynamicConv: dynamic ? 1 : 0,
             qOutStride: UInt32(a.queryStride), relOutStride: UInt32(a.relativeStride),
             kvStride: UInt32(a.cache.slotStride), ringCapacity: UInt32(a.cache.ringCapacity),
+            advanceTails: a.advanceTails ? 1 : 0,
             qkClip: Inkling2AttentionShape.qkClip, relClip: Inkling2AttentionShape.relClip,
             clipEps: 1e-6, rmsEps: Inkling2AttentionShape.rmsEps)
         let encoder = commandBuffer.makeComputeCommandEncoder()!
@@ -169,7 +175,8 @@ public final class Inkling2ConvTail {
 /// The static kernel-4 short convolution after the attention output
 /// projection and after the MoE, FP32 in and out, optionally adding a
 /// residual: `out = (conv(x) + x) / sqrt(5) (+ residual)`. `out` may alias
-/// `residual`, never `x`. Advance the tail with `Inkling2ConvTail` afterwards.
+/// `residual`, never `x`. Advance the tail with `Inkling2ConvTail` afterwards,
+/// or, for a single row (decode), with `advanceTail` in the same dispatch.
 public final class Inkling2ShortConv {
     private let pipeline: MTLComputePipelineState
 
@@ -182,13 +189,15 @@ public final class Inkling2ShortConv {
                        weight: Inkling2BufferRef, tail: Inkling2BufferRef,
                        residual: Inkling2BufferRef?, residualStride: Int = 0,
                        output: Inkling2BufferRef, outputStride: Int,
-                       rows: Int, channels: Int = Inkling2AttentionShape.hidden) {
+                       rows: Int, channels: Int = Inkling2AttentionShape.hidden,
+                       advanceTail: Bool = false) {
         precondition(rows > 0 && channels % 4 == 0 && xStride % 4 == 0 && outputStride % 4 == 0)
+        precondition(!advanceTail || rows == 1, "in-place tail advance needs one row")
         precondition(residual == nil || (residualStride > 0 && residualStride % 4 == 0))
         var params = Inkling2ConvParams(tokens: UInt32(rows), channels: UInt32(channels),
                                         xStride: UInt32(xStride), outStride: UInt32(outputStride),
                                         residualStride: UInt32(residual == nil ? 0 : residualStride),
-                                        reserved0: 0, reserved1: 0, reserved2: 0)
+                                        advanceTail: advanceTail ? 1 : 0, reserved1: 0, reserved2: 0)
         let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2ConvParams>.stride, index: 0)
@@ -357,6 +366,7 @@ struct Inkling2QKVParams {
     var relOutStride: UInt32
     var kvStride: UInt32
     var ringCapacity: UInt32
+    var advanceTails: UInt32
     var qkClip: Float
     var relClip: Float
     var clipEps: Float
@@ -385,7 +395,7 @@ struct Inkling2ConvParams {
     var xStride: UInt32
     var outStride: UInt32
     var residualStride: UInt32
-    var reserved0: UInt32
+    var advanceTail: UInt32
     var reserved1: UInt32
     var reserved2: UInt32
 }
