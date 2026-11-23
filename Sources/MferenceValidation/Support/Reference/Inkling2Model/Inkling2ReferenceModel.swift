@@ -31,8 +31,14 @@ public final class Inkling2ReferenceModel {
     /// queries, the cached keys and values, the gated attention output, and
     /// the experts' input and activation (the router still reads FP32). A
     /// comparison with the runner then measures accumulation order, not the
-    /// runner's storage formats.
-    public enum Precision: Sendable { case fp32, metalRunner }
+    /// runner's storage formats. `.llamaCPU` rounds as llama.cpp's CPU backend
+    /// does in K0's CPU-only traces (G6a): the input of every Q8_0 and NVFP4
+    /// product (dense projections, experts' input and activation, the head)
+    /// to Q8_0 blocks (ggml's `vec_dot_type`), the input of a BF16 product
+    /// (sink and tap projections) to BF16, and the cached keys and values
+    /// to FP16 (llama.cpp's default cache type). F32 products (router, loop
+    /// gates) stay FP32.
+    public enum Precision: Sendable { case fp32, metalRunner, llamaCPU }
     public var precision: Precision = .fp32
     /// The trace of the most recent `forward` with `captureTrace` set.
     public private(set) var lastTrace: Inkling2ReferenceTrace?
@@ -198,8 +204,9 @@ public final class Inkling2ReferenceModel {
     /// Head over a final hidden state: the first `vocabUnpadded` rows of
     /// `output`, then the logit softcap.
     public func logits(hidden: [Float]) -> [Float] {
-        (0..<config.vocabUnpadded).map {
-            let raw = Inkling2ReferenceOps.dot(weights.output.row($0), hidden)
+        let input = precision == .llamaCPU ? Inkling2Q8_0.roundTrip(hidden) : hidden
+        return (0..<config.vocabUnpadded).map {
+            let raw = Inkling2ReferenceOps.dot(weights.output.row($0), input)
             if config.finalLogitSoftcap > 0 && abs(raw) > config.finalLogitSoftcap {
                 coverage.saturatedLogits += 1
             }
@@ -221,8 +228,34 @@ public final class Inkling2ReferenceModel {
         let hd = c.headDim
         var slot = state.slots[visit.cacheSlot]
         let loop = messages == nil ? nil : weights.loopLayers[il - c.coreStart]
-        let half = precision == .metalRunner
-        func toHalf(_ v: [Float]) -> [Float] { half ? v.map { Float(Float16($0)) } : v }
+        let precision = self.precision
+        func toHalf(_ v: [Float]) -> [Float] { v.map { Float(Float16($0)) } }
+        /// The input of a Q8_0 or NVFP4 product.
+        func q8In(_ v: [Float]) -> [Float] {
+            switch precision {
+            case .fp32: return v
+            case .metalRunner: return toHalf(v)
+            case .llamaCPU: return Inkling2Q8_0.roundTrip(v)
+            }
+        }
+        /// The input of a BF16 product.
+        func bf16In(_ v: [Float]) -> [Float] {
+            switch precision {
+            case .fp32: return v
+            case .metalRunner: return toHalf(v)
+            case .llamaCPU: return v.map(Op.bf16Round)
+            }
+        }
+        /// A cached key or value row, and a query.
+        func cached(_ v: [Float]) -> [Float] { precision == .fp32 ? v : toHalf(v) }
+        func queryIn(_ v: [Float]) -> [Float] { precision == .metalRunner ? toHalf(v) : v }
+        let roundActivation: (([Float]) -> [Float])? = {
+            switch precision {
+            case .fp32: return nil
+            case .metalRunner: return { $0.map { Float(Float16($0)) } }
+            case .llamaCPU: return { Inkling2Q8_0.roundTrip($0) }
+            }
+        }()
 
         // Attention inputs: the depth mix of the earlier blocks and the
         // running sum (one mix on sliding layers, one each for Q, K and V on
@@ -247,7 +280,8 @@ public final class Inkling2ReferenceModel {
                       Op.rmsNorm(inputs[1], weight: lw.kInputNorm!, eps: c.rmsEps),
                       Op.rmsNorm(inputs[2], weight: lw.vInputNorm!, eps: c.rmsEps)]
         }
-        let (xq, xk, xv) = (toHalf(inputs[0]), toHalf(inputs[1]), toHalf(inputs[2]))
+        let (xq, xk, xv) = (q8In(inputs[0]), q8In(inputs[1]), q8In(inputs[2]))
+        let (bq, bk, bv) = (bf16In(inputs[0]), bf16In(inputs[1]), bf16In(inputs[2]))
 
         // Projections. K and V pass through their short convolutions (with
         // input-dependent taps on global layers) before the clip and norm.
@@ -255,11 +289,11 @@ public final class Inkling2ReferenceModel {
         let kPre = lw.wk.apply(xk)
         let vPre = lw.wv.apply(xv)
         let rRaw = lw.rel.apply(xq)
-        let sinks = lw.sinkProj.apply(xq)
+        let sinks = lw.sinkProj.apply(bq)
         let kConv = Op.shortConv(kPre, tail: slot.tails[0], weights: lw.kConv,
-                                 dynamicTaps: lw.kConvProj?.apply(xk), heads: c.numKVHeads)
+                                 dynamicTaps: lw.kConvProj?.apply(bk), heads: c.numKVHeads)
         let vConv = Op.shortConv(vPre, tail: slot.tails[1], weights: lw.vConv,
-                                 dynamicTaps: lw.vConvProj?.apply(xv), heads: c.numKVHeads)
+                                 dynamicTaps: lw.vConvProj?.apply(bv), heads: c.numKVHeads)
         slot.tails[0] = Op.advance(tail: slot.tails[0], with: kPre)
         slot.tails[1] = Op.advance(tail: slot.tails[1], with: vPre)
 
@@ -270,7 +304,7 @@ public final class Inkling2ReferenceModel {
             let qh = Array(qRaw[(h * hd)..<((h + 1) * hd)])
             let qs = Array(lw.qClipScale[(h * hd)..<((h + 1) * hd)])
             if Op.l2ClipActive(qh, scale: qs, threshold: c.qkClip) { coverage.clippedQueries += 1 }
-            q.append(toHalf(Op.l2Clip(qh, scale: qs, threshold: c.qkClip)).map { $0 * tau })
+            q.append(queryIn(Op.l2Clip(qh, scale: qs, threshold: c.qkClip)).map { $0 * tau })
             let rh = Array(rRaw[(h * c.relDim)..<((h + 1) * c.relDim)])
             let rs = Array(lw.relClipScale[(h * c.relDim)..<((h + 1) * c.relDim)])
             if Op.l2ClipActive(rh, scale: rs, threshold: c.relClip) { coverage.clippedRelStates += 1 }
@@ -280,8 +314,8 @@ public final class Inkling2ReferenceModel {
         for g in 0..<c.numKVHeads {
             let kh = Array(kConv[(g * hd)..<((g + 1) * hd)])
             if Op.l2ClipActive(kh, threshold: c.qkClip) { coverage.clippedKeys += 1 }
-            key += toHalf(Op.l2Clip(kh, threshold: c.qkClip))
-            value += toHalf(Op.rmsNorm(Array(vConv[(g * hd)..<((g + 1) * hd)]), eps: c.rmsEps))
+            key += cached(Op.l2Clip(kh, threshold: c.qkClip))
+            value += cached(Op.rmsNorm(Array(vConv[(g * hd)..<((g + 1) * hd)]), eps: c.rmsEps))
         }
         precondition(slot.keys.count == pos, "visit \(visit.order) cache at \(slot.keys.count), token at \(pos)")
         slot.keys.append(key)
@@ -312,7 +346,7 @@ public final class Inkling2ReferenceModel {
         }
         let gate = lw.outputGate.apply(xq).map(Op.sigmoid)
         let gated = (0..<attn.count).map { attn[$0] * gate[$0] }
-        let projected = lw.wo.apply(toHalf(gated))
+        let projected = lw.wo.apply(q8In(gated))
         let attnOut = Op.shortConv(projected, tail: slot.tails[2], weights: lw.attnPostConv)
         slot.tails[2] = Op.advance(tail: slot.tails[2], with: projected)
 
@@ -348,8 +382,9 @@ public final class Inkling2ReferenceModel {
                                           routeScale: c.routeScale)
         }
         let ff = c.expertFF
-        let moe = Op.moe(toHalf(m), route: route, gateUp: lw.expertGateUp, down: lw.expertDown,
-                         gateSoftcap: c.gateSoftcap, upSoftcap: c.upSoftcap, halfActivation: half) { gu in
+        let moe = Op.moe(q8In(m), route: route, gateUp: lw.expertGateUp, down: lw.expertDown,
+                         gateSoftcap: c.gateSoftcap, upSoftcap: c.upSoftcap,
+                         roundActivation: roundActivation) { gu in
             for i in 0..<ff {
                 if abs(gu[i]) > c.gateSoftcap { self.coverage.saturatedGates += 1 }
                 if abs(gu[ff + i]) > c.upSoftcap { self.coverage.saturatedUps += 1 }

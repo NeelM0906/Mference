@@ -27,6 +27,14 @@ public enum Inkling2ReferenceOps {
         return Float(s)
     }
 
+    /// ggml's FP32 to BF16 conversion (`ggml_compute_fp32_to_bf16`): round
+    /// to nearest, ties to even; a NaN stays a (quiet) NaN.
+    public static func bf16Round(_ x: Float) -> Float {
+        let u = x.bitPattern
+        if (u & 0x7FFF_FFFF) > 0x7F80_0000 { return Float(bitPattern: ((u >> 16) | 64) << 16) }
+        return Float(bitPattern: ((u &+ (0x7FFF &+ ((u >> 16) & 1))) >> 16) << 16)
+    }
+
     public static func sigmoid(_ x: Float) -> Float {
         Float(1.0 / (1.0 + Foundation.exp(-Double(x))))
     }
@@ -248,22 +256,22 @@ public enum Inkling2ReferenceOps {
     /// `act = softcap(gate, gateCap) * sigmoid(gate) * softcap(up, upCap)`
     /// (the sigmoid sees the raw gate), output `down act`.
     /// `observe`, when given, sees the `[gate; up]` pre-activations.
-    /// `halfActivation` rounds the activation to FP16 before `down`, as a
-    /// kernel that stores it in half does.
+    /// `roundActivation` rounds the activation before `down` the way an
+    /// implementation stores or feeds it (FP16, Q8_0 blocks).
     public static func expert(_ x: [Float], gateUp: any Inkling2ReferenceMatrix,
                               down: any Inkling2ReferenceMatrix,
-                              gateSoftcap: Float, upSoftcap: Float, halfActivation: Bool = false,
+                              gateSoftcap: Float, upSoftcap: Float,
+                              roundActivation: (([Float]) -> [Float])? = nil,
                               observe: (([Float]) -> Void)? = nil) -> [Float] {
         let gu = gateUp.apply(x)
         observe?(gu)
         let ff = gu.count / 2
         let act = (0..<ff).map { i -> Float in
             let g = gu[i]
-            let a = Float(Double(softcap(g, gateSoftcap)) * Double(sigmoid(g))
-                          * Double(softcap(gu[ff + i], upSoftcap)))
-            return halfActivation ? Float(Float16(a)) : a
+            return Float(Double(softcap(g, gateSoftcap)) * Double(sigmoid(g))
+                         * Double(softcap(gu[ff + i], upSoftcap)))
         }
-        return down.apply(act)
+        return down.apply(roundActivation?(act) ?? act)
     }
 
     /// The routed MoE output, accumulated in double precision over the
@@ -271,12 +279,13 @@ public enum Inkling2ReferenceOps {
     public static func moe(_ x: [Float], route: Inkling2Route,
                            gateUp: [any Inkling2ReferenceMatrix],
                            down: [any Inkling2ReferenceMatrix],
-                           gateSoftcap: Float, upSoftcap: Float, halfActivation: Bool = false,
+                           gateSoftcap: Float, upSoftcap: Float,
+                           roundActivation: (([Float]) -> [Float])? = nil,
                            observe: (([Float]) -> Void)? = nil) -> [Float] {
         var acc = [Double](repeating: 0, count: x.count)
         for (e, w) in zip(route.experts, route.weights) {
             let y = expert(x, gateUp: gateUp[e], down: down[e], gateSoftcap: gateSoftcap,
-                           upSoftcap: upSoftcap, halfActivation: halfActivation, observe: observe)
+                           upSoftcap: upSoftcap, roundActivation: roundActivation, observe: observe)
             for i in 0..<acc.count { acc[i] += Double(w) * Double(y[i]) }
         }
         return acc.map { Float($0) }

@@ -206,4 +206,31 @@ struct Inkling2ReferenceModelTests {
         }
         #expect(used.count == c.numExperts)
     }
+
+    /// The llama.cpp CPU rounding (Q8_0 product inputs, BF16 tap and sink
+    /// inputs, FP16 cache) moves each visit a little and never a lot. Teacher
+    /// forced on the FP32 run's outputs and routes, because free-running the
+    /// random toy amplifies any rounding (measured: logits 100% apart).
+    @Test func llamaCPUPrecisionMovesEachVisitALittle() throws {
+        let tokens = Inkling2ToyCheckpoint.tokens(count: 6)
+        let exact = try toyModel()
+        exact.captureTrace = true
+        _ = exact.forward(tokens: tokens, logits: .none)
+        let reference = try #require(exact.lastTrace)
+        let rounded = try toyModel()
+        rounded.captureTrace = true
+        rounded.precision = .llamaCPU
+        rounded.forcedRoutes = reference.routes.map { $0.map(\.experts) }
+        rounded.forcedVisitOutputs = reference.visitOutputs
+        _ = rounded.forward(tokens: tokens, logits: .none)
+        let trace = try #require(rounded.lastTrace)
+        var worst: Float = 0
+        for (got, want) in zip(trace.visitOutputs, reference.visitOutputs) {
+            for (g, w) in zip(got, want) {
+                #expect(g.allSatisfy { $0.isFinite })
+                worst = max(worst, zip(g, w).map { abs($0 - $1) }.max()! / max(w.map(abs).max()!, 1e-6))
+            }
+        }
+        #expect(worst > 0 && worst < 0.05, "worst per-visit change \(worst)")
+    }
 }

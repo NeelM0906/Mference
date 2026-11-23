@@ -167,6 +167,17 @@ struct Inkling2ReferenceOpsTests {
         #expect(close(other.route.weights[0], s0 / (s0 + s2) * 8, 1e-5))
     }
 
+    /// ggml's FP32 to BF16: nearest, ties to even; NaN stays NaN.
+    @Test func bf16RoundingTiesToEven() {
+        let ulp = Float(1) / 128   // BF16 spacing at 1.0 (7 mantissa bits)
+        #expect(Op.bf16Round(1 + ulp / 2) == 1)                 // tie, 1.0 is even
+        #expect(Op.bf16Round(1 + 3 * ulp / 2) == 1 + 2 * ulp)   // tie, rounds up to the even neighbour
+        #expect(Op.bf16Round(1 + ulp / 4) == 1)
+        #expect(Op.bf16Round(-1 - 3 * ulp / 4) == -1 - ulp)
+        #expect(Op.bf16Round(.nan).isNaN)
+        #expect(Op.bf16Round(.infinity) == .infinity)
+    }
+
     @Test func routerTiesGoToTheLowerIndex() {
         let router = Inkling2DenseMatrix(rows: 4, cols: 1, values: [1, 1, 1, 1])
         #expect(Op.route([1], router: router, bias: [0, 0, 0, 0], topK: 2, routeScale: 1).experts == [0, 1])
