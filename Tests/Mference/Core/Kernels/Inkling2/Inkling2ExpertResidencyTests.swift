@@ -89,6 +89,14 @@ import MferenceValidationSupport
         }
     }
 
+    /// The decode-slot experiment toggle: a count, or `fill:` and a slab cap.
+    @Test func decodeSlotToggleParses() {
+        #expect(Inkling2DecodeSlots.parse("88") == .perLayer(88))
+        #expect(Inkling2DecodeSlots.parse("0") == .evenBytes)
+        #expect(Inkling2DecodeSlots.parse("fill:1666662400") == .fill(slabBytes: 1_666_662_400))
+        for bad in ["fill:0", "fill:", "fill:x", "x", ""] { #expect(Inkling2DecodeSlots.parse(bad) == nil, "\(bad)") }
+    }
+
     @Test func largeHostsHoldEverythingAndSmallHostsStageEverything() {
         let large = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
                                                      physicalMemory: 64 << 30)

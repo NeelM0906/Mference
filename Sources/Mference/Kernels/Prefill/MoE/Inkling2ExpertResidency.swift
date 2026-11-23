@@ -65,11 +65,21 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
     /// 32 GB).
     case fill(slabBytes: Int)
 
-    /// `.perLayer(n)` from the `MFERENCE_INKLING2_DECODE_SLOTS` experiment
-    /// toggle (`0` for `.evenBytes`), if set.
+    /// The `MFERENCE_INKLING2_DECODE_SLOTS` experiment toggle, if set: `n`
+    /// for `.perLayer(n)` (`0` for `.evenBytes`), or `fill:<bytes>` for
+    /// `.fill(slabBytes:)` with slabs of at most that many bytes (to measure
+    /// a smaller staging size than the plan's on one host; the plan, and so
+    /// the product's memory estimate, does not move).
     static var fromEnvironment: Self? {
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"].flatMap(Int.init)
-            .map { $0 > 0 ? .perLayer($0) : .evenBytes }
+        guard let value = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"] else { return nil }
+        return parse(value)
+    }
+
+    static func parse(_ value: String) -> Self? {
+        if value.hasPrefix("fill:") {
+            return Int(value.dropFirst(5)).flatMap { $0 > 0 ? .fill(slabBytes: $0) : nil }
+        }
+        return Int(value).map { $0 > 0 ? .perLayer($0) : .evenBytes }
     }
 
     /// Where each staged layer's slots go: equal counts per layer (capped at
