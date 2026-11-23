@@ -828,4 +828,151 @@ kernel void inkling2_moe_decode_down(
     }
 }
 
+// MARK: - Tensor-ops grouped GEMMs (Metal 4 matmul2d; GPUs with tensor units)
+
+// The same work blocks, weight tiles and epilogues as the simdgroup kernels,
+// with each 32-deep step multiplied by `matmul2d` on the threadgroup tiles
+// (the pattern of `mpp_grouped_routed_moe_*`, which builds and passes on this
+// runtime's GPUs). Only compiled where the GPU has tensor support; the Swift
+// side falls back to the simdgroup kernels when these functions are absent,
+// and the calibration picks between the two where both exist.
+#if defined(__HAVE_TENSOR__)
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace mpp::tensor_ops;
+
+template <uint ROWS>
+static inline void i2_gate_up_block_tensor(
+    device const half* hidden, device const I2Pair* pairs, const I2Work w, device half* activation,
+    device const uchar* pool, device const float* gate_up_scales, constant I2Params& p, uint n_base,
+    threadgroup half* smem, threadgroup half2* lut, ushort tid) {
+    constexpr auto descriptor = matmul2d_descriptor(int(ROWS), int(kI2GateUpCols), int(kI2K), false, true, false);
+    matmul2d<descriptor, execution_simdgroups<4>> operation;
+    using tile_t = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>;
+    constexpr uint kThreadsPerRow = kI2Threads / ROWS;
+    device const uchar* gate = pool + ulong(w.expert) * p.expert_stride + p.gate_up_offset;
+    device const uchar* up = gate + ulong(p.F) * i2_row_bytes(p.D);
+    threadgroup half* rows_tile = smem;
+    threadgroup half* gate_tile = smem + kI2Rows * kI2Ld;
+    threadgroup half* up_tile = gate_tile + kI2GateUpCols * kI2Ld;
+    tile_t a(rows_tile, dextents<int32_t, 2>(int(kI2K), int(ROWS)), array<int32_t, 2>({1, int(kI2Ld)}));
+    tile_t g(gate_tile, dextents<int32_t, 2>(int(kI2K), int(kI2GateUpCols)), array<int32_t, 2>({1, int(kI2Ld)}));
+    tile_t u(up_tile, dextents<int32_t, 2>(int(kI2K), int(kI2GateUpCols)), array<int32_t, 2>({1, int(kI2Ld)}));
+    auto acc_gate = operation.template get_destination_cooperative_tensor<decltype(a), decltype(g), float>();
+    auto acc_up = operation.template get_destination_cooperative_tensor<decltype(a), decltype(u), float>();
+    auto product = operation.template get_destination_cooperative_tensor<decltype(a), decltype(g), float>();
+    for (int i = 0; i < acc_gate.get_capacity(); ++i) { acc_gate[i] = 0.0f; acc_up[i] = 0.0f; }
+
+    const uint a_row = tid / kThreadsPerRow, a_k = (tid % kThreadsPerRow) * (kI2K / kThreadsPerRow);
+    const bool a_valid = a_row < w.row_count;
+    device const half* a_src = hidden;
+    if (a_valid) a_src = hidden + ulong(pairs[w.pair_start + a_row].token) * p.hidden_stride + a_k;
+
+    for (uint k0 = 0; k0 < p.D; k0 += kI2K) {
+        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
+        if (tid < kI2GateUpCols) {
+            i2_dequant_tile(gate, p.D, n_base, kI2GateUpCols, k0, lut, gate_tile, tid, kI2GateUpCols);
+        } else {
+            i2_dequant_tile(up, p.D, n_base, kI2GateUpCols, k0, lut, up_tile, tid - kI2GateUpCols, kI2GateUpCols);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = 0; i < product.get_capacity(); ++i) product[i] = 0.0f;
+        operation.run(a, g, product);
+        for (int i = 0; i < acc_gate.get_capacity(); ++i) acc_gate[i] += product[i];
+        for (int i = 0; i < product.get_capacity(); ++i) product[i] = 0.0f;
+        operation.run(a, u, product);
+        for (int i = 0; i < acc_up.get_capacity(); ++i) acc_up[i] += product[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float scale = gate_up_scales[w.expert];
+    for (int i = 0; i < acc_gate.get_capacity(); ++i) {
+        if (!acc_gate.is_valid_element(i)) continue;
+        const auto position = acc_gate.get_multidimensional_index(i);
+        const uint n = uint(position[0]), m = uint(position[1]);
+        if (m < w.row_count) {
+            activation[ulong(w.pair_start + m) * p.F + n_base + n] =
+                half(i2_situ(acc_gate[i] * scale, acc_up[i] * scale));
+        }
+    }
+}
+
+template <uint ROWS>
+static inline void i2_down_block_tensor(
+    device const half* activation, device const I2Pair* pairs, const I2Work w, device float* partials,
+    device const uchar* pool, device const float* down_scales, constant I2Params& p, uint n_base,
+    threadgroup half* smem, threadgroup half2* lut, ushort tid) {
+    constexpr auto descriptor = matmul2d_descriptor(int(ROWS), int(kI2DownCols), int(kI2K), false, true, false);
+    matmul2d<descriptor, execution_simdgroups<4>> operation;
+    using tile_t = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>;
+    constexpr uint kThreadsPerRow = kI2Threads / ROWS;
+    device const uchar* down = pool + ulong(w.expert) * p.expert_stride + p.down_offset;
+    threadgroup half* rows_tile = smem;
+    threadgroup half* weight_tile = smem + kI2Rows * kI2Ld;
+    tile_t a(rows_tile, dextents<int32_t, 2>(int(kI2K), int(ROWS)), array<int32_t, 2>({1, int(kI2Ld)}));
+    tile_t b(weight_tile, dextents<int32_t, 2>(int(kI2K), int(kI2DownCols)), array<int32_t, 2>({1, int(kI2Ld)}));
+    auto acc = operation.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
+    auto product = operation.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
+    for (int i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
+
+    const uint a_row = tid / kThreadsPerRow, a_k = (tid % kThreadsPerRow) * (kI2K / kThreadsPerRow);
+    const bool a_valid = a_row < w.row_count;
+    device const half* a_src = activation + ulong(w.pair_start + (a_valid ? a_row : 0u)) * p.F + a_k;
+
+    for (uint k0 = 0; k0 < p.F; k0 += kI2K) {
+        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
+        i2_dequant_tile(down, p.F, n_base, kI2DownCols, k0, lut, weight_tile, tid, kI2Threads);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = 0; i < product.get_capacity(); ++i) product[i] = 0.0f;
+        operation.run(a, b, product);
+        for (int i = 0; i < acc.get_capacity(); ++i) acc[i] += product[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float scale = down_scales[w.expert];
+    for (int i = 0; i < acc.get_capacity(); ++i) {
+        if (!acc.is_valid_element(i)) continue;
+        const auto position = acc.get_multidimensional_index(i);
+        const uint n = uint(position[0]), m = uint(position[1]);
+        if (m < w.row_count) {
+            const I2Pair pair = pairs[w.pair_start + m];
+            const float weight = (p.flags & 1u) != 0u ? 1.0f : pair.weight;
+            partials[ulong(pair.token * p.top_k + pair.rank) * p.D + n_base + n] = (acc[i] * scale) * weight;
+        }
+    }
+}
+
+#define I2_TENSOR_KERNEL(NAME, BODY, IN_T, IN_NAME, OUT_T, OUT_NAME, SCALES, ROWS, COUNT, BASE, COLS) \
+kernel void NAME(                                                                           \
+    device const IN_T* IN_NAME           [[buffer(0)]],                                     \
+    device const I2Pair* pairs           [[buffer(1)]],                                     \
+    device const I2Work* work            [[buffer(2)]],                                     \
+    device const uint* work_count        [[buffer(3)]],                                     \
+    device OUT_T* OUT_NAME               [[buffer(4)]],                                     \
+    device const uchar* pool             [[buffer(5)]],                                     \
+    device const float* SCALES           [[buffer(6)]],                                     \
+    constant I2Params& p                 [[buffer(7)]],                                     \
+    uint2 tgid  [[threadgroup_position_in_grid]],                                           \
+    ushort tid  [[thread_index_in_threadgroup]]) {                                          \
+    if (tgid.y >= work_count[COUNT]) return;                                                \
+    threadgroup half smem[3 * kI2Rows * kI2Ld];                                             \
+    threadgroup half2 lut[256];                                                             \
+    if (kI2Encoding == kI2NVFP4) {                                                          \
+        i2_fill_lut(lut, tid, kI2Threads);                                                  \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
+    }                                                                                       \
+    BODY<ROWS>(IN_NAME, pairs, work[BASE + tgid.y], OUT_NAME, pool, SCALES, p, tgid.x * COLS, smem, lut, tid); \
+}
+
+I2_TENSOR_KERNEL(inkling2_moe_gate_up_tensor, i2_gate_up_block_tensor, half, hidden, half, activation,
+                 gate_up_scales, 64, 0, 0u, kI2GateUpCols)
+I2_TENSOR_KERNEL(inkling2_moe_gate_up_tail_tensor, i2_gate_up_block_tensor, half, hidden, half, activation,
+                 gate_up_scales, 32, 1, p.work_tail_base, kI2GateUpCols)
+I2_TENSOR_KERNEL(inkling2_moe_down_tensor, i2_down_block_tensor, half, activation, float, partials,
+                 down_scales, 64, 0, 0u, kI2DownCols)
+I2_TENSOR_KERNEL(inkling2_moe_down_tail_tensor, i2_down_block_tensor, half, activation, float, partials,
+                 down_scales, 32, 1, p.work_tail_base, kI2DownCols)
+
+#undef I2_TENSOR_KERNEL
+#endif
+
 #undef I2_UNROLL

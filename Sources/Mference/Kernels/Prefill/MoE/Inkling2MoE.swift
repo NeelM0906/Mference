@@ -35,6 +35,14 @@ enum Inkling2MoEInputQuantization: UInt32, CaseIterable, Sendable {
     case vendorRequired = 2
 }
 
+/// Which grouped-GEMM kernels prefill runs: 8x8 simdgroup matrices (every
+/// GPU), or Metal 4 `matmul2d` tensor operations (GPUs that build them).
+/// `Inkling2MoECalibration` picks per GPU by timing both.
+enum Inkling2MoEGEMMVariant: String, CaseIterable, Sendable, Codable {
+    case simdgroup
+    case tensorOps
+}
+
 /// Shape of one routed-expert layer.
 struct Inkling2MoEShape: Equatable, Sendable {
     var d: Int
@@ -272,11 +280,16 @@ final class Inkling2MoEKernels {
     static let decodeRowsPerThreadgroup = 16
     static let decodeDownRowsPerThreadgroup = 8
 
-    private struct Encoded {
+    private struct Grouped {
         let gateUp: MTLComputePipelineState
         let gateUpTail: MTLComputePipelineState
         let down: MTLComputePipelineState
         let downTail: MTLComputePipelineState
+    }
+
+    private struct Encoded {
+        let simdgroup: Grouped
+        let tensorOps: Grouped?
         let decodeGateUp: MTLComputePipelineState
         let decodeDown: MTLComputePipelineState
         let inputQuant: MTLComputePipelineState
@@ -310,18 +323,42 @@ final class Inkling2MoEKernels {
         plan = try make("inkling2_route_plan")
         scatter = try make("inkling2_route_scatter")
         reduce = try make("inkling2_moe_reduce")
+        // The tensor-ops kernels exist only where the GPU builds them
+        // (`__HAVE_TENSOR__`); a pipeline that fails leaves the simdgroup path.
+        let hasTensorOps = library.functionNames.contains("inkling2_moe_gate_up_tensor")
         var encoded: [Inkling2MoEEncoding: Encoded] = [:]
         for encoding in Inkling2MoEEncoding.allCases {
+            let tensorOps: Grouped? = hasTensorOps ? try? Grouped(
+                gateUp: make("inkling2_moe_gate_up_tensor", encoding: encoding),
+                gateUpTail: make("inkling2_moe_gate_up_tail_tensor", encoding: encoding),
+                down: make("inkling2_moe_down_tensor", encoding: encoding),
+                downTail: make("inkling2_moe_down_tail_tensor", encoding: encoding)) : nil
             encoded[encoding] = Encoded(
-                gateUp: try make("inkling2_moe_gate_up", encoding: encoding),
-                gateUpTail: try make("inkling2_moe_gate_up_tail", encoding: encoding),
-                down: try make("inkling2_moe_down", encoding: encoding),
-                downTail: try make("inkling2_moe_down_tail", encoding: encoding),
+                simdgroup: Grouped(
+                    gateUp: try make("inkling2_moe_gate_up", encoding: encoding),
+                    gateUpTail: try make("inkling2_moe_gate_up_tail", encoding: encoding),
+                    down: try make("inkling2_moe_down", encoding: encoding),
+                    downTail: try make("inkling2_moe_down_tail", encoding: encoding)),
+                tensorOps: tensorOps,
                 decodeGateUp: try make("inkling2_moe_decode_gate_up", encoding: encoding),
                 decodeDown: try make("inkling2_moe_decode_down", encoding: encoding),
                 inputQuant: try make("inkling2_moe_input_quant", encoding: encoding))
         }
         self.encoded = encoded
+    }
+
+    /// The grouped-GEMM kernels `encodeGroupedExperts` uses; set it from
+    /// `Inkling2MoECalibration`. An unavailable choice falls back to
+    /// `.simdgroup`.
+    var variant: Inkling2MoEGEMMVariant = .simdgroup
+
+    /// Variants this GPU built for every encoding.
+    var availableVariants: [Inkling2MoEGEMMVariant] {
+        encoded.values.allSatisfy { $0.tensorOps != nil } ? [.simdgroup, .tensorOps] : [.simdgroup]
+    }
+
+    private func grouped(_ kernels: Encoded) -> Grouped {
+        variant == .tensorOps ? (kernels.tensorOps ?? kernels.simdgroup) : kernels.simdgroup
     }
 
     private static func params(_ shape: Inkling2MoEShape, pool: Inkling2ExpertPool, hiddenStride: Int,
@@ -463,8 +500,9 @@ final class Inkling2MoEKernels {
         var p = Self.params(shape, pool: pool, hiddenStride: input.stride, workTailBase: scratch.fullBlockCapacity,
                             routeWeightInDownInput: vendor)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)
+        let gemm = grouped(kernels)
 
-        encoder.setComputePipelineState(kernels.gateUp)
+        encoder.setComputePipelineState(gemm.gateUp)
         encoder.setBuffer(input.buffer, offset: input.offset, index: 0)
         encoder.setBuffer(scratch.pairs, offset: 0, index: 1)
         encoder.setBuffer(scratch.work, offset: 0, index: 2)
@@ -475,7 +513,7 @@ final class Inkling2MoEKernels {
         encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 7)
         encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 0,
                                      threadsPerThreadgroup: threads)
-        encoder.setComputePipelineState(kernels.gateUpTail)
+        encoder.setComputePipelineState(gemm.gateUpTail)
         encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 12,
                                      threadsPerThreadgroup: threads)
 
@@ -494,13 +532,13 @@ final class Inkling2MoEKernels {
             encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 7)
         }
 
-        encoder.setComputePipelineState(kernels.down)
+        encoder.setComputePipelineState(gemm.down)
         encoder.setBuffer(scratch.activation, offset: 0, index: 0)
         encoder.setBuffer(scratch.partials, offset: 0, index: 4)
         encoder.setBuffer(pool.downScales, offset: pool.downScalesOffset, index: 6)
         encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 24,
                                      threadsPerThreadgroup: threads)
-        encoder.setComputePipelineState(kernels.downTail)
+        encoder.setComputePipelineState(gemm.downTail)
         encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 36,
                                      threadsPerThreadgroup: threads)
     }
@@ -624,6 +662,19 @@ enum Inkling2ShaderLibrary {
         return .module
     }()
 
+    /// FNV-1a of the module's source text (0 when it is missing), so a
+    /// calibration recorded for one build is not reused by another.
+    static func sourceHash(module: String) -> UInt64 {
+        guard let url = bundle.url(forResource: module, withExtension: "metal", subdirectory: subdirectory),
+              let data = try? Data(contentsOf: url) else { return 0 }
+        var hash: UInt64 = 0xCBF29CE484222325
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001B3
+        }
+        return hash
+    }
+
     static func compile(device: MTLDevice, module: String) throws -> MTLLibrary {
         guard let url = bundle.url(forResource: module, withExtension: "metal", subdirectory: subdirectory) else {
             throw MetalError.missingShaderResource(module)
@@ -636,5 +687,110 @@ enum Inkling2ShaderLibrary {
         } catch {
             throw MetalError.libraryCompileFailed("\(error)")
         }
+    }
+}
+
+/// Picks the grouped-GEMM variant per GPU by timing a prefill visit of the
+/// model's own layer, instead of a hard-coded family or chip gate. The
+/// choice is kept for the process, keyed by GPU, shader source and chunk
+/// size, so later loads of the model skip the timing.
+enum Inkling2MoECalibration {
+    struct Key: Hashable {
+        let device: String
+        let shaderHash: UInt64
+        let encoding: Inkling2MoEEncoding
+        let tokens: Int
+    }
+
+    struct Result: Sendable {
+        let variant: Inkling2MoEGEMMVariant
+        /// Best GPU seconds per visit, per variant timed.
+        let seconds: [Inkling2MoEGEMMVariant: Double]
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var results: [Key: Result] = [:]
+
+    /// Times `repeats` prefill visits of `tokens` rows (synthetic inputs,
+    /// uniform routes over the pool's experts) with each variant the kernels
+    /// built, sets `kernels.variant` to the fastest and returns the timings.
+    /// Overwrites `scratch`'s route buffers.
+    @discardableResult
+    static func calibrate(context: MetalContext, kernels: Inkling2MoEKernels, pool: Inkling2ExpertPool,
+                          scratch: Inkling2MoEPrefillScratch, tokens requested: Int? = nil,
+                          repeats: Int = 3) throws -> Result {
+        let shape = scratch.shape
+        let tokens = min(requested ?? scratch.maxTokens, scratch.maxTokens)
+        let key = Key(device: context.device.name,
+                      shaderHash: Inkling2ShaderLibrary.sourceHash(module: Inkling2MoEKernels.module),
+                      encoding: pool.encoding, tokens: tokens)
+        lock.lock()
+        let cached = results[key]
+        lock.unlock()
+        if let cached {
+            kernels.variant = cached.variant
+            return cached
+        }
+        let variants = kernels.availableVariants
+        if variants.count == 1 {
+            let result = Result(variant: variants[0], seconds: [:])
+            lock.lock(); results[key] = result; lock.unlock()
+            kernels.variant = result.variant
+            return result
+        }
+        guard let hidden = context.device.makeBuffer(length: tokens * shape.d * 2, options: .storageModeShared),
+              let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared) else {
+            throw PrefillGroupedRoutedMoEError.allocationFailed("Inkling 2 calibration")
+        }
+        var state: UInt64 = 0x9E3779B97F4A7C15
+        func next() -> UInt64 {
+            state &+= 0x9E3779B97F4A7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+            z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+            return z ^ (z >> 31)
+        }
+        let h = hidden.contents().bindMemory(to: Float16.self, capacity: tokens * shape.d)
+        for i in 0..<(tokens * shape.d) { h[i] = Float16(Float(Int(next() % 2001) - 1000) / 1000) }
+        let ids = scratch.ids.contents().bindMemory(to: UInt32.self, capacity: tokens * shape.topK)
+        let weights = scratch.routeWeights.contents().bindMemory(to: Float.self, capacity: tokens * shape.topK)
+        for t in 0..<tokens {
+            var chosen: [UInt32] = []
+            while chosen.count < shape.topK {
+                let e = UInt32(next() % UInt64(shape.experts))
+                if !chosen.contains(e) { chosen.append(e) }
+            }
+            for r in 0..<shape.topK {
+                ids[t * shape.topK + r] = chosen[r]
+                weights[t * shape.topK + r] = 1
+            }
+        }
+        let previous = kernels.variant
+        var seconds: [Inkling2MoEGEMMVariant: Double] = [:]
+        for variant in variants {
+            kernels.variant = variant
+            var best = Double.infinity
+            for run in 0..<(repeats + 1) {
+                guard let cb = context.queue.makeCommandBuffer(), let encoder = cb.makeComputeCommandEncoder() else {
+                    throw PrefillGroupedRoutedMoEError.allocationFailed("Inkling 2 calibration encoder")
+                }
+                kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: pool, scratch: scratch,
+                                      tokens: tokens, out: out, outStride: shape.d)
+                encoder.endEncoding()
+                cb.commit()
+                cb.waitUntilCompleted()
+                guard cb.status == .completed else {
+                    kernels.variant = previous
+                    throw MetalError.commandBufferFailed("Inkling 2 calibration: \(String(describing: cb.error))")
+                }
+                if run > 0 { best = min(best, cb.gpuEndTime - cb.gpuStartTime) }   // run 0 warms up
+            }
+            seconds[variant] = best
+        }
+        let winner = seconds.min { $0.value < $1.value }!.key
+        let result = Result(variant: winner, seconds: seconds)
+        lock.lock(); results[key] = result; lock.unlock()
+        kernels.variant = winner
+        return result
     }
 }

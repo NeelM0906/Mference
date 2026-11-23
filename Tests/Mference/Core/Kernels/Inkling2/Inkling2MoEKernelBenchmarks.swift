@@ -139,6 +139,16 @@ import MferenceValidationSupport
                                  tokens, skewed ? "skewed" : "uniform", pool.encoding == .nvfp4 ? "nvfp4" : "q8_0", work, tails,
                                  plan * 1000, experts * 1000, flops / experts / 1e12, reduce * 1000,
                                  total * 1000, flops / total / 1e12))
+                    if !skewed, kernels.availableVariants.contains(.tensorOps) {
+                        kernels.variant = .tensorOps
+                        let tensor = Self.best(context) {
+                            kernels.encodePrefill($0, hidden: hidden, hiddenStride: Self.shape.d, pool: pool,
+                                                  scratch: scratch, tokens: tokens, out: out, outStride: Self.shape.d)
+                        }
+                        kernels.variant = .simdgroup
+                        print(String(format: "[inkling2-moe-kbench] rows=%d enc=%@ tensor-ops total %.3f ms (%.2f TFLOP/s)",
+                                     tokens, pool.encoding == .nvfp4 ? "nvfp4" : "q8_0", tensor * 1000, flops / tensor / 1e12))
+                    }
                     if !skewed {
                         for mode in [Inkling2MoEInputQuantization.q8_0Blocks, .vendorRequired] {
                             let quantized = Self.best(context) {

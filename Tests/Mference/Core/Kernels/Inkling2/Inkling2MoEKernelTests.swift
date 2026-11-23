@@ -394,4 +394,57 @@ import MferenceValidationSupport
             #expect(worst < 2e-3, "weighted \(weighted): worst row \(worstRow) rel err \(worst)")
         }
     }
+
+    /// The tensor-ops (`matmul2d`) grouped kernels against the reference,
+    /// where this GPU builds them (full and tail blocks at 200 tokens).
+    @Test(arguments: [Inkling2MoEEncoding.nvfp4, .q8_0])
+    func tensorOpsMatchReference(encoding: Inkling2MoEEncoding) throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        guard kernels.availableVariants.contains(.tensorOps) else {
+            print("[inkling2-moe] tensor-ops kernels not built on \(context.device.name); simdgroup path only")
+            return
+        }
+        kernels.variant = .tensorOps
+        let shape = Self.small
+        let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: encoding, shape: shape,
+                                                       seed: 0x2A40, quantized: true)
+        let tokens = 200
+        let (hidden, rows) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2A41)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2A42)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+        Inkling2MoETestSupport.write(routes.ids, to: scratch.ids)
+        Inkling2MoETestSupport.write(routes.weights, to: scratch.routeWeights)
+        let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared)!
+        let cb = Inkling2MoETestSupport.run(context) { encoder in
+            kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: synthetic.pool,
+                                  scratch: scratch, tokens: tokens, out: out, outStride: shape.d)
+        }
+        #expect(cb.status == .completed, "\(String(describing: cb.error))")
+        let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
+        let want = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
+        let err = RelError.compute(actual: got, reference: want.flatMap { $0 })
+        #expect(err < Self.routedTolerance, "rel err \(err)")
+    }
+
+    @Test func calibrationPicksAnAvailableVariantAndKeepsIt() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Self.small
+        let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: .nvfp4, shape: shape,
+                                                       seed: 0x2A43, quantized: true)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: 96)
+        let first = try Inkling2MoECalibration.calibrate(context: context, kernels: kernels, pool: synthetic.pool,
+                                                         scratch: scratch)
+        #expect(kernels.availableVariants.contains(first.variant))
+        #expect(kernels.variant == first.variant)
+        if kernels.availableVariants.count > 1 {
+            #expect(Set(first.seconds.keys) == Set(kernels.availableVariants))
+            #expect(first.seconds.values.allSatisfy { $0 > 0 && $0.isFinite })
+        }
+        let other = try Inkling2MoEKernels(context: context)
+        let second = try Inkling2MoECalibration.calibrate(context: context, kernels: other, pool: synthetic.pool,
+                                                          scratch: scratch)
+        #expect(second.variant == first.variant && other.variant == first.variant)
+    }
 }
