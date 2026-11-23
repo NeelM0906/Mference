@@ -119,18 +119,20 @@ struct Inkling2PrecisionRoutingTests {
             let visit: Int
             let layer: Int
             let slot: Int
-            /// Per token: `.fp32`'s own top-8 at the runner's state, ascending.
+            /// Per token: the reference's own top-8 at the trace's state,
+            /// ascending. The `fp32_*` names are the schema's; at another
+            /// `precision` they hold that precision's values.
             let own_experts: [[Int]]
-            /// Per token: `.fp32`'s 8th minus 9th selection score there.
+            /// Per token: the reference's 8th minus 9th selection score there.
             let fp32_margins: [Float]
-            /// Per token: how far the runner's lowest expert lies below
-            /// `.fp32`'s 8th selection score (0 when the sets agree; never
+            /// Per token: how far the trace's lowest expert lies below the
+            /// reference's 8th selection score (0 when the sets agree; never
             /// below the margin when they differ).
             let shortfalls: [Float]
             let differs: [Bool]
-            /// Per token: the relative L2 error of `.fp32`'s increment over
-            /// this visit (output minus input, the runner's input) against
-            /// the runner's, `.fp32` using the runner's experts.
+            /// Per token: the relative L2 error of the reference's increment
+            /// over this visit (output minus input, the trace's input)
+            /// against the trace's, the reference using the trace's experts.
             let increment_rel_l2: [Float]
             /// Per token: G6a's element error, the output's largest element
             /// difference relative to the record's largest magnitude, or to
@@ -473,6 +475,9 @@ struct Inkling2PrecisionRoutingTests {
         let finalNormErrors: [Float]? = finalNorm.map { rows in
             rows.indices.map { r in
                 let got = own.finalHidden[n - rows.count + r], want = rows[r]
+                // As G6a's `relative`: infinite on any non-finite value
+                // (`max()` would pass over a NaN), which the check below refuses.
+                guard got.allSatisfy(\.isFinite), want.allSatisfy(\.isFinite) else { return Float.infinity }
                 let diff = zip(got, want).map { abs($0 - $1) }.max()!
                 return diff / max(want.map(abs).max()!, 1e-6)
             }
