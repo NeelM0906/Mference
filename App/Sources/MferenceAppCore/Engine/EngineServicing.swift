@@ -103,7 +103,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick: "Everyday chat, mail and web answers. Runs on every Mac and iPhone."
         case .deep: "Harder reasoning and long documents. Drafts several tokens at once."
-        case .inkling2Mini: "Deep-tier mixture-of-experts. Experts stream from the SSD."
+        case .inkling2Mini: "Deep-tier mixture-of-experts model."
         case .qwen36: "Large mixture-of-experts. Experts stream from the SSD."
         case .minicpm5: "Very small and quick. Good for short replies."
         case .maple: "Experimental model."

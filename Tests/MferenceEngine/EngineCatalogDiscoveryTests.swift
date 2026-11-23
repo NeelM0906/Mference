@@ -211,6 +211,15 @@ struct EngineCatalogDiscoveryTests {
         let small = EngineCatalogDiscovery.discover(roots: [Self.library], ggufDirectories: [],
                                                     fileSystem: mixed, physicalMemory: 16 << 30)
         #expect(small.unavailableReason(for: "inkling-2-mini-ud-q4_k_xl") == reason)
+        // The runtime sizes this slot before loading (32K context), and only
+        // this slot.
+        let estimate = EngineProductSlot.inkling2Mini.estimatedResidentBytes(installBytes: 17_662_322_836,
+                                                                             physicalMemory: 32 << 30)
+        #expect(estimate == Inkling2MemoryFootprint.estimate(installBytes: 17_662_322_836,
+                                                             physicalMemory: 32 << 30)?.bytes(contextTokens: 32_768))
+        #expect(EngineProductSlot.allCases.filter {
+            $0.estimatedResidentBytes(installBytes: 1 << 30, physicalMemory: 64 << 30) != nil
+        } == [.inkling2Mini])
         // Only this slot has a floor of the engine's own.
         #expect(EngineProductSlot.allCases.filter { $0.minimumPhysicalMemory != nil } == [.inkling2Mini])
         #expect(EngineProductSlot.inkling2Mini.memoryFloorReason(physicalMemory: 32 << 30) == nil)

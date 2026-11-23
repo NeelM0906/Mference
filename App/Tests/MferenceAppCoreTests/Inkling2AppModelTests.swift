@@ -20,6 +20,7 @@ import Testing
         #expect(AppModel.allCases.filter { $0.group == .recommended } == [.quick, .deep])
         #expect(model.engineLabel == "Mference" && model.isPreview && model.supportsThinking)
         #expect(model.name == "Inkling 2 Mini" && model.shortName == "Inkling 2" && model.detail == "Mini")
+        #expect(model.summary == "Deep-tier mixture-of-experts model.")
     }
 
     @Test func itIsOfferedFromThirtyTwoGigabytes() {
@@ -38,13 +39,20 @@ import Testing
             #expect(fit.isOffered(.inkling2Mini))
             #expect(fit.verdict(for: .inkling2Mini, sizeBytes: Self.installSize) == .fits)
         }
-        // The expert residency plan: below 48 GB the looped core and two
-        // staging slabs (about 12.2 GB of the install), from 48 GB all of it;
-        // plus 2 GB for context.
+        // The runtime's figures (its expert residency plan, 32K context):
+        // below 48 GB the looped core, two staging slabs, the dense weights
+        // and state, about 12.2 GB before context plus 1 GiB of global KV;
+        // from 48 GB the whole install plus the same state.
         let at32 = MemoryFit(physicalMemory: 32 << 30).estimatedResidentBytes(.inkling2Mini, sizeBytes: Self.installSize)
-        #expect(at32 > 14_000_000_000 && at32 < 14_600_000_000)
+        #expect(at32 == EngineService.runtimeResidentEstimate(.inkling2Mini, sizeBytes: Self.installSize,
+                                                              physicalMemory: 32 << 30))
+        #expect(at32 > 13_000_000_000 && at32 < 13_600_000_000)
         let at48 = MemoryFit(physicalMemory: 48 << 30).estimatedResidentBytes(.inkling2Mini, sizeBytes: Self.installSize)
-        #expect(at48 == Self.installSize + (2_048 << 20))
+        #expect(at48 > 19_800_000_000 && at48 < 20_300_000_000)
+        // Every other model keeps the app's own profile.
+        #expect(EngineService.runtimeResidentEstimate(.qwen36, sizeBytes: 1 << 30, physicalMemory: 32 << 30) == nil)
+        #expect(MemoryFit(physicalMemory: 32 << 30).estimatedResidentBytes(.qwen36, sizeBytes: 10_000_000_000)
+                == 3_000_000_000 + (2_048 << 20))
         // The other models' gates are unchanged.
         #expect(EngineService.memoryGateReason(.qwen36, physicalMemory: 8 << 30) == nil)
         #expect(EngineService.memoryGateReason(.maple, physicalMemory: 8 << 30) == nil)

@@ -81,6 +81,24 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         }
     }
 
+    /// The context the product's memory estimates assume (32K tokens).
+    public static let estimateContextTokens = 32_768
+
+    /// The bytes this model keeps resident with `installBytes` on disk on a
+    /// Mac with `physicalMemory`, at `contextTokens`, when the runtime can
+    /// say before loading it; nil for the models it cannot (the app then uses
+    /// its own profile). Inkling 2 Mini: `Inkling2MemoryFootprint`, which
+    /// follows the runtime's expert residency plan.
+    public func estimatedResidentBytes(installBytes: UInt64, physicalMemory: UInt64,
+                                       contextTokens: Int = EngineProductSlot.estimateContextTokens) -> UInt64? {
+        switch self {
+        case .inkling2Mini:
+            Inkling2MemoryFootprint.estimate(installBytes: installBytes, physicalMemory: physicalMemory)?
+                .bytes(contextTokens: contextTokens)
+        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        }
+    }
+
     /// Why this model is not offered on a Mac with `physicalMemory` bytes, or
     /// nil when it is.
     public func memoryFloorReason(physicalMemory: UInt64) -> String? {
