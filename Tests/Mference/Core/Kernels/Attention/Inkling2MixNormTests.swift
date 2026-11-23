@@ -52,7 +52,15 @@ import MferenceValidationSupport
             #expect(a.map(\.bitPattern) == b.map(\.bitPattern), "query \(j): normed FP16 bytes")
             guard dual else { continue }
             let wide = S.readFloats(normed32[j], count: rows * normedStride)
-            let x = (0..<rows).flatMap { t in mixGot[(t * q * width + j * width)..<(t * q * width + (j + 1) * width)] }
+            // Query j's rows of the raw mix, gathered in typed steps: Swift
+            // 6.3's type checker gives up on the one-line range expression.
+            var x: [Float] = []
+            x.reserveCapacity(rows * width)
+            for t in 0..<rows {
+                let start: Int = t * q * width + j * width
+                let end: Int = start + width
+                x.append(contentsOf: mixGot[start..<end])
+            }
             let got = (0..<rows).flatMap { t in wide[(t * normedStride)..<(t * normedStride + width)] }
             let reference = Inkling2NormRef.weightedRMS(x, rows: rows, width: width, weight: weights[j])
             #expect(RelError.computeStrict(actual: got, reference: reference) < 1e-5, "query \(j): FP32 normed rows")
