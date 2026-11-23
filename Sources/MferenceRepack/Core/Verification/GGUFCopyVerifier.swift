@@ -21,6 +21,7 @@ public enum GGUFCopyVerifier {
         defer { close(ggufFD) }
         let ggufSize = try Posix.fileSize(fd: ggufFD, path: ggufPath)
         let (header, _) = try LocalGGUFSource.readHeader(path: ggufPath, size: ggufSize)
+        try requireTiledDataSection(header: header, fileSize: ggufSize, path: ggufPath)
 
         let weightsPath = (installDirectory as NSString).appendingPathComponent("model_weights.bin")
         let resident = try readResidentIndex(path: weightsPath)
@@ -63,6 +64,10 @@ public enum GGUFCopyVerifier {
                 guard let entry = layout[layer], let slice = entry.tensors[role] else {
                     throw RepackError.missingTensor(name: "\(t.name) in layout.json")
                 }
+                guard slice.format == t.type.name else {
+                    throw RepackError.dtypeMismatch(name: t.name,
+                                                    detail: "layout.json says \(slice.format ?? "nil")")
+                }
                 guard slice.size * UInt64(entry.experts) == t.sizeBytes else {
                     throw RepackError.shapeMismatch(name: t.name, detail: "expert slices do not tile the tensor")
                 }
@@ -78,7 +83,8 @@ public enum GGUFCopyVerifier {
                 guard let entry = resident[t.name] else {
                     throw RepackError.missingTensor(name: "\(t.name) in model_weights.bin")
                 }
-                guard entry.size == t.sizeBytes, entry.dtype == t.type.residentDtype else {
+                let shape = RepackPlanner.padTo4(t.ne.reversed())
+                guard entry.size == t.sizeBytes, entry.dtype == t.type.residentDtype, entry.shape == shape else {
                     throw RepackError.dtypeMismatch(name: t.name,
                                                     detail: "install holds \(entry.size) bytes of dtype \(entry.dtype)")
                 }
@@ -94,7 +100,29 @@ public enum GGUFCopyVerifier {
         return Result(residentTensors: residentCount, expertTensors: expertCount, bytesCompared: compared)
     }
 
-    struct ResidentEntryRef { let dtype: UInt8; let offset: UInt64; let size: UInt64 }
+    struct ResidentEntryRef { let dtype: UInt8; let offset: UInt64; let size: UInt64; let shape: [UInt32] }
+
+    /// Independent of the parser's offsets being right: the tensors, in file
+    /// order, must start at the data section and follow each other with
+    /// nothing but alignment padding, up to the end of the file. A wrong data
+    /// offset or tensor size in the parser cannot then go unnoticed by a
+    /// comparison that uses those same offsets on both sides.
+    static func requireTiledDataSection(header: GGUF.Header, fileSize: UInt64, path: String) throws {
+        let sorted = header.tensors.sorted { $0.absoluteOffset < $1.absoluteOffset }
+        var cursor = header.dataOffset
+        for t in sorted {
+            guard t.absoluteOffset == cursor else {
+                throw RepackError.ggufInvalid(path: path,
+                    detail: "\(t.name) starts at \(t.absoluteOffset), expected \(cursor) (tensors do not tile the data)")
+            }
+            let end = t.absoluteOffset + t.sizeBytes
+            cursor = (end + header.alignment - 1) / header.alignment * header.alignment
+            if t.name == sorted.last?.name { cursor = end }
+        }
+        guard cursor <= fileSize, fileSize - cursor < header.alignment else {
+            throw RepackError.ggufInvalid(path: path, detail: "data ends at \(cursor), file at \(fileSize)")
+        }
+    }
 
     /// Name -> (dtype, absolute offset, size) from the resident index.
     static func readResidentIndex(path: String) throws -> [String: ResidentEntryRef] {
@@ -123,7 +151,8 @@ public enum GGUFCopyVerifier {
                 throw RepackError.configurationInvalid(detail: "resident index name out of range")
             }
             let name = String(decoding: region[nameOffset..<(nameOffset + nameLength)], as: UTF8.self)
-            out[name] = ResidentEntryRef(dtype: region[p + 6], offset: u64(region, p + 8), size: u64(region, p + 16))
+            out[name] = ResidentEntryRef(dtype: region[p + 6], offset: u64(region, p + 8), size: u64(region, p + 16),
+                                         shape: (0..<4).map { u32(region, p + 24 + 4 * $0) })
         }
         return out
     }
@@ -132,7 +161,7 @@ public enum GGUFCopyVerifier {
         let file: String
         let stride: UInt64
         let experts: Int
-        let tensors: [String: (offset: UInt64, size: UInt64)]
+        let tensors: [String: (offset: UInt64, size: UInt64, format: String?)]
     }
 
     /// Layer -> file, stride, expert count and expert-0 slices from `layout.json`.
@@ -151,13 +180,13 @@ public enum GGUFCopyVerifier {
                   let experts = layer["experts"] as? [[String: Any]], let first = experts.first,
                   let tensors = first["tensors"] as? [String: [String: Any]] else { continue }
             let stride = (layer["expertStride"] as? NSNumber)?.uint64Value ?? top
-            var slices: [String: (offset: UInt64, size: UInt64)] = [:]
+            var slices: [String: (offset: UInt64, size: UInt64, format: String?)] = [:]
             for (role, t) in tensors {
                 guard let o = (t["offset"] as? NSNumber)?.uint64Value,
                       let s = (t["size"] as? NSNumber)?.uint64Value else {
                     throw RepackError.configurationInvalid(detail: "layout.json tensor \(role) is malformed")
                 }
-                slices[role] = (o, s)
+                slices[role] = (o, s, t["format"] as? String)
             }
             for (e, expert) in experts.enumerated() {
                 guard (expert["offset"] as? NSNumber)?.uint64Value == UInt64(e) * stride else {

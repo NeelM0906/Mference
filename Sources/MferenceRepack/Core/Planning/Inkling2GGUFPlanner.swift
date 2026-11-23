@@ -102,7 +102,9 @@ enum Inkling2GGUFPlanner {
         var cursor = indexSize
         var entries: [ResidentEntry] = []
         for t in tensors {
-            guard t.ne.count <= 4 else { throw RepackError.shapeMismatch(name: t.name, detail: "rank > 4") }
+            guard t.ne.count <= 4, t.ne.allSatisfy({ $0 <= UInt64(UInt32.max) }) else {
+                throw RepackError.shapeMismatch(name: t.name, detail: "rank > 4 or a dimension past UInt32")
+            }
             cursor = alignUp(cursor, residentAlignment)
             // Row-major logical shape: GGML ne reversed.
             let shape = RepackPlanner.padTo4(t.ne.reversed())

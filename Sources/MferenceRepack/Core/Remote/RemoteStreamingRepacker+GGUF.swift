@@ -39,9 +39,11 @@ extension RemoteStreamingRepacker {
         let provider: SourceByteProvider
         if let local = options.localGGUFPath {
             progress(.hashingOutput(local))
-            try LocalGGUFSource.verify(path: local, against: shard, audit: audit)
-            (header, metadataBytes) = try LocalGGUFSource.readHeader(path: local, size: shard.size)
+            let identity = try LocalGGUFSource.verify(path: local, against: shard, audit: audit)
+            (header, metadataBytes) = try LocalGGUFSource.readHeader(path: local, size: shard.size,
+                                                                     identity: identity)
             provider = LocalFileSourceByteProvider(files: [shard.path: local],
+                                                   identities: [shard.path: identity],
                                                    writeTileBytes: options.writeTileBytes)
         } else {
             let snapshot = try await RemoteGGUFSnapshotLoader.load(remote: remote, pin: pin, audit: audit)

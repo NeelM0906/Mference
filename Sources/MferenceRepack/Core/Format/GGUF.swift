@@ -294,7 +294,9 @@ enum GGUF {
                     throw RepackError.ggufInvalid(path: path, detail: "array of \(n) elements")
                 }
                 var items: [Value] = []
-                items.reserveCapacity(Int(n))
+                // Reserve no more than the prefix could hold, so a few header
+                // bytes cannot claim a large allocation.
+                items.reserveCapacity(min(Int(n), max(0, data.count - offset)))
                 for _ in 0..<n { items.append(try value(type: et)) }
                 return .array(items)
             case 10: return .u64(try u64())

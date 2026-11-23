@@ -59,8 +59,10 @@ enum GGUFTokenizer {
         }
         func id(_ key: String) throws -> Int? {
             guard let v = md[key] else { return nil }
-            guard let n = v.uint64 else { throw invalid("\(key) is not an unsigned integer") }
-            return Int(n)
+            guard let u = v.uint64, let n = Int(exactly: u) else {
+                throw invalid("\(key) is not an unsigned integer")
+            }
+            return n
         }
 
         guard md["tokenizer.ggml.model"]?.string == "gpt2" else {
@@ -151,7 +153,8 @@ enum GGUFTokenizer {
             "errors": "replace",
             "split_special_tokens": false,
             "tokenizer_class": "PreTrainedTokenizerFast",
-            "model_max_length": Int(md["\(md["general.architecture"]?.string ?? "").context_length"]?.uint64 ?? 262_144),
+            "model_max_length": md["\(md["general.architecture"]?.string ?? "").context_length"]?.uint64
+                .flatMap { Int(exactly: $0) } ?? 262_144,
         ]
         config["bos_token"] = bos.map { tokens[$0] } ?? NSNull()
         config["eos_token"] = eos.map { tokens[$0] } ?? NSNull()

@@ -312,7 +312,9 @@ struct Inkling2Shape {
     @Test func archIsReadFromTheGGUFAndPinChecked() throws {
         let data = Inkling2Shape().fixture().encode().data
         guard case .complete(let header) = try GGUF.parseHeader(path: "toy", fileSize: UInt64(data.count),
-                                                                prefix: data) else { return }
+                                                                prefix: data) else {
+            Issue.record("toy header did not parse"); return
+        }
         let arch = try ArchInfo.fromGGUFInkling2(metadata: header.metadata, tensors: header.tensors, path: "toy")
         #expect(arch.family == .inkling2Loop && arch.numLayers == 2 && arch.hiddenSize == 128)
         #expect(arch.fullAttentionLayerMask == [0, 1])
@@ -369,7 +371,9 @@ struct Inkling2Shape {
     @Test func tokenizerSidecarsFollowTheVendorPipeline() throws {
         let data = Inkling2Shape().fixture().encode().data
         guard case .complete(let header) = try GGUF.parseHeader(path: "toy", fileSize: UInt64(data.count),
-                                                                prefix: data) else { return }
+                                                                prefix: data) else {
+            Issue.record("toy header did not parse"); return
+        }
         let sidecars = try GGUFTokenizer.synthesize(metadata: header.metadata, path: "toy")
         let tok = try #require(try JSONSerialization.jsonObject(with: sidecars.tokenizerJSON) as? [String: Any])
         let model = try #require(tok["model"] as? [String: Any])
@@ -457,6 +461,20 @@ struct Inkling2Shape {
                                           count: Int(layout.layers[1].expertStride))
         #expect(blob[Int(down.offset)..<Int(down.offset + down.size)]
             .elementsEqual(gguf.data[Int(downSrc)..<Int(downSrc + down.size)]))
+        // Resident streaming and the trusted-receipt policy read each layer
+        // at its own stride too: the receipt validates without falling back,
+        // and layer 0's expert 1 (NVFP4, 16 KiB stride) is the GGUF's bytes.
+        let resident = try Model.load(directoryURL: URL(fileURLWithPath: output), device: device,
+                                      expecting: shape.archConfig, streamingMode: .resident,
+                                      integrityPolicy: .trustedReceiptWhenValid)
+        #expect(resident.integrityFallbackDetail == nil)
+        let nvfp4 = try resident.routedExpert(layer: 0, expert: 1)
+        let gateUp = layout.layers[0].gateUp
+        #expect(layout.layers[0].expertStride == 16_384 && layout.layers[1].expertStride == 32_768)
+        let gateUpSrc = try #require(gguf.offsets["blk.0.ffn_gate_up_exps.weight"]) + gateUp.size
+        let nvfp4Blob = UnsafeRawBufferPointer(start: nvfp4.buffer.contents().advanced(by: Int(nvfp4.offset)),
+                                               count: Int(gateUp.size))
+        #expect(nvfp4Blob.elementsEqual(gguf.data[Int(gateUpSrc)..<Int(gateUpSrc + gateUp.size)]))
         // The family stays gated at the product entry point.
         #expect(throws: ModelError.familyRunnerNotImplemented(
             family: "inkling2Loop", missingAxes: ManifestReader.inkling2RequiredAxes)) {
@@ -558,7 +576,99 @@ struct Inkling2Shape {
         Inkling2FakeHub.reset(file: gguf.data, path: pin.shards[0].path, commit: pin.commit,
                               etag: String(repeating: "f", count: 64))
         try? FileManager.default.removeItem(atPath: remote)
+        await #expect {
+            _ = try await RemoteStreamingRepacker(options: options).run()
+        } throws: { error in
+            guard case RepackError.sourceFingerprintRejected = error else { return false }
+            return true
+        }
+
+        // A Xet-stored file whose ETag is not the SHA-256 is accepted on the
+        // pinned Xet hash (with the size).
+        let xet = String(repeating: "e", count: 64)
+        var xetPin = pin
+        xetPin = GGUFSourcePin(commit: pin.commit, shards: [.init(
+            path: pin.shards[0].path, sha256: pin.shards[0].sha256, size: pin.shards[0].size, xetHash: xet)])
+        Inkling2FakeHub.reset(file: gguf.data, path: pin.shards[0].path, commit: pin.commit,
+                              etag: String(repeating: "f", count: 64), xetHash: xet)
+        options.ggufPin = xetPin
+        _ = try await RemoteStreamingRepacker(options: options).run()
+        _ = try GGUFCopyVerifier.run(installDirectory: remote, ggufPath: gguf.path)
+        // The same file under a different size is refused even with the hash.
+        Inkling2FakeHub.reset(file: gguf.data.dropLast(32), path: pin.shards[0].path, commit: pin.commit,
+                              etag: String(repeating: "f", count: 64), xetHash: xet)
+        try? FileManager.default.removeItem(atPath: remote)
         await #expect(throws: RepackError.self) { _ = try await RemoteStreamingRepacker(options: options).run() }
+    }
+
+    /// A local file changed after its hash is refused before a range from it
+    /// is committed.
+    @Test func localFileChangedAfterVerificationIsRefused() async throws {
+        let gguf = try Self.writeToy()
+        defer { try? FileManager.default.removeItem(atPath: (gguf.path as NSString).deletingLastPathComponent) }
+        let pin = Self.pin(for: gguf.data)
+        let identity = try LocalGGUFSource.verify(path: gguf.path, against: pin.shards[0], audit: RepackAudit())
+        // Same bytes rewritten: a new modification time is a different identity.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try gguf.data.write(to: URL(fileURLWithPath: gguf.path))
+        #expect(throws: RepackError.self) {
+            _ = try LocalGGUFSource.readHeader(path: gguf.path, size: UInt64(gguf.data.count), identity: identity)
+        }
+        let out = Self.tmp("changed")
+        try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: out) }
+        let target = (out as NSString).appendingPathComponent("dst.bin")
+        FileManager.default.createFile(atPath: target, contents: Data(count: 64))
+        let copy = CoalescedRangeCopy(id: "range-00000000", shardID: "s", sourceOffset: 0, size: 64,
+                                      destinations: [RangeCopy(shardID: "s", sourceOffset: 0, size: 64,
+                                                               destinationPath: target, destinationOffset: 0)])
+        let provider = LocalFileSourceByteProvider(files: ["s": gguf.path], identities: ["s": identity])
+        var committed = 0
+        await #expect(throws: RepackError.self) {
+            try await provider.copyBatch([copy], completedRangeIDs: [], partialDirectory: out,
+                                         temporaryPath: (out as NSString).appendingPathComponent("t"),
+                                         audit: RepackAudit(), progress: { _ in }, commit: { _ in committed += 1 })
+        }
+        #expect(committed == 0)
+    }
+
+    /// The verifier fails on a changed install byte and on a data section the
+    /// tensors do not tile.
+    @Test func verifierDetectsDifferences() async throws {
+        let gguf = try Self.writeToy()
+        let output = Self.tmp("verify") + ".gturbo"
+        defer {
+            try? FileManager.default.removeItem(atPath: output)
+            try? FileManager.default.removeItem(atPath: (gguf.path as NSString).deletingLastPathComponent)
+        }
+        _ = try await Self.install(gguf, output: output, pin: Self.pin(for: gguf.data))
+        _ = try GGUFCopyVerifier.run(installDirectory: output, ggufPath: gguf.path)
+        // One byte of layer 1's expert 1 changed in the install.
+        let layer = URL(fileURLWithPath: "\(output)/packed_experts/layer_01.bin")
+        var bytes = try Data(contentsOf: layer)
+        let at = 32_768 + 17_408 + 100
+        bytes[at] ^= 0xFF
+        try bytes.write(to: layer)
+        #expect(throws: RepackError.self) { _ = try GGUFCopyVerifier.run(installDirectory: output, ggufPath: gguf.path) }
+        bytes[at] ^= 0xFF
+        try bytes.write(to: layer)
+        // A GGUF with trailing bytes past its last tensor is not tiled.
+        let padded = (gguf.path as NSString).deletingLastPathComponent + "/padded.gguf"
+        try (gguf.data + Data(count: 64)).write(to: URL(fileURLWithPath: padded))
+        #expect(throws: RepackError.self) { _ = try GGUFCopyVerifier.run(installDirectory: output, ggufPath: padded) }
+    }
+
+    /// The shipped source's fingerprint is its own pin's, and maps to its model ID.
+    @Test func shippedSourcePinIsConsistent() throws {
+        let source = SupportedModelSource.inkling2Mini
+        let pin = try #require(source.ggufPin)
+        #expect(source.kind == .gguf && source.revision == pin.commit)
+        #expect(source.sourceIndexSHA256 == pin.fingerprint)
+        #expect(SourceFingerprint.modelID(forIndexSha256: pin.fingerprint) == "inkling-2-mini-ud-q4_k_xl")
+        #expect(pin.totalBytes == 17_629_760_736 && pin.shards.count == 1)
+        let options = source.installOptions(outputDirectory: URL(fileURLWithPath: "/tmp/x.gturbo"),
+                                            overwrite: false, token: nil)
+        #expect(options.ggufPin == pin && options.requireKnownSource && options.localGGUFPath == nil)
     }
 }
 
@@ -571,10 +681,13 @@ final class Inkling2FakeHub: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var path = ""
     nonisolated(unsafe) private static var commit = ""
     nonisolated(unsafe) private static var etag = ""
+    nonisolated(unsafe) private static var xetHash: String?
     nonisolated(unsafe) private static var ranges = 0
 
-    static func reset(file: Data, path: String, commit: String, etag: String) {
-        lock.withLock { (self.file, self.path, self.commit, self.etag, ranges) = (file, path, commit, etag, 0) }
+    static func reset(file: Data, path: String, commit: String, etag: String, xetHash: String? = nil) {
+        lock.withLock {
+            (self.file, self.path, self.commit, self.etag, self.xetHash, ranges) = (file, path, commit, etag, xetHash, 0)
+        }
     }
 
     static func rangeRequests() -> Int { lock.withLock { ranges } }
@@ -584,7 +697,9 @@ final class Inkling2FakeHub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 
     override func startLoading() {
-        let (file, path, commit, etag) = Self.lock.withLock { (Self.file, Self.path, Self.commit, Self.etag) }
+        let (file, path, commit, etag, xetHash) = Self.lock.withLock {
+            (Self.file, Self.path, Self.commit, Self.etag, Self.xetHash)
+        }
         let url = request.url!
         func respond(_ status: Int, _ headers: [String: String] = [:], _ body: Data = Data()) {
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: status, httpVersion: nil,
@@ -597,6 +712,8 @@ final class Inkling2FakeHub: URLProtocol, @unchecked Sendable {
         var headers = ["X-Repo-Commit": commit, "X-Linked-Size": "\(file.count)",
                        "X-Linked-ETag": "\"\(etag)\"", "Accept-Ranges": "bytes",
                        "Content-Encoding": "identity"]
+        // As the Hub (and `FakeHFURLProtocol`) answer a Xet-stored file.
+        if let xetHash { headers["X-Xet-Hash"] = xetHash; headers["ETag"] = "\"\(xetHash)\"" }
         if request.httpMethod == "HEAD" {
             headers["Content-Length"] = "\(file.count)"
             return respond(200, headers)

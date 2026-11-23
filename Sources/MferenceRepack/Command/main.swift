@@ -30,7 +30,9 @@ vendor's own MLX INT4 conversion of the same checkpoint, the W2.1b control.
 inkling2mini installs Unsloth's UD-Q4_K_XL GGUF of Thinking Machines Inkling 2
 Mini (~17.6 GB read and written): every tensor is copied unchanged, nothing is
 re-quantized. --local-gguf reads a local copy of that pinned file instead of the
-Hub; it must match the pin's size and SHA-256, and the install is the same.
+Hub; it must match the pin's size and SHA-256, and the install is the same. The
+path must name the file itself, not a symbolic link (a Hugging Face cache
+snapshot entry is one: pass the blob it points to).
 --verify-gguf-copy compares every tensor of a GGUF install with the GGUF it was
 copied from, byte for byte.
 
@@ -74,6 +76,7 @@ private struct Arguments {
     var skipMTP = false
     var localGGUF: String?
     var verifyGGUFCopy = false
+    var modelGiven = false
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -126,6 +129,7 @@ private struct Arguments {
                         + SupportedModelSource.all.map(\.name).joined(separator: ", "))
                 }
                 parsed.model = source
+                parsed.modelGiven = true
                 index += 2
             case "--base-url":
                 guard index + 1 < values.count else {
@@ -161,7 +165,8 @@ private struct Arguments {
                 throw ParseError.missingRequired("--input-gturbo and --local-gguf")
             }
             guard parsed.output == nil, !parsed.verifyInstall, !parsed.resume, !parsed.overwrite,
-                  parsed.attachMTP == nil, !parsed.discardPartial else {
+                  parsed.attachMTP == nil, !parsed.discardPartial, !parsed.modelGiven,
+                  parsed.baseURL == nil, !parsed.dryRun, !parsed.skipMTP else {
                 throw ParseError.invalidMode("--verify-gguf-copy accepts only --input-gturbo and --local-gguf")
             }
             return parsed

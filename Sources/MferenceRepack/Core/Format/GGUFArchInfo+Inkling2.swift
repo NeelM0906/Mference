@@ -115,7 +115,8 @@ extension ArchInfo {
         // Mechanisms the tensor table proves present.
         guard let firstFull = mask.firstIndex(of: 1) else { throw invalid("no full-attention layer") }
         let rel = try tensor("blk.0.attn_rel.weight")
-        guard rel.ne == [UInt64(hidden), UInt64(numHeads * dRel)] else {
+        let (relWidth, relOverflow) = numHeads.multipliedReportingOverflow(by: dRel)
+        guard !relOverflow, rel.ne == [UInt64(hidden), UInt64(relWidth)] else {
             throw invalid("attn_rel shape \(rel.ne) is not [hidden, heads * d_rel]")
         }
         _ = try tensor("blk.\(firstFull).attn_k_conv_proj.weight")
@@ -142,7 +143,7 @@ extension ArchInfo {
         let ink = Inkling2Axes(
             relDRel: dRel,
             relExtent: relExtent,
-            relProjDim: numHeads * dRel,
+            relProjDim: relWidth,
             relLogScalingFloor: try int("attention.log_scale_floor"),
             relLogScalingAlpha: try float("attention.log_scale_alpha"),
             sconvKernelSize: convKernel,

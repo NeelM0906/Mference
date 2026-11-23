@@ -9,15 +9,20 @@ import Foundation
 /// through one bounded scratch tile.
 ///
 /// The caller verifies each local file against its pin (size and SHA-256)
-/// before planning; this type only maps a plan's shard IDs to local paths.
-public final class LocalFileSourceByteProvider: SourceByteProvider {
+/// before planning and passes the identity it hashed; every range is read
+/// through a descriptor whose identity is checked again before the range is
+/// committed, so a file changed after its hash cannot reach the install.
+final class LocalFileSourceByteProvider: SourceByteProvider {
     private let files: [String: String]
+    private let identities: [String: LocalGGUFSource.Identity]
     private let writeTileBytes: Int
 
     /// `files` maps a shard ID (the file's path in the pinned repo) to its
-    /// local path.
-    public init(files: [String: String], writeTileBytes: Int = WriterCore.tileBytes) {
+    /// local path; `identities` to what that file was when it was verified.
+    init(files: [String: String], identities: [String: LocalGGUFSource.Identity],
+         writeTileBytes: Int = WriterCore.tileBytes) {
         self.files = files
+        self.identities = identities
         self.writeTileBytes = writeTileBytes
     }
 
@@ -34,8 +39,8 @@ public final class LocalFileSourceByteProvider: SourceByteProvider {
             throw RepackError.configurationInvalid(detail: "writeTileBytes must be positive")
         }
         for copy in copies where !completedRangeIDs.contains(copy.id) {
-            guard files[copy.shardID] != nil else {
-                throw RepackError.configurationInvalid(detail: "no local file for \(copy.shardID)")
+            guard files[copy.shardID] != nil, identities[copy.shardID] != nil else {
+                throw RepackError.configurationInvalid(detail: "no verified local file for \(copy.shardID)")
             }
             for destination in copy.destinations {
                 guard destination.transform == .identity else {
@@ -71,6 +76,8 @@ public final class LocalFileSourceByteProvider: SourceByteProvider {
                 sourceFD = try Posix.openReadNoFollow(sourcePath)
                 sourceFDs[copy.shardID] = sourceFD
             }
+            let identity = identities[copy.shardID]!
+            try identity.require(fd: sourceFD, path: sourcePath)
             var touched = Set<String>()
             for destination in copy.destinations {
                 let destinationFD: Int32
@@ -99,6 +106,9 @@ public final class LocalFileSourceByteProvider: SourceByteProvider {
                     target += UInt64(count)
                 }
             }
+            // The bytes just copied are the verified ones only if the file is
+            // still what was hashed.
+            try identity.require(fd: sourceFD, path: sourcePath)
             for path in touched {
                 if let descriptor = outputFDs[path] { try Posix.fsync(descriptor, path: path) }
             }
