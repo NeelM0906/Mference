@@ -352,10 +352,22 @@ def forced_report(root, pid, tdir):
             problems.append("not_near_tie_count disagrees with the rows")
         if not all(finite(x) for k in ("fp32_margins", "shortfalls", "increment_rel_l2") for x in flat(k)):
             problems.append("a non-finite float")
+        if not all(finite(x.get("shortfall")) for x in dis):
+            problems.append("a disagreement row without a finite shortfall")
+        if d.get("id") != pid:
+            problems.append(f"id {d.get('id')} for {pid}")
+        if not d.get("runner_trace_sha256"):
+            problems.append("no runner_trace_sha256")
         if problems:
             return {"status": "malformed", "why": "; ".join(problems), "path": path}
         trace = os.path.join(tdir, pid, "trace.json") if tdir else None
         sha = hashlib.sha256(open(trace, "rb").read()).hexdigest() if trace and os.path.isfile(trace) else None
+        if sha is not None:
+            with open(trace) as f:
+                rt = json.load(f)
+            if len(rt["visits"]) != len(visits) or any(len(v["experts"]) != n for v in rt["visits"]):
+                return {"status": "malformed", "why": f"depth or visit count differs from the runner's trace "
+                                                      f"({len(rt['visits'])} visits)", "path": path}
         cand = os.path.basename(os.path.dirname(os.path.abspath(tdir))) if tdir else None
         if sha != d.get("runner_trace_sha256"):
             return {"status": "stale", "why": f"the runner's trace differs from the one this run was forced on "
@@ -621,10 +633,13 @@ FORCED_PROMPTS = ("trace01", "trace02", "lp09-chat-default", "trace03-tool-resul
 FORCED_RATE_MAX = 0.005       # at most 0.5% of token-visits with a different expert set
 FORCED_SHORTFALL_MAX = 1e-3   # every disagreement a near-tie
 FORCED_INCREMENT_MAX = 1e-2   # every per-visit increment, relative L2
+FORCED_TOTAL = 18816          # spec v1.16: the four prompts' token-visits, to depth 300
 REF_LLAMA = os.path.join("trace03-llama", "forced", "trace03-tool-result.json")  # under the precision root
 REF_MARGIN_MAX = 0.0258       # every routing disagreement at a llama.cpp margin below this
 REF_INCREMENT_MAX = 0.02      # G6a's per-visit bound; per position bin
-POS_BINS = ((0, 10), (10, 25), (25, 50), (50, 100), (100, 200), (200, 400))
+POS_BINS = ((0, 10), (10, 25), (25, 50), (50, 100), (100, 200), (200, 10 ** 9))  # the last is open-ended
+REF_MIN_TOKENS = 300          # trace03's depth
+FLAT_TOLERANCE = 1.2          # a later bin's mean at most this times bin 0's, for a miss to read as flat
 
 
 def forced_gate(root, tdir):
@@ -649,59 +664,75 @@ def forced_gate(root, tdir):
         out["prompts"][pid] = dict(fr, **{"pass": not fails, "fails": fails})
     ok = [v for v in out["prompts"].values() if v.get("status") == "ok"]
     out["total"] = {"token_visits": sum(v["token_visits"] for v in ok), "disagreements": sum(v["disagreements"] for v in ok)}
+    if len(ok) == len(FORCED_PROMPTS) and out["total"]["token_visits"] != FORCED_TOTAL:
+        out["missing"].append(f"the four files cover {out['total']['token_visits']} token-visits, not {FORCED_TOTAL}")
     return out
 
 
 def reference_check(root):
     """The reference against llama.cpp at depth (v1.16): K4's .llamaExperts forced on llama.cpp's CPU trace of
-    trace03. Pending until the file exists. A miss that grows with position fails; one that is flat from
-    position 0 goes to the coordinator (read as the .llamaExperts mode, not the model)."""
+    trace03. Pending until the file exists. A routing disagreement's margin is llama.cpp's own
+    (`runner_margin`; the forced side's `fp32_margin`, here .llamaExperts, when llama.cpp's trace carries
+    none). Increment error by position bin: a miss (any bin's maximum above 0.02) reads as flat only when
+    bin 0's mean is already above 0.02 and no later bin's mean exceeds it by more than FLAT_TOLERANCE;
+    otherwise it grows with position and fails."""
     path = os.path.join(root, REF_LLAMA) if root else None
     if not path or not os.path.isfile(path):
         return {"status": "pending", "path": path}
+    as_list = lambda x: x if isinstance(x, list) else ([] if x is None else [x])
     try:
         with open(path) as f:
             d = json.load(f, parse_constant=lambda c: float("nan"))
         n, visits, dis = d["n_tokens"], d["visits"], d["disagreements"]
-        if d.get("precision") not in ("llamaExperts", "llamaCPU"):
-            return {"status": "malformed", "why": f"precision {d.get('precision')}, not a llama.cpp mode", "path": path}
+        problems = []
+        if d.get("precision") != "llamaExperts":
+            problems.append(f"precision {d.get('precision')}, not llamaExperts")
+        if n < REF_MIN_TOKENS or not visits:
+            problems.append(f"{n} tokens, {len(visits)} visits (trace03 is {REF_MIN_TOKENS} tokens deep)")
         if len(visits) * n != d["token_visits"] or d["disagreement_count"] != len(dis):
-            return {"status": "malformed", "why": "counts disagree", "path": path}
+            problems.append("counts disagree")
+        if any(len(v[k]) != n for v in visits for k in ("increment_rel_l2", "differs", "shortfalls")):
+            problems.append("a per-visit list is not n_tokens long")
         incs = [(t, x) for v in visits for t, x in enumerate(v["increment_rel_l2"])]
-        if not all(finite(x) for _, x in incs) or not all(finite(x["fp32_margin"]) for x in dis):
-            return {"status": "malformed", "why": "a non-finite value", "path": path}
-    except (ValueError, KeyError, TypeError, OSError) as e:
+        margins, sources = [], set()
+        for x in dis:
+            m = x.get("runner_margin")
+            sources.add("llama.cpp's own" if m is not None else ".llamaExperts'")
+            margins.append(m if m is not None else x.get("fp32_margin"))
+        if not all(finite(x) for _, x in incs) or not all(finite(m) for m in margins) \
+                or not all(finite(x.get("shortfall")) for x in dis):
+            problems.append("a non-finite or missing value")
+        if problems:
+            return {"status": "malformed", "why": "; ".join(problems), "path": path}
+        bins = []
+        for lo, hi in POS_BINS:
+            sel = [x for t, x in incs if lo <= t < hi]
+            if sel:
+                bins.append({"bin": [lo, min(hi, n)], "max": max(sel), "mean": sum(sel) / len(sel), "n": len(sel)})
+        extra = lambda key: max([y for v in visits for y in as_list(v.get(key)) if finite(y)], default=None)
+        res = {"status": "ok", "precision": d.get("precision"), "token_visits": d["token_visits"],
+               "disagreements": len(dis), "max_margin": max(margins, default=0.0), "margin_source": sorted(sources),
+               "max_shortfall": max([x["shortfall"] for x in dis], default=0.0), "bins": bins,
+               "element_rel_max": extra("element_rel_max"), "route_weight_err": extra("route_weight_err"),
+               "final_norm_rel": d.get("final_norm_rel") if finite(d.get("final_norm_rel")) else None}
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
         return {"status": "malformed", "why": f"{type(e).__name__}: {e}", "path": path}
-    bins = []
-    for lo, hi in POS_BINS:
-        sel = [x for t, x in incs if lo <= t < hi]
-        if sel:
-            bins.append({"bin": [lo, hi], "max": max(sel), "mean": sum(sel) / len(sel), "n": len(sel)})
-    margins = [x["fp32_margin"] for x in dis]
-    res = {"status": "ok", "precision": d.get("precision"), "token_visits": d["token_visits"],
-           "disagreements": len(dis), "max_margin": max(margins, default=0.0),
-           "max_shortfall": max([x["shortfall"] for x in dis], default=0.0), "bins": bins,
-           "element_rel_max": max([x for v in visits for x in (v.get("element_rel_max") or []) if finite(x)], default=None),
-           "route_weight_err": max([x for v in visits for x in (v.get("route_weight_err") or []) if finite(x)], default=None),
-           "final_norm_rel": d.get("final_norm_rel")}
     fails, flat = {}, False
     if not res["max_margin"] < REF_MARGIN_MAX:
         fails["margin"] = f"a disagreement at llama.cpp margin {fmt4(res['max_margin'])} >= {REF_MARGIN_MAX}"
-    over = [b for b in bins if b["max"] > REF_INCREMENT_MAX]
-    if over:
-        first = bins[0]["max"] if bins else 0.0
-        later = max(b["max"] for b in bins[1:]) if len(bins) > 1 else first
-        flat = first > REF_INCREMENT_MAX and later <= 1.5 * first
+    if any(b["max"] > REF_INCREMENT_MAX for b in bins):
+        first = bins[0]["mean"]
+        flat = first > REF_INCREMENT_MAX and all(b["mean"] <= FLAT_TOLERANCE * first for b in bins[1:])
         what = "flat from position 0 (for the coordinator: the mode, not the model)" if flat else "grows with position"
-        fails["increment"] = f"per-bin max {', '.join(fmt4(b['max']) for b in bins)} above {REF_INCREMENT_MAX}: {what}"
-    res.update({"fails": fails, "flat_miss": bool(over) and flat and "margin" not in fails,
-                "pass": not fails})
+        fails["increment"] = (f"per-bin max {', '.join(fmt4(b['max']) for b in bins)}, mean "
+                              f"{', '.join(fmt4(b['mean']) for b in bins)}; above {REF_INCREMENT_MAX}: {what}")
+    res.update({"fails": fails, "flat_miss": flat and "margin" not in fails, "pass": not fails})
     return res
 
 
-def v116(rb, root, tdir):
+def v116(rb, root, tdir, unmeasured=()):
     return {"a": forced_gate(root, tdir), "reference": reference_check(root), "b": rb["b"], "d": rb["d"],
-            "c1": rb["c1"], "c2": rb["c2"]}
+            "c1": rb["c1"], "c2": rb["c2"], "unmeasured": list(unmeasured)}
 
 
 def v116_state(v):
@@ -729,6 +760,8 @@ def v116_state(v):
         missing.append("(d)")
     elif not d["pass"]:
         failed.append("(d)")
+    if v.get("unmeasured"):
+        missing.append("prompts without a noise measurement: " + ", ".join(v["unmeasured"]))
     return ("fail" if failed else "incomplete" if missing else "pass"), failed, missing
 
 
@@ -761,7 +794,7 @@ def print_v116(v):
               f"{r['disagreements']}/{r['token_visits']} routing disagreements, max llama.cpp margin "
               f"{fmt4(r['max_margin'])} (< {REF_MARGIN_MAX}), max shortfall {fmt4(r['max_shortfall'])}; increment "
               f"rel L2 per position bin (max) " + ", ".join(f"{b['bin'][0]}-{b['bin'][1]} {fmt4(b['max'])}" for b in r["bins"])
-              + f" (<= {REF_INCREMENT_MAX}); element rel max {fmt4(r['element_rel_max'])}, route weight err "
+              + f" (<= {REF_INCREMENT_MAX}; margin from {', '.join(r['margin_source']) or '-'}); element rel max {fmt4(r['element_rel_max'])}, route weight err "
               f"{fmt4(r['route_weight_err'])}, final norm rel {fmt4(r['final_norm_rel'])}: {res}")
     b = v["b"]
     bad = {p: x["fails"] for p, x in b["prompts"].items() if not x["pass"]}
@@ -876,7 +909,8 @@ def main():
     checked12 = state12 != "fail" and report["pooled"]["pass"] and tr_ok
     report["v112"]["verdict"] = verdict(checked12, state12, missing12, bool(tdir))[0]
     # the gate: v1.16's closing form
-    v = v116(rb, root, tdir)
+    rb["b"]["missing"] += [f"{q}: required, but not in noise/tf-metal-vs-tfcpu.json" for q in B_REQUIRED if q not in meas_g]
+    v = v116(rb, root, tdir, unmeasured)
     state, failed, missing = v116_state(v)
     report["v116"], report["rule2_state"] = v, {"state": state, "failed": failed, "missing": missing}
     checked_ok = state != "fail" and report["pooled"]["pass"] and tr_ok
