@@ -104,6 +104,13 @@ public struct MFTokenizer: @unchecked Sendable {
     let inkling2SpecialTokens: Inkling2SpecialTokens?
     let inkling2Encoder: Inkling2TextEncoder?
     var inkling2ChatTemplateSource: String?
+    /// Whether `tokenizer.decode` applies `cleanUpTokenizationSpaces`, read as
+    /// the library reads it (`tokenizer_config.json`, true when absent). True
+    /// when unknown (a tokenizer built in memory), the cautious answer:
+    /// `MFDetokenizer` then decodes everything on each push, because one
+    /// clean-up rule (" ' " to "'") rewrites a chain of quotes from arbitrarily
+    /// far back.
+    var decodeCleansUpSpaces = true
 
     public static func load(from folder: URL) async throws -> MFTokenizer {
         try await load(from: folder, family: nil)
@@ -160,6 +167,7 @@ public struct MFTokenizer: @unchecked Sendable {
                                                  tokenizerData: tokenizerData)
         var value = try MFTokenizer(tokenizer: underlying, family: family)
         value.localTokenizerFolder = folder.standardizedFileURL
+        value.decodeCleansUpSpaces = tokenizerConfig.cleanUpTokenizationSpaces.boolean(or: true)
         if value.dialect == .inkling2 {
             let template = folder.appendingPathComponent("chat_template.jinja")
             value.inkling2ChatTemplateSource = try? String(contentsOf: template, encoding: .utf8)

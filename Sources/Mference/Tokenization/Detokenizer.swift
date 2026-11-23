@@ -46,16 +46,20 @@ import Tokenizers
 /// them all on each push made a long generation quadratic (about 0.63 µs per
 /// token of history with Inkling 2's tokenizer: 5 ms a token at position
 /// 8,000). `decoded` keeps that decode instead. Each push re-decodes only
-/// the old IDs from the `contextTokens`-th last one that contributes text
+/// the old IDs from the `contextTokens`-th last one that changed the decode
 /// (unknown IDs, skipped specials and empty tokens do not count), with and
 /// without the new ones (`extendedDecode`). The result is the full decode
-/// whenever no new token changes text more than `contextTokens` contributing
-/// tokens back. Clean-up rewrites span at most four characters, a UTF-8
-/// scalar at most four byte tokens, and the leading-space rules touch only the
-/// first token. When the window cannot show that the old text is unchanged,
-/// the push falls back to the full decode. `DetokenizerLinearOracleTests` requires every emitted chunk to
-/// equal the full-decode implementation's on long adversarial streams for
-/// each tokenizer.
+/// whenever no new token changes text more than `contextTokens` such tokens
+/// back: a UTF-8 scalar spans at most four byte tokens, and the leading-space
+/// rules touch only the first token. Two cases reach further, and both take
+/// the full decode as before:
+/// - a tokenizer that applies `cleanUpTokenizationSpaces` (its " ' " rule
+///   rewrites a chain of quotes from arbitrarily far back);
+/// - a window that cannot show that the old text is unchanged.
+/// None of the shipped tokenizers applies clean-up.
+/// `DetokenizerLinearOracleTests` requires every emitted chunk to equal the
+/// full-decode implementation's on long adversarial streams for each
+/// tokenizer.
 struct MFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline var stableIDs: [Int] = []
@@ -65,20 +69,24 @@ struct MFDetokenizer {
     /// current by `push(_:)`.
     @usableFromInline var decoded: String = ""
     /// Indices in `stableIDs` of the IDs that contribute text: byte-fallback
-    /// tokens, and tokens whose own decode is not empty.
+    /// tokens, and tokens whose push changed the decode.
     @usableFromInline var contentIndices: [Int] = []
     /// Start in `stableIDs` of a byte-fallback run that only IDs with no text
     /// of their own follow (unknown IDs, skipped specials). The library drops
     /// a byte-fallback run that ends the decoded tokens, so this run is
     /// missing from `decoded` until text follows it, and then the decode gains
-    /// text from its start. The window never starts after it. A token whose
-    /// own decode is empty never clears it, which can only widen the window.
+    /// text from its start. The window then starts `contextTokens`
+    /// contributing IDs before it, so the run has context on its left.
     @usableFromInline var danglingByteRunStart: Int?
+    /// False when the tokenizer's decode applies clean-up: every push then
+    /// decodes everything, exactly as before.
+    @usableFromInline let decodesIncrementally: Bool
     /// Old text-contributing IDs re-decoded with each push (see the type's cost
     /// note).
     static let contextTokens = 16
     init(tokenizer: MFTokenizer, skipSpecialTokens: Bool = true) {
         self.tokenizer = tokenizer.tokenizer
+        self.decodesIncrementally = !tokenizer.decodeCleansUpSpaces
     }
 
     mutating func push(_ id: Int32) -> String {
@@ -99,12 +107,16 @@ struct MFDetokenizer {
             stableIDs.append(contentsOf: trailingByteIDs)
             trailingByteIDs.removeAll(keepingCapacity: true)
         }
-        let hasText = !tokenizer.decode(tokens: [tokenID], skipSpecialTokens: true).isEmpty
-        if hasText { contentIndices.append(stableIDs.count) }
         stableIDs.append(tokenID)
 
+        let previous = decoded
         decoded = extendedDecode(previousCount: previousCount, previousContent: previousContent, floor: floor)
-        if hasText {
+        // Whether the push changed the decode, rather than the token's own
+        // decode: no single-token decode is needed (WordPiece's decoder traps
+        // on an empty token list), and a token that ends a dangling run
+        // counts here, whatever its own text.
+        if !Self.utf8(of: decoded, equals: previous) {
+            contentIndices.append(stableIDs.count - 1)
             danglingByteRunStart = nil
         } else if movedBytes > 0, danglingByteRunStart == nil {
             danglingByteRunStart = previousCount
@@ -114,9 +126,10 @@ struct MFDetokenizer {
 
     /// The decode of all of `stableIDs`, given `decoded` for its first
     /// `previousCount`, of which `previousContent` contribute text. The old
-    /// IDs from the `contextTokens`-th last contributing one, or from `floor`
-    /// when that is earlier, are decoded alone (`before`) and with the new
-    /// ones (`after`). When `after` starts with
+    /// IDs from the `contextTokens`-th last contributing one are decoded alone
+    /// (`before`) and with the new ones (`after`). With a dangling run at
+    /// `floor`, the window starts `contextTokens` contributing IDs before the
+    /// run when that is earlier. When `after` starts with
     /// `before`, the new IDs changed none of that text and only append to it,
     /// so `decoded` plus `after`'s remainder is the full decode. Otherwise the
     /// full decode is computed.
@@ -128,8 +141,18 @@ struct MFDetokenizer {
     @usableFromInline
     func extendedDecode(previousCount: Int, previousContent: Int, floor: Int?) -> String {
         func fullDecode() -> String { tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true) }
-        guard previousContent > Self.contextTokens else { return fullDecode() }
-        let start = min(contentIndices[previousContent - Self.contextTokens], floor ?? .max)
+        guard decodesIncrementally, previousContent > Self.contextTokens else { return fullDecode() }
+        var start = contentIndices[previousContent - Self.contextTokens]
+        if let floor {
+            // Contributing IDs before the run: the first index at or past it.
+            var low = 0, high = previousContent
+            while low < high {
+                let mid = (low + high) / 2
+                if contentIndices[mid] < floor { low = mid + 1 } else { high = mid }
+            }
+            guard low >= Self.contextTokens else { return fullDecode() }
+            start = min(start, contentIndices[low - Self.contextTokens])
+        }
         let before = tokenizer.decode(tokens: Array(stableIDs[start..<previousCount]), skipSpecialTokens: true)
         let after = tokenizer.decode(tokens: Array(stableIDs[start...]), skipSpecialTokens: true)
         let pending = Self.trailingReplacementByteCount(before)
@@ -212,6 +235,13 @@ struct MFDetokenizer {
         let delta = String(decoding: committed.dropFirst(emitted.utf8.count), as: UTF8.self)
         emitted = committedText()
         return delta
+    }
+
+    /// Byte equality, as one contiguous compare (`String ==` is canonical
+    /// equivalence, not bytes).
+    @usableFromInline
+    static func utf8(of text: String, equals other: String) -> Bool {
+        text.utf8.count == other.utf8.count && utf8(of: text, startsWith: other)
     }
 
     /// `text.utf8.starts(with: prefix.utf8)`, as one contiguous byte compare:

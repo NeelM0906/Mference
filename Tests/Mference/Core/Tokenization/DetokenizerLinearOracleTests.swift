@@ -201,9 +201,11 @@ struct DetokenizerLinearOracleTests {
 
     /// A Llama-style SentencePiece tokenizer: `<0xNN>` byte-fallback tokens,
     /// `▁`-prefixed pieces, the decoder chain Replace(▁ → space), ByteFallback,
-    /// Fuse, Strip(one leading space), and `clean_up_tokenization_spaces`
-    /// true. ChatML specials make it a supported dialect.
-    static func sentencePieceFixture() throws -> URL {
+    /// Fuse, Strip(one leading space), and `clean_up_tokenization_spaces` as
+    /// given. With clean-up on, `MFDetokenizer` takes the full decode on every
+    /// push; with it off, byte fallback and the strip go through the window.
+    /// ChatML specials make it a supported dialect.
+    static func sentencePieceFixture(cleanUp: Bool = true) throws -> URL {
         let folder = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("mference-detok-sp-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -240,23 +242,26 @@ struct DetokenizerLinearOracleTests {
             .write(to: folder.appendingPathComponent("tokenizer.json"))
         let config: [String: Any] = ["tokenizer_class": "LlamaTokenizer", "bos_token": "<s>",
                                      "eos_token": "<|im_end|>", "unk_token": "<unk>",
-                                     "clean_up_tokenization_spaces": true, "model_max_length": 4096]
+                                     "clean_up_tokenization_spaces": cleanUp, "model_max_length": 4096]
         try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
             .write(to: folder.appendingPathComponent("tokenizer_config.json"))
         return folder
     }
 
-    @Test func sentencePieceByteFallbackAndCleanUp() async throws {
-        let folder = try Self.sentencePieceFixture()
+    @Test(arguments: [true, false])
+    func sentencePieceByteFallbackAndCleanUp(cleanUp: Bool) async throws {
+        let folder = try Self.sentencePieceFixture(cleanUp: cleanUp)
         defer { try? FileManager.default.removeItem(at: folder) }
         let tok = try await MFTokenizer.load(from: folder, family: nil)
+        #expect(tok.decodeCleansUpSpaces == cleanUp)
+        #expect(MFDetokenizer(tokenizer: tok).decodesIncrementally == !cleanUp)
         let t = tok.tokenizer
         func id(_ piece: String) throws -> Int32 { Int32(try #require(t.convertTokenToId(piece), "\(piece)")) }
         // The rules this fixture exists for, checked on the full decode first.
         #expect(t.decode(tokens: [try id("▁hello"), try id("▁.")].map(Int.init), skipSpecialTokens: true)
-                == "hello.")
+                == (cleanUp ? "hello." : "hello ."))
         #expect(t.decode(tokens: [try id("▁do"), try id("▁n't")].map(Int.init), skipSpecialTokens: true)
-                == "don't")
+                == (cleanUp ? "don't" : "do n't"))
         // A byte-fallback run decodes once a piece follows it (the library
         // drops a trailing run; `MFDetokenizer` holds such runs back).
         #expect(t.decode(tokens: [0xE4, 0xB8, 0xAD].map { 3 + $0 } + [Int(try id("▁ok"))], skipSpecialTokens: true)
@@ -275,13 +280,48 @@ struct DetokenizerLinearOracleTests {
             [try id("▁")], [try id("▁▁▁")], [Int32(t.convertTokenToId("<|im_end|>") ?? 0)],
             [try id("ห"), try id("้"), try id("า"), try id("ม")], [try id("▁café"), try id("é")],
         ]
+        let label = "SentencePiece, clean-up \(cleanUp ? "on" : "off")"
         var g = Generator(state: 0x5E)
         for offset in 0..<20 {
             var ids: [Int32] = (0..<(offset + 1)).map { _ in try! id("▁ok") }
             for _ in 0..<400 { ids += bait[g.below(bait.count)] }
-            Self.compare(tok, ids, label: "SentencePiece bait, offset \(offset)")
+            Self.compare(tok, ids, label: "\(label), bait at offset \(offset)")
         }
-        Self.run(tok, name: "SentencePiece (byte fallback, clean-up)", randomLength: 3_000, seed: 0x55)
+        // The review's counterexamples, at lengths around the window.
+        let space = Int32(3 + 0x20), quote = Int32(3 + 0x27), think = Int32(t.convertTokenToId("<think>") ?? 0)
+        for n in [14, 15, 16, 17, 18, 24, 40] {
+            // A chain of " '" (clean-up's " ' " rule overlaps itself).
+            Self.compare(tok, [try id("▁ok"), space, quote] + Array(repeating: try id("▁'"), count: n),
+                         label: "\(label), quote chain \(n)")
+            // A dangling run of ASCII bytes, a skipped special, then text.
+            Self.compare(tok, [try id("▁hi")] + Array(repeating: space, count: n) + [think, try id("▁ok")],
+                         label: "\(label), dangling spaces \(n)")
+            Self.compare(tok, [try id("▁hi")] + Array(repeating: space, count: n) + [think, think, try id("."),
+                         try id("▁ok")] + Array(repeating: try id("▁'"), count: n),
+                         label: "\(label), dangling spaces, specials, quotes \(n)")
+        }
+        Self.run(tok, name: label, randomLength: 3_000, seed: cleanUp ? 0x55 : 0x56)
+    }
+
+    /// The ChatML fixture with clean-up switched on: every push takes the full
+    /// decode, and a long " '" chain (the rule that overlaps itself) streams
+    /// exactly as before.
+    @Test func byteLevelWithCleanUp() async throws {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mference-detok-cleanup-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: try Self.fixture("ChatMLTokenizer"), to: folder)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let config = folder.appendingPathComponent("tokenizer_config.json")
+        var object = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any])
+        object["clean_up_tokenization_spaces"] = true
+        try JSONSerialization.data(withJSONObject: object).write(to: config)
+        let tok = try await MFTokenizer.load(from: folder, family: .qwen36)
+        #expect(tok.decodeCleansUpSpaces && !MFDetokenizer(tokenizer: tok).decodesIncrementally)
+        let a = tok.encode("a", addBOS: false), quote = tok.encode(" '", addBOS: false)
+        for n in [16, 17, 18, 19, 40] {
+            Self.compare(tok, a + Array(repeating: quote, count: n).flatMap { $0 }, label: "ChatML clean-up, quotes \(n)")
+        }
+        Self.run(tok, name: "ChatML with clean-up", randomLength: 1_500, seed: 0x57)
     }
 
     // MARK: The installs' tokenizers (opt-in)
