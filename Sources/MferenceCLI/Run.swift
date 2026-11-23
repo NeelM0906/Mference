@@ -22,6 +22,10 @@ public func run(args: Args,
     } catch {
         return errored(stderr, "\(error)", 1)
     }
+    if let cap = args.hostContextCap {
+        stderr.write(Data(("notice: --max-context lowered to \(cap) tokens: the model's expert residency on "
+            + "this Mac's memory leaves room for no more\n").utf8))
+    }
     if args.chat {
         return await runChat(args: args, stdout: stdout, stderr: stderr)
     }
