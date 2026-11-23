@@ -82,6 +82,15 @@ public actor EngineService: EngineServicing {
         return EngineProductSlot(modelID: model.modelID)?.memoryFloorReason(physicalMemory: physicalMemory)
     }
 
+    /// The runtime's own estimate of what `model` keeps resident with
+    /// `sizeBytes` on disk on a Mac with `physicalMemory` (32K context), for
+    /// the models it can size before loading (Inkling 2 Mini); nil otherwise.
+    public static func runtimeResidentEstimate(_ model: AppModel, sizeBytes: UInt64,
+                                               physicalMemory: UInt64) -> UInt64? {
+        EngineProductSlot(modelID: model.modelID)?
+            .estimatedResidentBytes(installBytes: sizeBytes, physicalMemory: physicalMemory)
+    }
+
     /// What a picker row says when `model` is not installed and the catalog
     /// gives no reason: native installs come from `MferenceRepack`, so the
     /// row says how to make one where the app cannot download it.

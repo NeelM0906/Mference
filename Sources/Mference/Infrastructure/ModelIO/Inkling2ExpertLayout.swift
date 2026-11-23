@@ -44,6 +44,22 @@ public struct Inkling2ExpertLayout: Sendable, Equatable {
 
     /// Offset alignment of the second projection inside a blob.
     public static let projectionAlignment: UInt64 = 256
+    /// The page the installer pads every blob to, whatever the host's page.
+    public static let blobPage: UInt64 = 16_384
+
+    /// The stride the installer gives one expert blob of `format`: gate-up at
+    /// 0, down at the next 256-byte boundary, padded to `blobPage`
+    /// (4,489,216 bytes for NVFP4 and 8,470,528 for Q8_0 at the shipped
+    /// shape). Nil for a format without whole block rows at this shape.
+    public static func blobStride(format: GGMLBlockFormat, config: ArchConfig) -> UInt64? {
+        let hidden = config.hiddenSize, width = config.moeIntermediateSize
+        guard let gateUpRow = format.rowBytes(elements: hidden),
+              let downRow = format.rowBytes(elements: width) else { return nil }
+        let gateUp = UInt64(2 * width * gateUpRow)
+        let downStart = (gateUp + projectionAlignment - 1) / projectionAlignment * projectionAlignment
+        let end = downStart + UInt64(hidden * downRow)
+        return (end + blobPage - 1) / blobPage * blobPage
+    }
 
     /// Builds the view and proves it: every layer present with all experts at
     /// its own page-aligned stride, its format equal to
