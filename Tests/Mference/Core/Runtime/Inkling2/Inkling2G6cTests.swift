@@ -206,12 +206,96 @@ struct Inkling2PositionLogitsToyTests {
     }
 }
 
+/// The runner's trace margins (re-based G6c rule (a)) on the Mini-width
+/// toy: a prefill in chunks of 4 and 2, then a decode step. The router logits
+/// the trace records come from the visit's own MoE input, so their top-8 is
+/// the runner's own expert set wherever the margin is not a near-tie; and
+/// the margins they give equal the reference's at the runner's states
+/// (teacher-forced on its outputs and routes). Full tier.
+@Suite("Inkling2ForwardRunner trace margins on the toy", .serialized)
+struct Inkling2TraceMarginsToyTests {
+    /// The reference's router input differs from the runner's by the visit
+    /// error (at most 2e-3 relative on the toy), which moves a sigmoid score
+    /// far less than this.
+    static let tolerance: Float = 2e-3
+
+    @Test(.fullTier)
+    func traceMarginsAreTheRunnersRoutesAndTheReferencesMargins() async throws {
+        let context = try MetalContext()
+        let toy = try Inkling2RunnerToy(device: context.device)
+        let c = Inkling2RunnerToy.config
+        let d = c.hiddenSize, topK = c.topK, experts = c.numExperts, rows = 8
+        let device = context.device
+        let runner = try Inkling2ForwardRunner(weights: toy.runnerWeights, context: context,
+                                               maxContext: 64, maxChunkTokens: 4)
+        let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
+        let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
+        let routes = try #require(device.makeBuffer(length: 48 * rows * topK * 4, options: .storageModeShared))
+        let logits = try #require(device.makeBuffer(length: 48 * rows * experts * 4, options: .storageModeShared))
+        runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows, routerLogits: logits)
+        let ids = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * topK)
+        let lp = logits.contents().bindMemory(to: Float.self, capacity: 48 * rows * experts)
+        let reference = try Inkling2ReferenceModel(config: c, weights: toy.referenceWeights)
+        reference.captureTrace = true
+        reference.precision = .metalRunner
+        let schedule = c.schedule
+
+        var position = 0, compared = 0, ties = 0
+        var worst: Float = 0
+        for chunk: [Int32] in [[17, 401, 3, 250, 99, 7], [333]] {
+            let n = chunk.count
+            if n == 1 {
+                try await runner.produce(token: chunk[0], position: position, into: out)
+            } else {
+                _ = try await runner.prefillChunked(tokens: chunk[...], startPosition: position, outputMode: .logits,
+                                                    config: .production(chunkTokens: 64), into: out,
+                                                    onProgress: { _ in })
+            }
+            reference.forcedRoutes = (0..<48).map { v in
+                (0..<n).map { t in (0..<topK).map { Int(ids[(v * rows + position + t) * topK + $0]) } }
+            }
+            reference.forcedVisitOutputs = (0..<48).map { v in
+                (0..<n).map { t in Inkling2BufferMatrix.floats(outputs, offset: (v * rows + position + t) * d * 4,
+                                                               count: d) }
+            }
+            _ = reference.forward(tokens: chunk, logits: .none)
+            let trace = try #require(reference.lastTrace)
+            for v in 0..<48 {
+                let bias = toy.referenceWeights.layers[schedule[v].layer].routerBias
+                for t in 0..<n {
+                    let row = v * rows + position + t
+                    let margin = Inkling2G6cTests.selectionMargin(logits: lp + row * experts, bias: bias, topK: topK)
+                    worst = max(worst, abs(margin - trace.routeMargins[v][t]))
+                    // The top-8 by these logits is the runner's own set.
+                    let scores = (0..<experts).map { e in
+                        1 / (1 + exp(-min(max(lp[row * experts + e], -80), 80))) + bias[e]
+                    }
+                    let top = Set((0..<experts).sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }
+                        .prefix(topK))
+                    let own = Set((0..<topK).map { Int(ids[row * topK + $0]) })
+                    if margin > 1e-5 {
+                        #expect(top == own, "visit \(v) token \(position + t)")
+                        compared += 1
+                    } else {
+                        ties += 1
+                    }
+                }
+            }
+            position += n
+        }
+        print("inkling2 toy trace margins: \(compared) token-visits select the runner's experts (\(ties) near-ties "
+              + "skipped); worst margin difference from the reference \(worst)")
+        #expect(compared >= 48 * 7 - 4)
+        #expect(worst < Self.tolerance)
+    }
+}
+
 /// G6c: the runner's teacher-forced output on the real install, written in
 /// ink-golden's `generate` layout for `Scripts/parity/inkling2/g6c_verdict.py`
 /// (K0's schema, option A). For each prompt of
 /// `Scripts/parity/inkling2/inputs/generate_prompts_tf.json` (a log-prob
 /// golden's prompt plus all but its last generated id, as one ids prompt):
-/// one production prefill (chunks of 128, the install's expert store),
+/// one production prefill (the product's chunk, the install's expert store),
 /// then `<out>/tf/<id>/golden.json` and `logprobs.json` with the top 20
 /// log-probs at every recorded position (the last 80 where the entry has
 /// `logprobs_last`). For trace01, trace02 and trace03-tool-result (the
@@ -220,10 +304,17 @@ struct Inkling2PositionLogitsToyTests {
 ///
 ///     python3 -I Scripts/parity/inkling2/g6c_verdict.py <out>/tf --traces <out>/traces
 ///
+/// Each trace also holds, per visit and token, the router's selection
+/// margin (`margins`, from the router logits the trace records), so the
+/// re-based tier's rule (a) can check every expert-set flip against `.fp32`.
+/// The prefill chunk is the product's (`familyPrefillChunkTokens`, 2,048).
+///
 /// Loads the install, so it runs only with `MFERENCE_INKLING2_GTURBO`,
 /// `MFERENCE_INKLING2_GOLDENS_DIR` and `MFERENCE_INKLING2_G6C_OUT` set, and
 /// then only inside `model-hold.sh`. `MFERENCE_INKLING2_G6C_PROMPTS` (comma
 /// separated ids) picks the prompts, in that order; all by default.
+/// `MFERENCE_INKLING2_G6C_TRACE_ALL` also traces every teacher-forced prompt
+/// of up to 512 tokens (rule (a)'s coverage), into `<out>/traces/<id>/`.
 @Suite("Inkling2 G6c: the runner's teacher-forced output", .serialized)
 struct Inkling2G6cTests {
     static let environment = ProcessInfo.processInfo.environment
@@ -282,6 +373,20 @@ struct Inkling2G6cTests {
         let slot: Int
         let layer: Int
         let experts: [[Int]]
+        /// Per token, the router's selection margin at this visit: the 8th
+        /// minus the 9th largest selection score (sigmoid plus bias).
+        var margins: [Float]? = nil
+    }
+
+    /// The routers' selection margin for one token-visit: the `topK`-th minus
+    /// the next largest of `sigmoid(clamp(logit, -80, 80)) + bias`, the
+    /// scores both routers select by.
+    static func selectionMargin(logits: UnsafePointer<Float>, bias: [Float], topK: Int) -> Float {
+        let scores = bias.indices.map { e -> Float in
+            let z = min(max(logits[e], -80), 80)
+            return 1 / (1 + exp(-z)) + bias[e]
+        }.sorted(by: >)
+        return scores[topK - 1] - scores[topK]
     }
     struct TraceRecord: Encodable {
         let hidden_file: String
@@ -334,8 +439,16 @@ struct Inkling2G6cTests {
         let vocab = c.unpaddedVocabSize, vocabRows = c.vocabSize
         let softcap = Double(c.finalLogitSoftcap)
         try #require(softcap == 30 && vocab == 200_058)
-        // The product's runner and prefill: what ForwardRunnerFactory builds.
-        let configuration = RuntimeConfiguration()
+        // The product's runner and prefill: what ForwardRunnerFactory builds,
+        // with the product's chunk for this family (2,048 on every path).
+        let configuration = RuntimeConfiguration(
+            prefillChunkTokens: RuntimeConfiguration.familyPrefillChunkTokens(for: c.family) ?? 128)
+        let traceAll = Self.environment["MFERENCE_INKLING2_G6C_TRACE_ALL"] != nil
+        let experts = c.numExperts
+        let biases = try (0..<c.numLayers).map { layer -> [Float] in
+            let t = try model.inkling2RouterSelectionBias(layer: layer)
+            return Inkling2BufferMatrix.floats(t.buffer, offset: Int(t.offset), count: experts)
+        }
         let runner = try Inkling2ForwardRunner(model: model, context: context, maxContext: 4096,
                                                runtimeConfiguration: configuration)
         let out = try #require(device.makeBuffer(length: vocabRows * 2, options: .storageModeShared))
@@ -373,12 +486,14 @@ struct Inkling2G6cTests {
                 logitRows = buffer
             }
             var trace: Inkling2ForwardRunner.VisitTrace?
-            if Self.traceGoldens[id] != nil {
+            if Self.traceGoldens[id] != nil || (traceAll && n <= 512) {
                 trace = .init(outputs: try #require(device.makeBuffer(length: 48 * n * d * 4,
                                                                       options: .storageModeShared)),
                               routes: try #require(device.makeBuffer(length: 48 * n * topK * 4,
                                                                      options: .storageModeShared)),
-                              rows: n)
+                              rows: n,
+                              routerLogits: try #require(device.makeBuffer(length: 48 * n * experts * 4,
+                                                                           options: .storageModeShared)))
                 runner.visitTrace = trace
             }
             runner.reset()
@@ -429,9 +544,15 @@ struct Inkling2G6cTests {
                     return set.count == topK && set.allSatisfy { $0 < UInt32(c.numExperts) }
                 }
                 #expect(routesValid, "\(id): expert ids")
+                let logits = try #require(trace.routerLogits).contents()
+                    .bindMemory(to: Float.self, capacity: 48 * n * experts)
                 let visits = (0..<48).map { v in
                     TraceVisit(visit: v, slot: schedule[v].cacheSlot, layer: schedule[v].layer,
-                               experts: (0..<n).map { t in (0..<topK).map { Int(routes[(v * n + t) * topK + $0]) } })
+                               experts: (0..<n).map { t in (0..<topK).map { Int(routes[(v * n + t) * topK + $0]) } },
+                               margins: (0..<n).map { t in
+                                   Self.selectionMargin(logits: logits + (v * n + t) * experts,
+                                                        bias: biases[schedule[v].layer], topK: topK)
+                               })
                 }
                 try write(TraceRecord(hidden_file: "hidden_after_visit.f32", hidden_shape: [48, n, d],
                                       hidden_tensor: "the running block sum after each visit (l_out)",
