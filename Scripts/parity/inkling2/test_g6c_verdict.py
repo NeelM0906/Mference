@@ -392,6 +392,12 @@ class ForcedReportTests(unittest.TestCase):
         self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "malformed")
         self.forced(token_visits=7)
         self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "malformed")
+        self.forced(precision="llamaExperts")
+        r = gv.forced_report(self.root, "t", self.tdir)
+        self.assertEqual(r["status"], "malformed")
+        self.assertIn("not fp32", r["why"])
+        self.forced(precision="fp32")
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "ok")
 
     def test_absent_is_none(self):
         self.assertIsNone(gv.forced_report(self.root, "t", self.tdir))

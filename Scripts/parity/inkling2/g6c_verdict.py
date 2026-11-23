@@ -318,6 +318,8 @@ def forced_report(root, pid, tdir):
         problems = []
         if d.get("schema") != "inkling2-forced-routing-v1":
             problems.append(f"schema {d.get('schema')}")
+        if d.get("precision", "fp32") != "fp32":  # rule (a) is the exact reference only; absent = the early fp32 files
+            problems.append(f"precision {d.get('precision')}, not fp32")
         if len(visits) * n != d["token_visits"]:
             problems.append("visits x n_tokens != token_visits")
         if any(len(v[k]) != n for v in visits for k in ("own_experts", "fp32_margins", "shortfalls", "differs", "increment_rel_l2")):
