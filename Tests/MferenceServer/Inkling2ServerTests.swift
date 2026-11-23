@@ -100,7 +100,7 @@ final class RecordingModel: EngineModel, @unchecked Sendable {
     func unload() async { await inner.unload() }
 }
 
-@Suite("Inkling 2 through the server (K0 fixtures F01, F02, F03, F06)", .serialized)
+@Suite("Inkling 2 through the server (K0 fixtures F01-F04, F06)", .serialized)
 struct Inkling2ServerTests {
     static let modelID = "inkling-2-mini-ud-q4_k_xl"
     static let mdl = "<|message_model|>", txt = "<|content_text|>", thk = "<|content_thinking|>"
@@ -125,7 +125,8 @@ struct Inkling2ServerTests {
         /// dialect, to pin behaviour that must not change for it.
         init(fixture: String = "Inkling2Tokenizer", family: ModelFamily = .inkling2Loop,
              modelID: String = Inkling2ServerTests.modelID, product: EngineProductSlot? = .inkling2Mini,
-             eosText: String = Inkling2ServerTests.eos, maxContext: Int = 4_096) async throws {
+             eosText: String = Inkling2ServerTests.eos, maxContext: Int = 4_096,
+             promptCacheMode: EnginePromptCacheMode = .off) async throws {
             let folder = Inkling2ServerTests.fixtureFolder(fixture)
             // As `NativeBackend` loads it: `load(forModelDirectory:)` is this
             // load plus the checkpoint profile (the vendor's sampling defaults).
@@ -138,7 +139,8 @@ struct Inkling2ServerTests {
                 location: folder, sizeBytes: 1, contextLength: family.maximumContext, product: product)
             let native = try NativeEngineModel.forTesting(descriptor: descriptor, context: try MetalContext(),
                                                           tokenizer: tokenizer, runner: runner,
-                                                          maxContext: maxContext)
+                                                          maxContext: maxContext,
+                                                          promptCacheMode: promptCacheMode)
             model = RecordingModel(native, runner: runner)
             let library = ServerModelLibrary(catalog: EngineCatalog(models: [descriptor]),
                                              backends: [OneModelBackend(model: model)],
@@ -186,9 +188,10 @@ struct Inkling2ServerTests {
                             modelID: String = Inkling2ServerTests.modelID,
                             product: EngineProductSlot? = .inkling2Mini,
                             eosText: String = Inkling2ServerTests.eos,
+                            promptCacheMode: EnginePromptCacheMode = .off,
                             _ body: (Harness) async throws -> Void) async throws {
         let h = try await Harness(fixture: fixture, family: family, modelID: modelID, product: product,
-                                  eosText: eosText)
+                                  eosText: eosText, promptCacheMode: promptCacheMode)
         do {
             try await body(h)
         } catch {
@@ -421,8 +424,8 @@ struct Inkling2ServerTests {
             #expect(status1 == 200, "\(text1)")
             let config = try #require(h.model.requests.last?.generationConfig)
             // No truncation: the server writes an absent top_p as 1.0 for every
-            // dialect, which the sampler treats as nil (`topP ?? 1`).
-            #expect(config.temperature == 1.0 && config.topK == nil && (config.topP ?? 1) == 1)
+            // dialect (`OpenAIModels`), which the sampler treats as no cut.
+            #expect(config.temperature == 1.0 && config.topK == nil && config.topP == 1.0)
             #expect(config.minP == 0 && config.repetitionPenalty == 1)
             #expect(config.seed == 7)
             // max_new_tokens = min(512, context - prompt) in the loop.
@@ -444,6 +447,204 @@ struct Inkling2ServerTests {
             let stopped = Stream(text3)
             #expect(stopped.finishReasons == ["stop"] && stopped.content == "Hello.")
             #expect(!text3.contains("must not appear"))
+        }
+    }
+
+    /// F04: for Inkling 2, a tool call the parser rejects (invalid JSON, a
+    /// tool the request did not offer, header and body naming different
+    /// tools) or one still open at EOS reaches the client as the block's body
+    /// text with `finish_reason: stop` and HTTP 200, streamed or not: no
+    /// error frame, no 500, no tool call.
+    @Test func f04MalformedToolCallsAreTextAndStop() async throws {
+        try await Self.withHarness { h in
+            let tools = [Self.tool("get_weather", "Current weather for a city.")]
+            let variants: [(name: String, generates: String, body: String)] = [
+                ("invalid-json-body",
+                 Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_weather","args":{"city":}"# + Self.end
+                    + Self.eos,
+                 #"{"name":"get_weather","args":{"city":}"#),
+                ("unknown-tool",
+                 Self.mdl + "send_email" + Self.invoke + #"{"name":"send_email","args":{"to":"a@b.c"}}"# + Self.end
+                    + Self.eos,
+                 #"{"name":"send_email","args":{"to":"a@b.c"}}"#),
+                ("header-body-name-mismatch",
+                 Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_time","args":{"city":"Paris"}}"# + Self.end
+                    + Self.eos,
+                 #"{"name":"get_time","args":{"city":"Paris"}}"#),
+                ("unclosed-at-eos",
+                 Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_weather","args":{"city":"Paris"}}"#
+                    + Self.eos,
+                 #"{"name":"get_weather","args":{"city":"Paris"}}"#),
+            ]
+            for variant in variants {
+                var body = Self.base([["role": "user", "content": "Weather in Paris?"]], tools: tools)
+                let (status, text, _) = try await h.run(body, generates: variant.generates)
+                #expect(status == 200, "\(variant.name): \(text)")
+                let s = Stream(text)
+                #expect(s.errors == 0 && s.done && s.shapeOK, "\(variant.name): \(text)")
+                #expect(s.roles == ["assistant"], "\(variant.name)")
+                #expect(s.content == variant.body, "\(variant.name): \(s.content)")
+                #expect(s.toolCalls.isEmpty && s.finishReasons == ["stop"], "\(variant.name)")
+                #expect(!s.content.contains("<|") && s.reasoning.isEmpty, "\(variant.name)")
+                #expect(s.usage?["completion_tokens"] as? Int
+                        == h.tokenizer.encode(variant.generates, addBOS: false).count, "\(variant.name)")
+
+                body["stream"] = false
+                body.removeValue(forKey: "stream_options")
+                let (plainStatus, plain, _) = try await h.run(body, generates: variant.generates)
+                #expect(plainStatus == 200, "\(variant.name): \(plain)")
+                let object = try #require(try JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any])
+                let choice = try #require((object["choices"] as? [[String: Any]])?.first)
+                let message = try #require(choice["message"] as? [String: Any])
+                #expect(message["content"] as? String == variant.body, "\(variant.name)")
+                #expect((message["tool_calls"] as? [Any])?.isEmpty ?? true, "\(variant.name)")
+                #expect(choice["finish_reason"] as? String == "stop", "\(variant.name)")
+            }
+        }
+    }
+
+    /// The same malformed call from another dialect still fails as before:
+    /// an in-band error frame after the head when streaming, HTTP 500
+    /// otherwise (`HTTPServerTests.streamingFailureAfterHeadReportsErrorInBand`
+    /// pins the error frame's shape and is unchanged).
+    @Test func otherDialectsStillFailOnAMalformedToolCall() async throws {
+        try await Self.withHarness(fixture: "ChatMLTokenizer", family: .qwen36, modelID: "qwen3.6-35b-a3b",
+                                   product: .qwen36, eosText: "<|im_end|>") { h in
+            #expect(h.tokenizer.dialect == .chatml)
+            let generates = "<tool_call>" + #"{"name":"get_weather","arguments":{"city":}"# + "</tool_call>"
+                + "<|im_end|>"
+            var body: [String: Any] = ["model": "qwen3.6-35b-a3b", "stream": true, "max_completion_tokens": 64,
+                                       "messages": [["role": "user", "content": "Weather in Paris?"]],
+                                       "tools": [Self.tool("get_weather", "Current weather for a city.")]]
+            let (status, text, _) = try await h.run(body, generates: generates)
+            #expect(status == 200)
+            let s = Stream(text)
+            #expect(s.errors == 1 && s.content.isEmpty && s.toolCalls.isEmpty, "\(text)")
+            body["stream"] = false
+            let (plainStatus, plain, _) = try await h.run(body, generates: generates)
+            #expect(plainStatus == 500, "\(plain)")
+
+            // With no tools offered, a ChatML model's call still fails the
+            // request as it does today (in-band error after the head).
+            body["stream"] = true
+            body.removeValue(forKey: "tools")
+            let valid = "<tool_call>" + #"{"name":"get_weather","arguments":{"city":"Paris"}}"# + "</tool_call>"
+                + "<|im_end|>"
+            let (noToolsStatus, noToolsText, _) = try await h.run(body, generates: valid)
+            #expect(noToolsStatus == 200)
+            #expect(Stream(noToolsText).errors == 1, "\(noToolsText)")
+        }
+    }
+
+    /// A tool-call block cut off by `max_completion_tokens` ends with
+    /// `length` and the body generated so far as text, once (no tail text
+    /// added twice).
+    @Test func aToolCallCutByTheCapIsItsBodySoFar() async throws {
+        try await Self.withHarness { h in
+            let generates = Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_weather","args":{"city":"Paris"}}"#
+                + Self.end + Self.eos
+            let script = h.tokenizer.encode(generates, addBOS: false)
+            let invoke = try #require(h.tokenizer.encode(Self.invoke, addBOS: false).first)
+            let start = try #require(script.firstIndex(of: invoke)) + 1
+            let cap = start + 10
+            let expected = h.tokenizer.decode(Array(script[start..<cap]), skipSpecialTokens: true)
+            #expect(!expected.isEmpty)
+            let body = Self.base([["role": "user", "content": "Weather in Paris?"]], maxTokens: cap,
+                                 tools: [Self.tool("get_weather", "Current weather for a city.")])
+            let (status, text, _) = try await h.run(body, generates: generates)
+            #expect(status == 200, "\(text)")
+            let s = Stream(text)
+            #expect(s.errors == 0 && s.finishReasons == ["length"] && s.toolCalls.isEmpty)
+            #expect(s.content == expected, "\(s.content)")
+        }
+    }
+
+    /// With single-prefix reuse on, a turn whose malformed call became text
+    /// is not kept: the next turn prefills its whole prompt (the KV held the
+    /// call's framing, a re-render of the reply does not). A normal text turn
+    /// is reused, which shows the test can see reuse.
+    @Test func aConvertedTurnIsNotReusedAsAPrefix() async throws {
+        try await Self.withHarness(promptCacheMode: .singlePrefix) { h in
+            let tools = [Self.tool("get_weather", "Current weather for a city.")]
+            /// Sends one turn; returns its content and how many prompt tokens
+            /// the runner was fed against the rendered prompt.
+            func turn(_ messages: [[String: Any]], _ generates: String) async throws
+                -> (content: String, prefilled: Int, prompt: Int) {
+                h.runner.plan(script: h.tokenizer.encode(generates, addBOS: false))
+                let (status, text) = try await h.post(Self.base(messages, tools: tools))
+                #expect(status == 200, "\(text)")
+                let s = Stream(text)
+                let completion = try #require(s.usage?["completion_tokens"] as? Int)
+                // Every generated token but the last (EOS) is fed back.
+                return (s.content, h.runner.inputs.count - (completion - 1), h.model.lastPrompt.count)
+            }
+            let question: [String: Any] = ["role": "user", "content": "Weather in Paris?"]
+            let thanks: [String: Any] = ["role": "user", "content": "Thanks."]
+
+            let plain = try await turn([question], Self.mdl + Self.txt + "Let me check." + Self.end + Self.eos)
+            #expect(plain.content == "Let me check." && plain.prefilled == plain.prompt)
+            let reused = try await turn([question, ["role": "assistant", "content": plain.content], thanks],
+                                        Self.mdl + Self.txt + "You are welcome." + Self.end + Self.eos)
+            #expect(reused.prefilled < reused.prompt, "a normal turn should be reused")
+
+            let malformed = Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_weather","args":{"city":}"#
+                + Self.end + Self.eos
+            let converted = try await turn([question], malformed)
+            #expect(converted.content == #"{"name":"get_weather","args":{"city":}"#)
+            let after = try await turn([question, ["role": "assistant", "content": converted.content], thanks],
+                                       Self.mdl + Self.txt + "You are welcome." + Self.end + Self.eos)
+            #expect(after.prefilled == after.prompt, "a converted turn must not be reused")
+        }
+    }
+
+    /// Ruling B, extended: a call the model emits when the request offered no
+    /// tools, or set `tool_choice: "none"` (the server then offers none), is
+    /// the block as text with `stop` and HTTP 200, streamed or not.
+    @Test func callsWithNoToolsOfferedAreText() async throws {
+        try await Self.withHarness { h in
+            let body = #"{"name":"get_weather","args":{"city":"Paris"}}"#
+            let generates = Self.mdl + "get_weather" + Self.invoke + body + Self.end + Self.eos
+            let question: [[String: Any]] = [["role": "user", "content": "Weather in Paris?"]]
+            var noTools = Self.base(question)
+            var toolChoiceNone = Self.base(question, tools: [Self.tool("get_weather", "Current weather for a city.")])
+            toolChoiceNone["tool_choice"] = "none"
+            for (name, request) in [("no-tools-offered", noTools), ("tool-choice-none", toolChoiceNone)] {
+                let (status, text, _) = try await h.run(request, generates: generates)
+                #expect(status == 200, "\(name): \(text)")
+                let s = Stream(text)
+                #expect(s.errors == 0 && s.done && s.shapeOK, "\(name): \(text)")
+                #expect(s.content == body && s.toolCalls.isEmpty && s.finishReasons == ["stop"], "\(name)")
+                #expect(h.model.requests.last?.tools.isEmpty == true, "\(name): no tools reach the engine")
+            }
+            noTools["stream"] = false
+            noTools.removeValue(forKey: "stream_options")
+            let (plainStatus, plain, _) = try await h.run(noTools, generates: generates)
+            #expect(plainStatus == 200, "\(plain)")
+            let object = try #require(try JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any])
+            let choice = try #require((object["choices"] as? [[String: Any]])?.first)
+            #expect((choice["message"] as? [String: Any])?["content"] as? String == body)
+            #expect(choice["finish_reason"] as? String == "stop")
+        }
+    }
+
+    /// Ruling A, detail: a `role: tool` message without `tool_call_id` is
+    /// rejected before anything renders (400), as it is today; the client
+    /// always sends the id.
+    @Test func aToolResultWithoutItsCallIdIsRejected() async throws {
+        try await Self.withHarness { h in
+            let messages: [[String: Any]] = [
+                ["role": "user", "content": "Weather in Paris?"],
+                ["role": "assistant", "content": "",
+                 "tool_calls": [["id": "call_1", "type": "function",
+                                 "function": ["name": "get_weather", "arguments": #"{"city":"Paris"}"#]]]],
+                ["role": "tool", "name": "get_weather", "content": "18 C"],
+            ]
+            h.runner.plan(script: [])
+            let (status, text) = try await h.post(
+                Self.base(messages, tools: [Self.tool("get_weather", "Current weather for a city.")]))
+            #expect(status == 400, "\(text)")
+            #expect(text.contains("invalid_tool_result"))
+            #expect(h.model.requests.isEmpty)
         }
     }
 }

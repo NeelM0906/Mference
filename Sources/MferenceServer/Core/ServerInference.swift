@@ -519,6 +519,10 @@ public actor ServerModelSession: ServerLoadedModel {
                 startsInThought: startsInThinking,
                 toolDefinitions: request.tools)
             : nil
+        // Inkling 2 only: a tool call the parser rejects, or one still open
+        // at the end, reaches the client as the model's text with
+        // `finish_reason: stop`, not as a failed request.
+        decoder?.inkling2MalformedToolCallsAsText = tokenizer.dialect == .inkling2
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
@@ -632,7 +636,14 @@ public actor ServerModelSession: ServerLoadedModel {
             reason = "stop"
         }
         try Task.checkCancellation()
-        if let prefixStates, let snapshotRunner {
+        if (decoder?.convertedInkling2MalformedToolCalls ?? 0) > 0 {
+            // A malformed Inkling 2 tool call sent as text: the KV holds the
+            // call's framing, a re-render of the reply does not, so this
+            // turn is not kept for prefix reuse (as when such a turn failed).
+            promptCache.invalidate()
+            runner.reset()
+            prefixStates?.didFail()
+        } else if let prefixStates, let snapshotRunner {
             prefixStates.didFinish(
                 entry: PromptPrefixCache.makeEntry(
                     domain: promptCacheDomain,
