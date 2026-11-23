@@ -9,7 +9,7 @@ plays the tool side itself from the corpus fixtures. Scoring is deterministic
 
     run:        agent_acceptance.py run --corpus <dir> --tier gate|full --profiles <json>
                     --engine-commit <sha> --machine-record <file> --output <new.jsonl> [--port 18489]
-                    [--blocks A,B,C,D,E] [--seeds 1,2,3] [--timeout 900]
+                    [--blocks A,B,C,D,E] [--cases id,id,...] [--seeds 1,2,3] [--timeout 900]
     summarize:  agent_acceptance.py summarize <run.jsonl>
     paired:     agent_acceptance.py paired <run-a.jsonl> <run-b.jsonl>
 
@@ -25,6 +25,13 @@ loop: a tool call with invalid JSON arguments, or to a tool that was not
 offered, fails the case at once (the app answers with a failure text and
 goes on). Intervals in `summarize` treat every (case, seed) as a trial, so
 with several seeds they are narrower than the per-case truth.
+
+Inkling-only cases (coordinator ruling, 2026-11-23): Deep runs at 32,768 tokens
+of context in library mode, and block C's two 30K cases (c09, c10) need about
+26K-32K prompt tokens plus the 4,096 cap. They run only for a profile whose
+model is Inkling 2 Mini, are skipped (and logged) for any other model, carry
+"unpaired": true, are summarized on their own row (block "C, Inkling only")
+and never enter `paired`. The gate tier does not contain them.
 """
 
 import argparse
@@ -45,6 +52,8 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent.parent
 REPO = SCRIPTS.parent
 CAPS = {"A": 2048, "B": 2048, "C": 4096, "D": 4096, "E": 2048}
+INKLING_MODEL = "inkling-2-mini-ud-q4_k_xl"
+INKLING_ONLY = {"c09-30k-cross-doc", "c10-30k-late-needle"}
 MAX_PAGES = 4  # WebToolbox.maxPages
 
 
@@ -459,6 +468,12 @@ def read_json(path):
 def cmd_run(a):
     blocks = [b.strip().upper() for b in a.blocks.split(",")]
     tiers, tier, cases, screen_path = load_corpus(a.corpus, a.tier, blocks)
+    if a.cases:
+        wanted = [c.strip() for c in a.cases.split(",") if c.strip()]
+        unknown = sorted(set(wanted) - {c["id"] for _, c in cases})
+        if unknown:
+            sys.exit(f"--cases not in tier {a.tier} blocks {','.join(blocks)}: {', '.join(unknown)}")
+        cases = [(b, c) for b, c in cases if c["id"] in wanted]
     profiles = read_json(a.profiles)
     if not profiles or len({p["label"] for p in profiles}) != len(profiles):
         sys.exit("profiles must have unique labels")
@@ -472,6 +487,7 @@ def cmd_run(a):
     warmups = a.warmups if a.warmups is not None else tier.get("warmups", 1)
     with open(a.output, "x") as out:
         header = {"protocol": "agent-acceptance-v1", "tier": a.tier, "blocks": blocks, "seeds": seeds,
+                  "cases": [c["id"] for _, c in cases] if a.cases else None,
                   "warmups_per_case": warmups, "caps": CAPS, "profiles": profiles,
                   "engine_commit": a.engine_commit, "machine": machine,
                   "corpus_sha256": manifest, "release_screen_sha256": sha256(screen_path), "port": a.port}
@@ -479,12 +495,16 @@ def cmd_run(a):
         out.flush()
         for profile in profiles:
             for block, case in cases:
+                if case["id"] in INKLING_ONLY and profile["model"] != INKLING_MODEL:
+                    print(json.dumps({"profile": profile["label"], "case": case["id"],
+                                      "skipped": f"Inkling-only case; model {profile['model']}"}), flush=True)
+                    continue
                 for si, seed in enumerate(seeds):
                     # warmups: per case and profile (before the first seed only), as the release screen
                     for rep in range((warmups if si == 0 else 0) + 1):
                         r = run_case(url, block, case, profile, seed, a.timeout)
                         r.update(profile=profile["label"], block=block, case=case["id"], seed=seed,
-                                 warmup=si == 0 and rep < warmups)
+                                 warmup=si == 0 and rep < warmups, unpaired=case["id"] in INKLING_ONLY)
                         out.write(json.dumps(r, ensure_ascii=False) + "\n")
                         out.flush()
                         print(json.dumps({k: r[k] for k in ("profile", "block", "case", "seed", "warmup", "passed",
@@ -512,7 +532,11 @@ def cmd_summarize(a):
     header, rows = measured(a.run)
     groups = {}
     for r in rows:
-        for key in ((r["profile"], r["block"]), (r["profile"], "all")):
+        if r.get("unpaired") or r["case"] in INKLING_ONLY:  # the case id too: runs from before the flag
+            keys = ((r["profile"], r["block"] + ", Inkling only"),)
+        else:
+            keys = ((r["profile"], r["block"]), (r["profile"], "all"))
+        for key in keys:
             g = groups.setdefault(key, {"n": 0, "k": 0, "fail": {}, "secs": []})
             g["n"] += 1
             g["k"] += r["passed"]
@@ -533,8 +557,9 @@ def cmd_paired(a):
     _, ra = measured(a.run_a)
     _, rb = measured(a.run_b)
     key = lambda r: (r["profile"], r["block"], r["case"], r["seed"])
-    ia = {key(r): r["passed"] for r in ra}
-    ib = {key(r): r["passed"] for r in rb}
+    unpaired = lambda r: r.get("unpaired") or r["case"] in INKLING_ONLY  # the id too: runs from before the flag
+    ia = {key(r): r["passed"] for r in ra if not unpaired(r)}
+    ib = {key(r): r["passed"] for r in rb if not unpaired(r)}
     common = sorted(set(ia) & set(ib))
     table = {}
     for k in common:
@@ -559,6 +584,7 @@ def main(argv=None):
     r.add_argument("--output", required=True)
     r.add_argument("--port", type=int, default=18489)
     r.add_argument("--blocks", default="A,B,C,D,E")
+    r.add_argument("--cases", default=None, help="comma-separated case ids within the tier and blocks")
     r.add_argument("--seeds", default=None)
     r.add_argument("--warmups", type=int, default=None, help="default: the tier's (gate 0, full 1)")
     r.add_argument("--timeout", type=float, default=900)
