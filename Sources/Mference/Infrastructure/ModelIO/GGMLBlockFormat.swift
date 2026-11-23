@@ -6,11 +6,18 @@ import Foundation
 /// these blocks, row after row, in the GGUF's own order.
 ///
 /// - `q8_0`: 32 values per 34-byte block, an F16 scale `d` then 32 int8 codes;
-///   value = `d * q`.
-/// - `nvfp4`: 64 values per 36-byte block, four UE4M3 scales (one per 16
-///   values) then 32 bytes of E2M1 codes, two per byte, the even value in the
-///   low nibble. A tensor-level or per-expert F32 factor (`*.scale`) multiplies
-///   the product, as llama.cpp does.
+///   value `i` = `d * q[i]`.
+/// - `nvfp4`: 64 values per 36-byte block: `d[4]`, one UE4M3 scale per
+///   16-value sub-block, then `qs[32]`, E2M1 codes. Sub-block `s` (values
+///   `16s ..< 16s + 16`) owns bytes `qs[8s ..< 8s + 8]`: byte `qs[8s + j]`
+///   holds value `16s + j` in its low nibble and value `16s + j + 8` in its
+///   high nibble (not adjacent pairs). Value = `kvalues_fp4[code] *
+///   ue4m3(d[s])`, where `kvalues_fp4` is twice E2M1 (`0, 1, 2, 3, 4, 6, 8, 12`
+///   and their negatives for codes 8 to 15) and `ue4m3(x)` is half the
+///   unsigned E4M3 value (0 for `x == 0` or `0x7F`), exactly as
+///   `dequantize_row_nvfp4` and `ggml_ue4m3_to_fp32` at the reference tag do.
+///   A per-tensor or per-expert F32 factor (`*.scale`) then multiplies the
+///   matrix product, as llama.cpp does.
 public enum GGMLBlockFormat: UInt32, Sendable, Hashable, CaseIterable {
     case f32 = 0
     case f16 = 1

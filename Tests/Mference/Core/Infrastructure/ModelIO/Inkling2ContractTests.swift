@@ -3,60 +3,10 @@ import Testing
 @testable import MferenceRepackCore
 @testable import Mference
 
-/// The `inkling2Loop` family contract: the compiled baseline against the
-/// checkpoint, the loop's visit order, the capability gate, and the manifest
-/// round trip from the repacker's mirror to the runtime's validation.
+/// The `inkling2Loop` family contract beyond the baseline values (those are
+/// in `ModelTypesTests`): the loop's visit order, the capability gate, and the
+/// manifest round trip from the repacker's mirror to the runtime's validation.
 @Suite struct Inkling2ContractTests {
-
-    /// Pins the baseline against `thinkingmachines/Inkling-2-Mini` @ `b85c3cf`
-    /// `config.json` and the metadata of Unsloth's UD-Q4_K_XL GGUF of it.
-    @Test func baselineMatchesTheCheckpoint() {
-        let a = ArchConfig.inkling2Mini
-        #expect(a.family == .inkling2Loop)
-        #expect(a.hiddenSize == 2304)
-        #expect(a.numLayers == 24)
-        #expect(a.numHeads == 24 && a.numKVHeads == 8 && a.numFullKVHeads == 8)
-        #expect(a.headDim == 128 && a.fullHeadDim == 128)
-        #expect(a.vocabSize == 201_024 && a.unpaddedVocabSize == 200_058)
-        #expect(a.tieWordEmbeddings == false)
-        #expect(a.slidingWindow == 1024)
-        #expect(a.fullAttentionLayerMask.count == 24)
-        #expect(a.fullAttentionLayerMask.enumerated().filter { $0.element == 1 }.map(\.offset)
-                == [5, 11, 17, 23])
-        #expect(a.fullAttentionLayerMask.allSatisfy { $0 == 0 || $0 == 1 })
-        #expect(a.finalLogitSoftcap == 30.0)
-        #expect(a.attentionScale == pow(128.0, -0.5))
-        // No RoPE: the relative bias carries positions.
-        #expect(a.ropeTheta == 0 && a.fullRopeTheta == 0 && a.partialRotaryFactor == 0)
-        #expect(a.relativePosition == RelativePositionConfig(
-            dRel: 16, extent: 1024, projDim: 24 * 16,
-            logScalingFloor: 8192, logScalingAlpha: Double(Float(0.1))))
-        #expect(a.sconvKernelSize == 4)
-        #expect(a.attentionSinks && a.inkling2.attentionSinkProjected)
-        #expect(a.qkNorm == false)
-        #expect(a.embedNormEnabled)
-        // MoE: 128 experts, top-8, width 1152, no shared expert.
-        #expect(a.numExperts == 128 && a.topKExperts == 8)
-        #expect(a.moeIntermediateSize == 1152)
-        #expect(a.numSharedExperts == 0 && a.numDenseLayers == 0)
-        #expect(a.routerScoringFunc == "sigmoid")
-        #expect(a.routerGateBias && a.routerNormAfterTopK)
-        #expect(a.routedScalingFactor == 8.0)
-        #expect(a.hiddenActivation == "situ")
-        #expect(a.inkling2.expertGateSoftcap == 4.0 && a.inkling2.expertUpSoftcap == 25.0)
-        // The loop.
-        #expect(a.inkling2.loopCoreStart == 6 && a.inkling2.loopCoreEnd == 18)
-        #expect(a.inkling2.loopNumPasses == 3 && a.inkling2.loopGateRank == 64)
-        #expect(a.inkling2.attnResBlockSize == 6)
-        #expect(a.inkling2.loopCoreStart % a.inkling2.attnResBlockSize == 0)
-        #expect(a.inkling2.loopCoreEnd % a.inkling2.attnResBlockSize == 0)
-        #expect(a.inkling2.qkClipThreshold == Double(Float(512.0.squareRoot())))
-        #expect(a.inkling2.relClipThreshold == 8.0)
-        // Formats: NVFP4 experts in layers 0 to 19, Q8_0 in 20 to 23.
-        #expect(a.inkling2.routedExpertFormats.count == 24)
-        #expect(a.inkling2.routedExpertFormats.prefix(20).allSatisfy { $0 == "NVFP4" })
-        #expect(a.inkling2.routedExpertFormats.suffix(4).allSatisfy { $0 == "Q8_0" })
-    }
 
     /// Every other baseline leaves the new axes at `.none`, so the manifests
     /// that predate them keep validating unchanged.
@@ -94,6 +44,21 @@ import Testing
         // No loop: the stored layers in order.
         #expect(Inkling2Config.none.layerVisits(numLayers: 3).map(\.layer) == [0, 1, 2])
         #expect(Inkling2Config.none.layerVisitCount(numLayers: 3) == 3)
+        #expect(!Inkling2Config.none.layerIsLooped(0))
+        // One pass is no loop; bounds past the stored layers fall back too.
+        func config(start: Int, end: Int, passes: Int) -> Inkling2Config {
+            Inkling2Config(loopCoreStart: start, loopCoreEnd: end, loopNumPasses: passes,
+                           loopGateRank: 0, attnResBlockSize: 0, qkClipThreshold: 0,
+                           relClipThreshold: 0, attentionSinkProjected: false,
+                           expertGateSoftcap: 0, expertUpSoftcap: 0, routedExpertFormats: [])
+        }
+        let onePass = config(start: 1, end: 3, passes: 1)
+        #expect(!onePass.layerIsLooped(1))
+        #expect(onePass.layerVisitCount(numLayers: 4) == 4)
+        #expect(onePass.layerVisits(numLayers: 4).map(\.layer) == [0, 1, 2, 3])
+        let outOfRange = config(start: 2, end: 9, passes: 3)
+        #expect(outOfRange.layerVisitCount(numLayers: 4) == 4)
+        #expect(outOfRange.layerVisits(numLayers: 4).count == 4)
     }
 
     /// The family is installable but gated until its runner lands; the

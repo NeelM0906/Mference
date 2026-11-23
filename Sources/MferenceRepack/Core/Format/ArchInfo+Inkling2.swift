@@ -2,9 +2,9 @@ import Foundation
 
 extension ArchInfo {
     /// The pinned Inkling 2 Mini shape: the repacker's twin of the runtime's
-    /// `ArchConfig.inkling2Mini`. An Inkling 2 GGUF whose metadata does not
-    /// produce exactly this is refused before any tensor byte is read, so an
-    /// install can only ever carry the shape the runner is built for.
+    /// `ArchConfig.inkling2Mini`. An arch read from an Inkling 2 GGUF must
+    /// equal this before anything is planned from it, so an install can only
+    /// ever carry the shape the runner is built for.
     ///
     /// The `Double` axes are the GGUF's f32 values widened exactly.
     static let inkling2Mini = ArchInfo(

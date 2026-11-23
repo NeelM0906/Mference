@@ -480,14 +480,19 @@ public struct Inkling2Config: Sendable, Equatable {
     /// Stored layers in the looped core.
     public var loopCoreLayerCount: Int { max(0, loopCoreEnd - loopCoreStart) }
 
-    /// True for a stored layer inside the looped core.
+    /// True for a stored layer that runs more than once per token.
     public func layerIsLooped(_ layer: Int) -> Bool {
-        loopNumPasses > 0 && layer >= loopCoreStart && layer < loopCoreEnd
+        loopNumPasses > 1 && layer >= loopCoreStart && layer < loopCoreEnd
+    }
+
+    /// Whether the loop bounds describe a loop over `numLayers` stored layers.
+    private func loops(numLayers: Int) -> Bool {
+        loopNumPasses > 1 && loopCoreStart >= 0 && loopCoreLayerCount > 0 && loopCoreEnd <= numLayers
     }
 
     /// Layer visits per token: `numLayers + (passes - 1) * coreLayers`.
     public func layerVisitCount(numLayers: Int) -> Int {
-        guard loopNumPasses > 1 else { return numLayers }
+        guard loops(numLayers: numLayers) else { return numLayers }
         return numLayers + (loopNumPasses - 1) * loopCoreLayerCount
     }
 
@@ -507,10 +512,10 @@ public struct Inkling2Config: Sendable, Equatable {
     }
 
     /// Every layer visit of one token in execution order: prelude, core pass
-    /// 1, ..., core pass `loopNumPasses`, coda. Without a loop it is the
-    /// stored layers in order.
+    /// 1, ..., core pass `loopNumPasses`, coda. Without a loop (or with bounds
+    /// outside `0 ..< numLayers`) it is the stored layers in order.
     public func layerVisits(numLayers: Int) -> [LayerVisit] {
-        guard loopNumPasses > 1, loopCoreLayerCount > 0 else {
+        guard loops(numLayers: numLayers) else {
             return (0..<numLayers).map { LayerVisit(order: $0, layer: $0, pass: 0, cacheSlot: $0) }
         }
         var visits: [LayerVisit] = []
@@ -982,8 +987,9 @@ public struct ArchConfig: Sendable, Equatable {
     ///
     /// The sliding and full pairs of KV heads and head widths are equal; the
     /// relative-bias extent is 1,024 on both layer kinds, the same as the
-    /// window. `rms_norm_eps` (1e-6) is not an axis: the repacker refuses any
-    /// other value, because the kernels default to that epsilon.
+    /// window. `rms_norm_eps` (1e-6, f32 in the GGUF) is not an axis: the
+    /// kernels default to that epsilon, so an installer must refuse a file
+    /// with any other value.
     public static let inkling2Mini = ArchConfig(
         hiddenSize: 2304,
         intermediateSize: 1152,

@@ -206,12 +206,10 @@ import Testing
     /// family in the table must still be refused at the funnel, whatever
     /// machinery has been built for it.
     ///
-    /// The table is empty today, so this loops zero times. It is kept rather
-    /// than deleted because it is the end-to-end form of the invariant — the
-    /// one that goes through a real `manifest.json` and `peekFamily` — and it
-    /// starts asserting again the moment a new family is gated.
+    /// It holds `inkling2Loop` while that runner is built, so this goes end to
+    /// end through a real `manifest.json` and `peekFamily` for it.
     /// `anInjectedEntryStillProducesTheNamedRefusal` covers the lookup itself
-    /// in the meantime.
+    /// whatever the table holds.
     @Test func gateTableCoversOnlyFamiliesWithoutARunner() throws {
         for (raw, axes) in ManifestReader.familiesWithoutRunner {
             #expect(!axes.isEmpty, "\(raw) must name the axes it is missing")

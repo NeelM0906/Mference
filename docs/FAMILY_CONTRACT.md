@@ -215,7 +215,9 @@ Learned relative-attention position encoding, used by architectures that
 carry no RoPE at all. `.none` for every family except Inkling-Small and
 Inkling 2. IK2 clips each per-head relative state to an L2 norm of
 `inkling2.relClipThreshold` after its per-head scale, and its `extent` and
-`slidingWindow` are equal, so both layer kinds ship `[16, 1024]` tables.
+`slidingWindow` are equal, so both layer kinds ship the same table shape:
+`attn_rel_bias` is GGUF `ne` `[16, 1024]`, row-major `[1024, 16]` (one
+16-wide profile row per backward distance).
 
 Inkling projects the residual to `projDim` (`attn.wr_du`, width
 `numHeads * dRel`) and reshapes it to a per-head `dRel` relative-state
