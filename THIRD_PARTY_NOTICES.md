@@ -10,7 +10,7 @@ Mference's runtime, installer, and application code are derived from
 Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
-rebrand throughout; support for Qwen 3.6, Qwen 3.8 27B, Maple, and MiniCPM5-2B
+rebrand throughout; support for Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5-2B, and Inkling 2 Mini
 across architecture configuration,
 streaming installation, Metal kernels, forward runners, tokenization, and
 products; model-derived kernel specialization; and expanded validation and
