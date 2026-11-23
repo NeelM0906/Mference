@@ -133,7 +133,7 @@ enum GGUFTokenizer {
         // user-defined tokens are added tokens, matched before BPE (llama.cpp
         // `parse_special`), with control tokens marked special.
         var vocab: [(String, Int)] = []
-        var added: [[String: Any]] = []
+        var added: [OrderedJSON] = []
         var seen = Set<String>()
         for (i, (tok, t)) in zip(tokens, types).enumerated() {
             guard seen.insert(tok).inserted else { throw invalid("duplicate token text at id \(i)") }
@@ -141,40 +141,43 @@ enum GGUFTokenizer {
             case .normal, .unused, .byte:
                 vocab.append((tok, i))
             case .control, .userDefined:
-                added.append(["id": i, "content": tok, "single_word": false, "lstrip": false, "rstrip": false,
-                              "normalized": false, "special": t == .control])
+                added.append(.sorted(["id": .int(i), "content": .string(tok), "single_word": .bool(false),
+                                      "lstrip": .bool(false), "rstrip": .bool(false), "normalized": .bool(false),
+                                      "special": .bool(t == .control)]))
             case .unknown, .undefined:
                 throw invalid("token type \(t) at id \(i) has no gpt2 BPE equivalent")
             }
         }
 
-        func byteLevel(_ flags: [String: Bool]) -> [String: Any] {
-            var stage: [String: Any] = ["type": "ByteLevel"]
-            for (key, value) in flags { stage[key] = value }
-            return stage
+        func byteLevel(_ flags: [String: Bool]) -> OrderedJSON {
+            var stage: [String: OrderedJSON] = ["type": .string("ByteLevel")]
+            for (key, value) in flags { stage[key] = .bool(value) }
+            return .sorted(stage)
         }
-        // JSONSerialization does not keep dictionary order; vocab order is by id
-        // for readability only (ids are explicit).
-        let tokenizer: [String: Any] = [
-            "version": "1.0",
-            "truncation": NSNull(),
-            "padding": NSNull(),
-            "added_tokens": added,
-            "normalizer": NSNull(),
-            "pre_tokenizer": ["type": "Sequence", "pretokenizers": [
-                ["type": "Split", "pattern": ["Regex": spec.regex], "behavior": "Isolated", "invert": false],
+        // Written with OrderedJSON, not JSONSerialization: see its comment.
+        // Members sorted by key; the vocab in id order, as Hugging Face
+        // writes it.
+        let tokenizer: OrderedJSON = .sorted([
+            "version": .string("1.0"),
+            "truncation": .null,
+            "padding": .null,
+            "added_tokens": .array(added),
+            "normalizer": .null,
+            "pre_tokenizer": .sorted(["type": .string("Sequence"), "pretokenizers": .array([
+                .sorted(["type": .string("Split"), "pattern": .sorted(["Regex": .string(spec.regex)]),
+                         "behavior": .string("Isolated"), "invert": .bool(false)]),
                 byteLevel(spec.preTokenizerByteLevel),
-            ]],
+            ])]),
             "post_processor": byteLevel(spec.postProcessorByteLevel),
             "decoder": byteLevel(spec.decoderByteLevel),
-            "model": [
-                "type": "BPE", "dropout": NSNull(), "unk_token": NSNull(),
-                "continuing_subword_prefix": NSNull(), "end_of_word_suffix": NSNull(),
-                "fuse_unk": false, "byte_fallback": false, "ignore_merges": spec.ignoreMerges,
-                "vocab": Dictionary(uniqueKeysWithValues: vocab),
-                "merges": merges,
-            ] as [String: Any],
-        ]
+            "model": .sorted([
+                "type": .string("BPE"), "dropout": .null, "unk_token": .null,
+                "continuing_subword_prefix": .null, "end_of_word_suffix": .null,
+                "fuse_unk": .bool(false), "byte_fallback": .bool(false), "ignore_merges": .bool(spec.ignoreMerges),
+                "vocab": .object(vocab.map { ($0.0, .int($0.1)) }),
+                "merges": .array(merges.map { .array($0.map { .string($0) }) }),
+            ]),
+        ])
         var config: [String: Any] = [
             "add_bos_token": false,
             "add_prefix_space": false,
@@ -191,9 +194,88 @@ enum GGUFTokenizer {
         config["unk_token"] = NSNull()
 
         let opts: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes]
-        return Sidecars(tokenizerJSON: try JSONSerialization.data(withJSONObject: tokenizer, options: opts),
+        return Sidecars(tokenizerJSON: Data(tokenizer.bytes),
                         tokenizerConfigJSON: try JSONSerialization.data(withJSONObject: config, options: opts),
                         chatTemplate: template,
                         generationConfigJSON: try generationConfig(metadata: md, eos: eos, pad: pad))
+    }
+}
+
+extension GGUFTokenizer {
+    /// A JSON value written in a fixed member order, so one GGUF always gives
+    /// the same `tokenizer.json` bytes. `JSONSerialization`'s `.sortedKeys`
+    /// compares keys numerically and case-insensitively, which is not a total
+    /// order over a 200K-entry byte-level vocabulary: its output followed the
+    /// dictionary's per-process hash order, and two installs of the same file
+    /// wrote the same members in different orders.
+    indirect enum OrderedJSON {
+        case null
+        case bool(Bool)
+        case int(Int)
+        case string(String)
+        case array([OrderedJSON])
+        /// Members in the given order.
+        case object([(String, OrderedJSON)])
+
+        /// An object with its members sorted by the keys' UTF-8 bytes.
+        static func sorted(_ members: [String: OrderedJSON]) -> OrderedJSON {
+            .object(members.sorted { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }.map { ($0.key, $0.value) })
+        }
+
+        /// Compact UTF-8 JSON: no whitespace, `/` unescaped, and only `"`,
+        /// `\` and U+0000-U+001F escaped, as `JSONSerialization` writes it
+        /// with `.withoutEscapingSlashes`.
+        var bytes: [UInt8] {
+            var out: [UInt8] = []
+            write(to: &out)
+            return out
+        }
+
+        private func write(to out: inout [UInt8]) {
+            switch self {
+            case .null: out.append(contentsOf: "null".utf8)
+            case .bool(let b): out.append(contentsOf: (b ? "true" : "false").utf8)
+            case .int(let n): out.append(contentsOf: String(n).utf8)
+            case .string(let s): Self.writeString(s, to: &out)
+            case .array(let items):
+                out.append(UInt8(ascii: "["))
+                for (i, item) in items.enumerated() {
+                    if i > 0 { out.append(UInt8(ascii: ",")) }
+                    item.write(to: &out)
+                }
+                out.append(UInt8(ascii: "]"))
+            case .object(let members):
+                out.append(UInt8(ascii: "{"))
+                for (i, (key, value)) in members.enumerated() {
+                    if i > 0 { out.append(UInt8(ascii: ",")) }
+                    Self.writeString(key, to: &out)
+                    out.append(UInt8(ascii: ":"))
+                    value.write(to: &out)
+                }
+                out.append(UInt8(ascii: "}"))
+            }
+        }
+
+        private static func writeString(_ s: String, to out: inout [UInt8]) {
+            let hex = Array("0123456789abcdef".utf8)
+            out.append(UInt8(ascii: "\""))
+            for byte in s.utf8 {
+                switch byte {
+                case UInt8(ascii: "\""): out.append(contentsOf: [UInt8(ascii: "\\"), UInt8(ascii: "\"")])
+                case UInt8(ascii: "\\"): out.append(contentsOf: [UInt8(ascii: "\\"), UInt8(ascii: "\\")])
+                case 0x08: out.append(contentsOf: Array(#"\b"#.utf8))
+                case 0x09: out.append(contentsOf: Array(#"\t"#.utf8))
+                case 0x0A: out.append(contentsOf: Array(#"\n"#.utf8))
+                case 0x0C: out.append(contentsOf: Array(#"\f"#.utf8))
+                case 0x0D: out.append(contentsOf: Array(#"\r"#.utf8))
+                case 0x00..<0x20:
+                    out.append(contentsOf: Array(#"\u00"#.utf8))
+                    out.append(hex[Int(byte >> 4)])
+                    out.append(hex[Int(byte & 0xF)])
+                default: out.append(byte)
+                }
+            }
+            out.append(UInt8(ascii: "\""))
+        }
     }
 }
