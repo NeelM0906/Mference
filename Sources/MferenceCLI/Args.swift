@@ -59,6 +59,9 @@ public struct Args: Equatable, Sendable {
     /// `--max-context max`: `maxContext` becomes the model's native context in
     /// `resolvingModelMaxContext()`.
     public var usesModelMaxContext: Bool = false
+    /// Set by `resolvingModelMaxContext()` when the family's cap for this
+    /// Mac's memory lowered `maxContext` (Inkling 2 under 48 GB).
+    public var hostContextCap: Int?
     public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
     public var topK: Int? { didSet { omittedSamplingOptions.remove(.topK) } }
     public var topP: Float? { didSet { omittedSamplingOptions.remove(.topP) } }
@@ -561,13 +564,34 @@ extension Args {
         return result
     }
 
-    /// Replaces `--max-context max` with the installed model's native context.
-    public func resolvingModelMaxContext() throws -> Args {
-        guard usesModelMaxContext else { return self }
+    /// Replaces `--max-context max` with the installed model's native context,
+    /// and lowers it, or a larger explicit value, to the family's cap for this
+    /// Mac's memory where it has one (`ModelFamily.memoryContextCap`: Inkling
+    /// 2 on a Mac whose expert residency plan stages layers). For an explicit
+    /// value the family is peeked without failing, so a model the peek cannot
+    /// read fails later, exactly as before.
+    public func resolvingModelMaxContext(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory)
+        throws -> Args {
+        let directory = URL(fileURLWithPath: model)
+        let family = usesModelMaxContext
+            ? try ManifestReader.peekFamily(directoryURL: directory)
+            : try? ManifestReader.peekFamily(directoryURL: directory)
+        return resolvingMaxContext(family: family, physicalMemory: physicalMemory)
+    }
+
+    /// `resolvingModelMaxContext` once the family is known (nil: not known,
+    /// for an explicit value only). `hostContextCap` is set when the cap
+    /// lowered the context.
+    func resolvingMaxContext(family: ModelFamily?, physicalMemory: UInt64) -> Args {
         var resolved = self
-        resolved.maxContext = try ManifestReader.peekFamily(
-            directoryURL: URL(fileURLWithPath: model)).maximumContext
-        resolved.usesModelMaxContext = false
+        if usesModelMaxContext, let family {
+            resolved.maxContext = family.maximumContext
+            resolved.usesModelMaxContext = false
+        }
+        if let cap = family?.memoryContextCap(physicalMemory: physicalMemory), resolved.maxContext > cap {
+            resolved.maxContext = cap
+            resolved.hostContextCap = cap
+        }
         return resolved
     }
 
