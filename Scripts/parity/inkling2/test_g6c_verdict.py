@@ -382,8 +382,8 @@ class ForcedReportTests(unittest.TestCase):
         self.assertAlmostEqual(r["max_shortfall"], 0.004)
 
     def test_stale_and_malformed(self):
-        self.forced(candidate="cand-other")  # another candidate directory with byte-identical traces is fine (v1.16)
-        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "ok")
+        self.forced(candidate="cand-other")  # the forced-on candidate must be on disk to verify the hidden file (v1.18)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
         self.forced(runner_trace_sha256="0" * 64)
         self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
         self.forced(disagreement_count=2)
@@ -428,7 +428,7 @@ class V116Tests(unittest.TestCase):
         visits = [{"visit": v, "layer": v, "slot": 0, "own_experts": [list(range(8))] * n, "fp32_margins": [0.01] * n,
                    "shortfalls": [0.0] * n, "differs": [v == 1 and t == 1 for t in range(n)],
                    "increment_rel_l2": [inc if not callable(inc) else inc(t) for t in range(n)]} for v in range(2)]
-        d = {"schema": "inkling2-forced-routing-v1", "id": pid, "candidate": "cand-other", "runner_tip": "abc",
+        d = {"schema": "inkling2-forced-routing-v1", "id": pid, "candidate": "cand-x", "runner_tip": "abc",
              "runner_trace_sha256": sha, "reference_commit": "def", "precision": precision, "n_tokens": n,
              "top_k": 8, "near_tie_bound": 0.0258, "token_visits": 2 * n, "disagreement_count": 1,
              "disagreement_rate": 1 / (2 * n), "not_near_tie_count": 0, "visits": visits,
@@ -443,7 +443,7 @@ class V116Tests(unittest.TestCase):
         self.forced()  # 1 of 6 token-visits is far above 0.5%
         a = gv.forced_gate(self.root, self.tdir)
         self.assertIn("rate", a["prompts"]["t"]["fails"])
-        self.forced(positions=300)  # 1 of 600; another candidate directory with the same trace bytes is fine
+        self.forced(positions=300)  # 1 of 600
         self.assertTrue(gv.forced_gate(self.root, self.tdir)["prompts"]["t"]["pass"])
         self.forced(positions=300, shortfall=0.002)
         self.assertIn("shortfall", gv.forced_gate(self.root, self.tdir)["prompts"]["t"]["fails"])
@@ -499,6 +499,19 @@ class V116Tests(unittest.TestCase):
         r = gv.forced_report(self.root, "t", self.tdir)
         self.assertEqual(r["status"], "stale")
         self.assertIn("hidden-state file differs", r["why"])
+        # 4. a margin's sign flips to -0.0 from 0.0: content, not formatting
+        with open(os.path.join(self.tdir, "t", "h.f32"), "r+b") as f:
+            f.write(b"\x00\x00\x80\x3f")
+        t3 = json.loads(json.dumps(t))
+        t3["visits"][0]["slot"] = -0.0 if t3["visits"][0]["slot"] == 0 else t3["visits"][0]["slot"]
+        write(t3)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
+        # 5. the forced-on candidate is gone: the hidden file cannot be verified, even with trace.json identical
+        write(t)
+        shutil.rmtree(orig)
+        r = gv.forced_report(self.root, "t", self.tdir)
+        self.assertEqual(r["status"], "stale")
+        self.assertIn("not on disk", r["why"])
 
     def ref(self, **kw):
         kw.setdefault("positions", 300)

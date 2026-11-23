@@ -398,31 +398,31 @@ def forced_report(root, pid, tdir):
 def same_trace_content(tdir, pid, d):
     """Spec v1.18: is the runner's trace the one a forced file was forced on, by content? The forced-on trace is
     found beside the judged candidate (<candidate dir>/../<d["candidate"]>/traces/<pid>) and must match the
-    file's recorded raw SHA-256; then trace.json must be equal as parsed content (floats exact) and the
-    hidden-state file byte-identical. Returns (same, why)."""
+    file's recorded raw SHA-256; then trace.json must be equal as canonical content (sorted keys; floats by
+    exact repr, so -0.0, 1 against 1.0 and true against 1 all differ) and the hidden-state file byte-identical.
+    Without the forced-on trace on disk the hidden file cannot be verified, so the answer is no. (same, why)."""
     import hashlib
     cand_dir = os.path.dirname(os.path.abspath(tdir))
     orig = os.path.join(os.path.dirname(cand_dir), str(d.get("candidate")), "traces", pid)
     sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
     ot, nt = os.path.join(orig, "trace.json"), os.path.join(tdir, pid, "trace.json")
-    if not os.path.isfile(ot) or sha(ot) != d.get("runner_trace_sha256"):
-        if sha(nt) == d.get("runner_trace_sha256"):
-            return True, "trace.json byte-identical; the hidden-state file not compared (forced-on candidate not on disk)"
-        return False, f"the forced-on trace {orig} is not available to compare by content"
+    if not os.path.isfile(ot):
+        return False, f"the forced-on trace {orig} is not on disk, so the hidden-state file cannot be verified"
+    if sha(ot) != d.get("runner_trace_sha256"):
+        return False, f"the forced-on trace at {orig} no longer has the recorded SHA-256"
     with open(ot) as f:
         a = json.load(f)
     with open(nt) as f:
         b = json.load(f)
-    if a != b:
-        return False, "trace.json content differs (experts, margins or a float)"
-    ha, hb = os.path.join(orig, a.get("hidden_file", "")), os.path.join(tdir, pid, b.get("hidden_file", ""))
-    if not (os.path.isfile(ha) and os.path.isfile(hb)) or sha(ha) != sha(hb):
-        return False, "the hidden-state file differs"
-    if sha(ot) == sha(nt):
-        return True, None
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return False, "a trace.json is not a JSON object"
     canon = lambda x: json.dumps(x, sort_keys=True, separators=(",", ":"))
-    return True, ("raw bytes differ, key order only" if canon(a) == canon(b)
-                  else "raw bytes differ, formatting only (parsed content equal)")
+    if canon(a) != canon(b):
+        return False, "trace.json content differs (experts, margins or a float)"
+    ha, hb = os.path.join(orig, str(a.get("hidden_file"))), os.path.join(tdir, pid, str(b.get("hidden_file")))
+    if not a.get("hidden_file") or not (os.path.isfile(ha) and os.path.isfile(hb)) or sha(ha) != sha(hb):
+        return False, "the hidden-state file differs or is missing"
+    return True, (None if sha(ot) == sha(nt) else "raw bytes differ, key order only")
 
 
 def addendum_bound(k, v, n):
