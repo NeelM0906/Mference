@@ -218,10 +218,13 @@ struct Inkling2ForwardRunnerToyTests {
         let context = try MetalContext()
         let toy = try Inkling2RunnerToy(device: context.device)
         let c = Inkling2RunnerToy.config
-        let d = c.hiddenSize, rows = 16
+        let d = c.hiddenSize, rows = 24
         // The short steps, then a prefill after the decodes (it restages
-        // layers whose slots live decode visits used) and one more decode.
-        let steps = Self.shortSteps + [([88, 5, 61], false), ([41], true)]
+        // layers whose slots live decode visits used) and one more decode,
+        // then a 10-token prefill in chunks of 4, 4 and 2 (each chunk but the
+        // last prefetches the next one's first staged read) and a decode.
+        let steps = Self.shortSteps + [([88, 5, 61], false), ([41], true),
+                                       ((0..<10).map { Int32(($0 * 37 + 11) % 500) }, false), ([9], true)]
         let shape = Inkling2MoEShape(d: d, f: c.expertFF, experts: c.numExperts, topK: c.topK)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("inkling2-store-\(UUID().uuidString)")

@@ -30,12 +30,19 @@ protocol Inkling2ExpertSource: AnyObject {
     /// After a command buffer failed, once every committed one completed:
     /// releases what its skipped signals would have.
     func recoverAfterFailedCommands()
+    /// Starts the next prefill chunk's first staged read early (when another
+    /// chunk follows); a no-op for sources that stage nothing.
+    func prefetchFirstStagedVisit() throws
+    /// Gives back a prefetched read whose chunk will not run.
+    func cancelPrefetch() throws
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
 
 extension Inkling2ExpertSource {
     func recoverAfterFailedCommands() {}
+    func prefetchFirstStagedVisit() throws {}
+    func cancelPrefetch() throws {}
     func decodeNeedsRoutes(layer: Int) -> Bool { false }
     func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
@@ -264,6 +271,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// buffer): per decoded token, the command buffers, the CPU's waits on
     /// them and the GPU's own start and end times, printed to stderr.
     private let decodeTimeline = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_TIMELINE"]
+    /// Set by `prefillChunked` while another chunk follows the one running.
+    private var prefetchesNextChunk = false
     /// With the decode-cache log: the last token's routed ids of each staged
     /// prefill visit (the seed a decode cache could start from), copied on
     /// the GPU and printed after the chunk.
@@ -522,8 +531,17 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         }
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count, startPosition: startPosition,
                                               chunkTokens: min(config.chunkTokens, maxChunkTokens))
+        defer {
+            // Still set: the chunk it prefetched for never ran (cancelled
+            // between chunks, or a throw); give its slab back now.
+            if prefetchesNextChunk { try? w.experts.cancelPrefetch() }
+            prefetchesNextChunk = false
+        }
         for (i, span) in spans.enumerated() {
             try Task.checkCancellation()
+            // Every chunk but the last starts the next one's first staged read
+            // early (not for a one-token chunk, which decodes from the slots).
+            prefetchesNextChunk = i < spans.count - 1 && spans[i + 1].tokenCount > 1
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try run(tokens: Array(tokens[lower..<upper]), start: span.startPosition,
@@ -699,6 +717,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 cur = try encodeVisit(cb, layer: layer, slot: layer, tokens: t, start: start,
                                       cur: cur, blocks: &blocks, bank: nil, slots: &slots, split: split)
                 record(cur)
+            }
+            if prefetchesNextChunk && t > 1 {
+                // Another prefill chunk follows: its first staged read starts
+                // as soon as a slab frees, overlapping this chunk's end.
+                try w.experts.prefetchFirstStagedVisit()
             }
 
             if let hook = positionLogits {

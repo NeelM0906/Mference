@@ -13,44 +13,79 @@ import MferenceValidationSupport
     static let miniLayerBytes = (0..<24).map { $0 < 20 ? 128 * 4_489_216 : 128 * 8_470_528 }
 
     @Test func thirtyTwoGigabytesHoldsTheLoopedLayers() {
+        let memory: UInt64 = 32 << 30
         let plan = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
-                                                    physicalMemory: 32 << 30)
+                                                    physicalMemory: memory)
         #expect(plan.placements.enumerated().allSatisfy { ($0.offset >= 6 && $0.offset < 18) == ($0.element == .resident) })
         #expect(plan.residentBytes == 12 * 128 * 4_489_216)          // 6.90 GB
-        #expect(plan.stagingSlabs == 2)
-        // 48 decode slots per staged layer: each slab holds two Q8_0 layers'
-        // and four NVFP4 layers' slots (1.68 GB, more than a Q8_0 layer).
-        #expect(plan.stagingBytes == 2 * (2 * 48 * 8_470_528 + 4 * 48 * 4_489_216))     // 3.35 GB
-        // With even bytes the slabs are as prefill needs them.
+        // Decision 6: three slabs sized to what the 40% guard leaves.
+        let budget = Inkling2ExpertResidencyPlan.expertBudget(physicalMemory: memory)
+        #expect(budget == Inkling2ForwardRunner.expertBudget(physicalMemory: memory))
+        #expect(plan.stagingSlabs == 3)
+        #expect(plan.residentBytes + plan.stagingBytes <= budget)
+        #expect(plan.stagingBytes > 6_700_000_000)                    // about 6.84 GB: 3 x 2.28 GB
+        #expect(plan.decodeSlots == .fill(slabBytes: (budget - plan.residentBytes) / 3 / 16_384 * 16_384))
+        // The slots: at least 88 per staged layer, the slabs within the cap.
+        let strides = Dictionary(uniqueKeysWithValues: [0, 1, 2, 3, 4, 5, 18, 19, 20, 21, 22, 23].map {
+            ($0, $0 >= 20 ? 8_470_528 : 4_489_216)
+        })
+        let packed = Inkling2DecodeSlots.pack(plan.decodeSlots, strides: strides, experts: 128, slabs: 3)
+        #expect(packed.placed.values.allSatisfy { $0.slots >= 88 } && packed.slabBytes * 3 <= plan.stagingBytes)
+        // Explicit two slabs with even bytes: the slabs as prefill needs them.
         let even = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
-                                                    physicalMemory: 32 << 30, decodeSlots: .evenBytes)
-        #expect(even.stagingBytes == 2 * 128 * 8_470_528)            // 2.17 GB, sized for a Q8_0 layer
+                                                    physicalMemory: memory, stagingSlabs: 2, decodeSlots: .evenBytes)
+        #expect(even.stagingSlabs == 2 && even.stagingBytes == 2 * 128 * 8_470_528)   // 2.17 GB
     }
 
-    /// Coordinator decision (option D, 2026-11-23): below 48 GB, where layers
-    /// are staged, 48 decode slots per staged layer and cached decode-miss
-    /// reads (prefill fills stay uncached); at 48 GB and up nothing is
-    /// staged and neither applies.
+    /// Coordinator decision 6 (2026-11-23, replacing option D): below 48 GB,
+    /// three slabs filled with decode slots to the 40% guard and every staged
+    /// read uncached (decode misses as the slab fills); at 48 GB and up
+    /// nothing is staged.
     @Test func decodeDefaultsFollowTheHost() {
         for gigabytes: UInt64 in [32, 47] {
+            let memory = gigabytes << 30
             let plan = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
-                                                        physicalMemory: gigabytes << 30)
-            #expect(plan.decodeSlots == .perLayer(48) && plan.decodeMissReadMode == .cached, "\(gigabytes) GB")
-            #expect(Inkling2StagedReadMode.forHost(physicalMemory: gigabytes << 30) == .uncached)
-            #expect(Inkling2DecodeSlots.forHost(physicalMemory: gigabytes << 30) == .perLayer(48))
-            #expect(Inkling2StagedReadMode.decodeMissForHost(physicalMemory: gigabytes << 30) == .cached)
+                                                        physicalMemory: memory)
+            let budget = Inkling2ExpertResidencyPlan.expertBudget(physicalMemory: memory)
+            #expect(plan.stagingSlabs == 3 && plan.decodeMissReadMode == nil, "\(gigabytes) GB")
+            #expect(plan.decodeSlots == .fill(slabBytes: (budget - plan.residentBytes) / 3 / 16_384 * 16_384))
+            #expect(plan.residentBytes + plan.stagingBytes <= budget, "\(gigabytes) GB")
+            #expect(Inkling2StagedReadMode.forHost(physicalMemory: memory) == .uncached)
+            #expect(Inkling2StagedReadMode.decodeMissForHost(physicalMemory: memory) == nil)
+            #expect(Inkling2ExpertResidencyPlan.stagingSlabs(physicalMemory: memory) == 3)
         }
         let large = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
                                                      physicalMemory: 48 << 30)
-        #expect(large.stagingBytes == 0 && large.decodeSlots == .evenBytes && large.decodeMissReadMode == nil)
-        #expect(Inkling2DecodeSlots.forHost(physicalMemory: 48 << 30) == .evenBytes)
-        #expect(Inkling2StagedReadMode.decodeMissForHost(physicalMemory: 48 << 30) == nil)
+        #expect(large.stagingBytes == 0 && large.stagingSlabs == 0 && large.decodeMissReadMode == nil)
+        #expect(Inkling2ExpertResidencyPlan.stagingSlabs(physicalMemory: 48 << 30) == 2)
         // Explicit choices win over the host's.
         let chosen = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
-                                                      physicalMemory: 32 << 30, decodeSlots: .perLayer(84),
-                                                      decodeMissReadMode: .uncached)
-        #expect(chosen.decodeSlots == .perLayer(84) && chosen.decodeMissReadMode == .uncached)
+                                                      physicalMemory: 32 << 30, stagingSlabs: 2,
+                                                      decodeSlots: .perLayer(84), decodeMissReadMode: .cached)
+        #expect(chosen.decodeSlots == .perLayer(84) && chosen.decodeMissReadMode == .cached)
         #expect(chosen.stagingBytes == 2 * (2 * 84 * 8_470_528 + 4 * 84 * 4_489_216))
+    }
+
+    /// `.fill`: the largest equal count that fits the cap, then the layers of
+    /// emptier slabs topped up; every slab within the cap, regions in each
+    /// slab back to back and page-aligned.
+    @Test func fillPacksEqualCountsThenTopsUp() {
+        let strides = Dictionary(uniqueKeysWithValues: [0, 1, 2, 3, 4, 5, 18, 19, 20, 21, 22, 23].map {
+            ($0, $0 >= 20 ? 8_470_528 : 4_489_216)
+        })
+        let cap = 2_282_000_000 / 16_384 * 16_384
+        let packed = Inkling2DecodeSlots.pack(.fill(slabBytes: cap), strides: strides, experts: 128, slabs: 3)
+        #expect(packed.slabBytes <= cap && packed.placed.count == 12)
+        let least = packed.placed.values.map(\.slots).min()!
+        #expect(least >= 88 && packed.placed.values.contains { $0.slots > least })
+        for slab in 0..<3 {
+            var end = 0
+            for (layer, place) in packed.placed.filter({ $0.value.slab == slab }).sorted(by: { $0.value.offset < $1.value.offset }) {
+                #expect(place.offset == end && place.offset % 16_384 == 0)
+                end = place.offset + (place.slots * strides[layer]! + 16_383) / 16_384 * 16_384
+            }
+            #expect(end <= cap)
+        }
     }
 
     @Test func largeHostsHoldEverythingAndSmallHostsStageEverything() {
@@ -465,6 +500,79 @@ import MferenceValidationSupport
         cb.waitUntilCompleted()
         store.drainStaging()
         #expect(cb.status == .completed && store.stagingError == nil)
+    }
+
+    /// The early first-layer read: a chunk prefetches the next chunk's first
+    /// staged visit after its own; the next chunk's visit of that layer takes
+    /// the ticket (each layer read once per chunk) and computes the same
+    /// bytes. A prefetch no chunk takes is released by the next decode
+    /// visit, or by an abandon, without waiting out a timeout.
+    @Test func prefetchedFirstStagedVisitIsTakenByTheNextChunk() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let (store, layers, directory, files) = try Self.cacheStore(context, shape: shape)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        store.waitTimeoutMS = 2_000
+        store.staging?.releaseTimeoutMS = 2_000
+        let tokens = 12
+        let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B80)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2B81)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+        Inkling2MoETestSupport.write(routes.ids, to: scratch.ids)
+        Inkling2MoETestSupport.write(routes.weights, to: scratch.routeWeights)
+        let count = tokens * shape.d
+        func output() -> MTLBuffer { context.device.makeBuffer(length: count * 4, options: .storageModeShared)! }
+        let expected: [[Float]] = layers.map { layer in
+            let out = output()
+            _ = Inkling2MoETestSupport.run(context) {
+                kernels.encodePrefill($0, hidden: hidden, hiddenStride: shape.d, pool: layer.pool, scratch: scratch,
+                                      tokens: tokens, out: out, outStride: shape.d)
+            }
+            return Inkling2MoETestSupport.read(out, as: Float.self, count: count)
+        }
+        /// One chunk over layers 0-3; `prefetch` takes the next chunk's first staged visit.
+        func chunk(prefetch: Bool) throws -> [[Float]] {
+            let outs = (0..<4).map { _ in output() }
+            let cb = context.queue.makeCommandBuffer()!
+            for layer in 0..<4 {
+                let pool = try store.beginPrefillVisit(layer: layer, commandBuffer: cb)
+                let encoder = cb.makeComputeCommandEncoder()!
+                kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: pool, scratch: scratch,
+                                      tokens: tokens, out: outs[layer], outStride: shape.d)
+                encoder.endEncoding()
+                try store.endPrefillVisit(layer: layer, commandBuffer: cb)
+            }
+            if prefetch { try store.prefetchFirstStagedVisit() }
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.status == .completed)
+            return outs.map { Inkling2MoETestSupport.read($0, as: Float.self, count: count) }
+        }
+        let staged = files[1]!.bytes + files[2]!.bytes + files[3]!.bytes
+        #expect(try chunk(prefetch: true) == expected)
+        #expect(try chunk(prefetch: false) == expected)       // its layer-1 visit took the prefetched read
+        store.drainStaging()
+        #expect(store.stagingError == nil && store.stagingBytesRead == 2 * staged)
+        // A prefetch no chunk takes: the next decode visit releases it.
+        _ = try chunk(prefetch: true)
+        let started = Date()
+        let binding = try store.prepareDecodeVisit(layer: 2, expertIDs: [0, 1, 2, 3])
+        #expect(binding.misses == 4 && Date().timeIntervalSince(started) < 1.5)
+        let decodeBuffer = context.queue.makeCommandBuffer()!
+        store.endDecodeVisit(binding, commandBuffer: decodeBuffer)
+        decodeBuffer.commit()
+        decodeBuffer.waitUntilCompleted()
+        // An abandon releases one, and so does a cancel (the chunk it was for
+        // never ran); the next chunk runs normally either way.
+        try store.prefetchFirstStagedVisit()
+        try store.abandonOpenVisits()
+        #expect(try chunk(prefetch: false) == expected)
+        try store.prefetchFirstStagedVisit()
+        try store.cancelPrefetch()
+        #expect(try chunk(prefetch: false) == expected)
+        store.drainStaging()
+        #expect(store.stagingError == nil)
     }
 
     /// Least recently used, not first in: after A and B fill the 8 slots, C

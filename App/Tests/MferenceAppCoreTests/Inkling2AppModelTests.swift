@@ -40,14 +40,14 @@ import Testing
             #expect(fit.verdict(for: .inkling2Mini, sizeBytes: Self.installSize) == .fits)
         }
         // The runtime's figures (its expert residency plan, 32K context):
-        // below 48 GB the looped core, two staging slabs (1.68 GB each with
-        // option D's 48 decode slots per staged layer), the dense weights and
-        // state, about 13.4 GB before context plus 1 GiB of global KV;
+        // below 48 GB the looped core, three staging slabs (2.28 GB each at
+        // 32 GB: decision 6 sizes them to the 40% expert guard), the dense
+        // weights and state, about 16.9 GB before context plus 1 GiB of global KV;
         // from 48 GB the whole install plus the same state.
         let at32 = MemoryFit(physicalMemory: 32 << 30).estimatedResidentBytes(.inkling2Mini, sizeBytes: Self.installSize)
         #expect(at32 == EngineService.runtimeResidentEstimate(.inkling2Mini, sizeBytes: Self.installSize,
                                                               physicalMemory: 32 << 30))
-        #expect(at32 > 13_000_000_000 && at32 < 14_800_000_000)
+        #expect(at32 > 13_000_000_000 && at32 < 18_200_000_000)
         let at48 = MemoryFit(physicalMemory: 48 << 30).estimatedResidentBytes(.inkling2Mini, sizeBytes: Self.installSize)
         #expect(at48 > 19_800_000_000 && at48 < 20_300_000_000)
         // Every other model keeps the app's own profile.

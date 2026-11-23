@@ -22,31 +22,41 @@ import Testing
     @Test func footprintFollowsTheResidencyPlan() throws {
         let nvfp4Layer: UInt64 = 128 * 4_489_216
         let dense = Self.installBytes - Self.pool
-        // Option D (coordinator, 2026-11-23): below 48 GB each staged layer has 48 decode slots,
-        // packed into the two slabs largest first, so a slab holds half the Q8_0 layers' slots and
-        // half the NVFP4 layers'; that is more than one Q8_0 layer, the slab's size before.
-        let q8Slots: UInt64 = 48 * 8_470_528, nvfp4Slots: UInt64 = 48 * 4_489_216
-        let corePlanStaging = 2 * (2 * q8Slots + 4 * nvfp4Slots)          // 3.35 GB, was 2 x Q8_0 layer
-        // 30 to 47 GB (the 32 and 36 GB Macs): the looped core (layers 6-17, NVFP4) resident, the
-        // other 12 layers staged.
+        let ink = ArchConfig.inkling2Mini.inkling2
+        let layerBytes = try #require(Inkling2MemoryFootprint.expertLayerBytes(config: .inkling2Mini)).map { Int($0) }
+        // Coordinator decision 6 (2026-11-23): below 48 GB three staging slabs take what the 40%
+        // expert guard leaves beside the resident layers (filled with decode slots), so the staging
+        // bytes depend on the host: about 6.84 GB at 32 GB, 8.55 at 36, 9.95 at 47 (where the slots
+        // reach every expert of a layer). 30 to 47 GB: the looped core (layers 6-17, NVFP4)
+        // resident, the other 12 layers staged.
         for gigabytes: UInt64 in [32, 36, 47] {
+            let memory = gigabytes << 30
             let f = try #require(Inkling2MemoryFootprint.estimate(installBytes: Self.installBytes,
-                                                                  physicalMemory: gigabytes << 30))
+                                                                  physicalMemory: memory))
+            let plan = Inkling2ExpertResidencyPlan.make(layerBytes: layerBytes,
+                                                        loopedLayers: ink.loopCoreStart..<ink.loopCoreEnd,
+                                                        physicalMemory: memory)
             #expect(f.expertResidentBytes == 12 * nvfp4Layer)
-            #expect(f.expertStagingBytes == corePlanStaging)
+            #expect(plan.stagingSlabs == 3 && f.expertStagingBytes == UInt64(plan.stagingBytes))
+            #expect(f.expertResidentBytes + f.expertStagingBytes
+                    <= UInt64(Inkling2ExpertResidencyPlan.expertBudget(physicalMemory: memory)), "\(gigabytes) GB")
             #expect(f.denseBytes == dense)
-            #expect(f.bytesBeforeContext > 13_280_000_000 && f.bytesBeforeContext < 13_580_000_000)
+            #expect(f.bytesBeforeContext
+                    == f.expertResidentBytes + f.expertStagingBytes + dense + Inkling2MemoryFootprint.stateBytes)
         }
+        // 32 GB in figures: 6.90 GB resident plus 3 x 2.28 GB of slab.
+        let at32 = try #require(Inkling2MemoryFootprint.estimate(installBytes: Self.installBytes, physicalMemory: 32 << 30))
+        #expect(at32.expertStagingBytes > 6_800_000_000 && at32.expertStagingBytes < 6_860_000_000)
         // 48 GB and up: every layer resident, nothing staged.
         let big = try #require(Inkling2MemoryFootprint.estimate(installBytes: Self.installBytes,
                                                                 physicalMemory: 48 << 30))
         #expect(big.expertResidentBytes == Self.pool && big.expertStagingBytes == 0)
         #expect(big.bytesBeforeContext == Self.installBytes + Inkling2MemoryFootprint.stateBytes)
-        // Below 30 GB (not offered): everything staged.
+        // Below 30 GB (not offered): everything staged, the slabs at the guard.
         let small = try #require(Inkling2MemoryFootprint.estimate(installBytes: Self.installBytes,
                                                                   physicalMemory: 24 << 30))
-        // All 24 staged: per slab two Q8_0 layers' and ten NVFP4 layers' slots (5.94 GB in all).
-        #expect(small.expertResidentBytes == 0 && small.expertStagingBytes == 2 * (2 * q8Slots + 10 * nvfp4Slots))
+        #expect(small.expertResidentBytes == 0 && small.expertStagingBytes > 0
+                && small.expertStagingBytes <= UInt64(Inkling2ExpertResidencyPlan.expertBudget(physicalMemory: 24 << 30)))
     }
 
     /// Global KV: 8 visits of a global layer per token (5 and 23 once, 11

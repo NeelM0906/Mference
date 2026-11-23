@@ -39,14 +39,12 @@ enum Inkling2StagedReadMode: String, Equatable, Sendable {
         ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_MISS_READS"].flatMap(Self.init(rawValue:))
     }
 
-    /// The decode-miss read mode for a host (coordinator decision, option D,
-    /// 2026-11-23): cached below 48 GB, where layers are staged. A miss reads
-    /// one expert (4.5 to 8.5 MB), so the file cache fills an expert at a
-    /// time with clean pages, not in whole-layer sweeps; prefill fills stay
-    /// uncached. Nil (the staged layers' mode) where nothing is staged.
-    static func decodeMissForHost(physicalMemory: UInt64) -> Self? {
-        physicalMemory < Inkling2ExpertResidencyPlan.allResidentMemory ? .cached : nil
-    }
+    /// The decode-miss read mode for a host: nil, the staged layers' own
+    /// (uncached below 48 GB). Coordinator decision 6 (2026-11-23) replaced
+    /// option D's cached decode misses: on a 32 GB host the file cache did not
+    /// keep the staged files beside the process (K2's measurements), so
+    /// nothing depends on it. The cached mode stays a switch.
+    static func decodeMissForHost(physicalMemory: UInt64) -> Self? { nil }
 }
 
 /// How the staged layers' decode slots are laid out in the staging slabs.
@@ -60,6 +58,12 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
     /// miss costs more than an NVFP4 one, so equal counts beat even bytes at
     /// equal memory (K2's replay of real routes, 2026-11-23).
     case perLayer(Int)
+    /// As many slots as fit slabs of at most `slabBytes` each: the largest
+    /// equal count per staged layer, then the layers of slabs left with room
+    /// topped up a slot at a time (coordinator decision 6, 2026-11-23: below
+    /// 48 GB three slabs sized to the 40% guard, about 88 slots a layer at
+    /// 32 GB).
+    case fill(slabBytes: Int)
 
     /// `.perLayer(n)` from the `MFERENCE_INKLING2_DECODE_SLOTS` experiment
     /// toggle (`0` for `.evenBytes`), if set.
@@ -68,33 +72,63 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
             .map { $0 > 0 ? .perLayer($0) : .evenBytes }
     }
 
-    /// The slots for a host (coordinator decision, option D, 2026-11-23): 48
-    /// per staged layer below 48 GB (82% hits and 4.6 ms of misses per token
-    /// in K2's replay of real routes; 3.35 GB of slab at 32 GB); even bytes
-    /// where nothing is staged.
-    static func forHost(physicalMemory: UInt64) -> Self {
-        physicalMemory < Inkling2ExpertResidencyPlan.allResidentMemory ? .perLayer(48) : .evenBytes
-    }
-
-    /// Where each staged layer's slots go for `.perLayer`: the same count
-    /// for every layer (capped at `experts`, at least 8), each layer's slots
-    /// page-rounded and placed largest first on the slab with the fewest
-    /// bytes so far. `slabBytes` is the fullest slab (0 for `.evenBytes`,
-    /// which uses the slabs as prefill sizes them).
+    /// Where each staged layer's slots go: equal counts per layer (capped at
+    /// `experts`, at least 8), each layer's slots page-rounded and placed
+    /// largest first on the slab with the fewest bytes so far; for `.fill`,
+    /// the largest count that fits `slabBytes`, then each slab's layers
+    /// topped up in turn while a slot more fits. `slabBytes` in the result is
+    /// the fullest slab (0 for `.evenBytes`, which uses the slabs as prefill
+    /// sizes them).
     static func pack(_ slots: Self, strides: [Int: Int], experts: Int, slabs: Int)
         -> (placed: [Int: (slab: Int, offset: Int, slots: Int)], slabBytes: Int) {
-        guard case .perLayer(let requested) = slots, !strides.isEmpty else { return ([:], 0) }
+        guard !strides.isEmpty else { return ([:], 0) }
         let pageSize = Int(getpagesize())
-        let count = min(max(requested, 8), experts)
-        var used = [Int](repeating: 0, count: slabs)
-        var placed: [Int: (slab: Int, offset: Int, slots: Int)] = [:]
-        for layer in strides.keys.sorted(by: { strides[$0]! > strides[$1]! || (strides[$0]! == strides[$1]! && $0 < $1) }) {
-            let bytes = (count * strides[layer]! + pageSize - 1) / pageSize * pageSize
-            let slab = used.indices.min { used[$0] < used[$1] || (used[$0] == used[$1] && $0 < $1) }!
-            placed[layer] = (slab, used[slab], count)
-            used[slab] += bytes
+        func bytes(_ count: Int, _ layer: Int) -> Int { (count * strides[layer]! + pageSize - 1) / pageSize * pageSize }
+        let order = strides.keys.sorted { strides[$0]! > strides[$1]! || (strides[$0]! == strides[$1]! && $0 < $1) }
+        /// Equal counts: each layer's slab, its count, and the slabs' bytes.
+        func place(_ count: Int) -> (slab: [Int: Int], counts: [Int: Int], used: [Int]) {
+            var used = [Int](repeating: 0, count: slabs)
+            var slab: [Int: Int] = [:]
+            for layer in order {
+                let s = used.indices.min { used[$0] < used[$1] || (used[$0] == used[$1] && $0 < $1) }!
+                slab[layer] = s
+                used[s] += bytes(count, layer)
+            }
+            return (slab, Dictionary(uniqueKeysWithValues: order.map { ($0, count) }), used)
         }
-        return (placed, used.max() ?? 0)
+        var layout: (slab: [Int: Int], counts: [Int: Int], used: [Int])
+        switch slots {
+        case .evenBytes:
+            return ([:], 0)
+        case .perLayer(let requested):
+            layout = place(min(max(requested, 8), experts))
+        case .fill(let cap):
+            var count = experts
+            while count > 8 && (place(count).used.max() ?? 0) > cap { count -= 1 }
+            layout = place(count)
+            // Top up the slabs with room, a slot per layer in turn.
+            var grew = true
+            while grew {
+                grew = false
+                for layer in order where layout.counts[layer]! < experts {
+                    let s = layout.slab[layer]!
+                    let extra = bytes(layout.counts[layer]! + 1, layer) - bytes(layout.counts[layer]!, layer)
+                    if layout.used[s] + extra <= cap {
+                        layout.counts[layer]! += 1
+                        layout.used[s] += extra
+                        grew = true
+                    }
+                }
+            }
+        }
+        var offsets = [Int](repeating: 0, count: slabs)
+        var placed: [Int: (slab: Int, offset: Int, slots: Int)] = [:]
+        for layer in order {
+            let s = layout.slab[layer]!
+            placed[layer] = (s, offsets[s], layout.counts[layer]!)
+            offsets[s] += bytes(layout.counts[layer]!, layer)
+        }
+        return (placed, offsets.max() ?? 0)
     }
 }
 
@@ -104,8 +138,9 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
 struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
     let placements: [Inkling2ExpertPlacement]
     /// Staging slabs (0 when nothing is staged), each as large as the
-    /// largest staged layer or, with `.perLayer` decode slots, as the slots
-    /// packed into it. Two give the one-layer-ahead overlap.
+    /// largest staged layer or as the decode slots packed into it. Two give
+    /// the one-layer-ahead overlap; three (below 48 GB) let a slow layer's
+    /// read overlap two visits.
     let stagingSlabs: Int
     let residentBytes: Int
     let stagingBytes: Int
@@ -117,6 +152,16 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
 
     /// Hosts of at least this much memory hold every layer.
     static let allResidentMemory: UInt64 = 48 << 30
+
+    /// The most expert bytes a host may bind: 40% of its memory (the
+    /// runner's guard, `Inkling2ForwardRunner.expertBudget`, the same
+    /// formula).
+    static func expertBudget(physicalMemory: UInt64) -> Int { Int(physicalMemory / 5 * 2) }
+
+    /// Staging slabs for a host (coordinator decision 6, 2026-11-23): three
+    /// below 48 GB, so a Q8_0 layer's read (159 ms) overlaps two visits'
+    /// compute, not one; two otherwise (nothing is staged at 48 GB and up).
+    static func stagingSlabs(physicalMemory: UInt64) -> Int { physicalMemory < allResidentMemory ? 3 : 2 }
     /// Hosts of at least this much memory (the 32 and 36 GB Macs) hold the
     /// looped layers and stage the rest.
     static let loopedResidentMemory: UInt64 = 30 << 30
@@ -125,14 +170,16 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
     /// (`experts` blobs at the layer's stride; it must be the store's expert
     /// count, 128 for the Mini, or the plan's slab size differs from the
     /// store's, which the runner's budget check on the store then catches).
-    /// Decode slots and the decode-miss read mode are the host's
-    /// (`Inkling2DecodeSlots.forHost`, `Inkling2StagedReadMode.decodeMissForHost`)
-    /// unless given. The experiment toggles never move the plan (it is also
+    /// Unless given, the slabs are the host's (`stagingSlabs(physicalMemory:)`),
+    /// the decode slots fill what the 40% guard leaves beside the resident
+    /// layers (`.fill`), and decode misses read like the staged layers
+    /// (`Inkling2StagedReadMode.decodeMissForHost`). The experiment toggles never move the plan (it is also
     /// the product's memory estimate); only the store applies them.
     static func make(layerBytes: [Int], loopedLayers: Range<Int>, physicalMemory: UInt64,
-                     stagingSlabs slabs: Int = 2, experts: Int = 128,
+                     stagingSlabs: Int? = nil, experts: Int = 128,
                      decodeSlots: Inkling2DecodeSlots? = nil,
                      decodeMissReadMode: Inkling2StagedReadMode? = nil) -> Inkling2ExpertResidencyPlan {
+        let slabs = stagingSlabs ?? Self.stagingSlabs(physicalMemory: physicalMemory)
         precondition(slabs >= 2, "one layer ahead needs two slabs")
         let placements: [Inkling2ExpertPlacement] = layerBytes.indices.map { layer in
             if physicalMemory >= allResidentMemory { return .resident }
@@ -145,7 +192,10 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
             return Inkling2ExpertResidencyPlan(placements: placements, stagingSlabs: 0, residentBytes: resident,
                                                stagingBytes: 0)
         }
-        let slots = decodeSlots ?? .forHost(physicalMemory: physicalMemory)
+        // Below 48 GB the slabs take what the 40% guard leaves beside the
+        // resident layers, and the decode slots fill them.
+        let slots = decodeSlots ?? .fill(slabBytes: max(0, expertBudget(physicalMemory: physicalMemory) - resident)
+                                                    / slabs / Int(getpagesize()) * Int(getpagesize()))
         let missMode = decodeMissReadMode ?? Inkling2StagedReadMode.decodeMissForHost(physicalMemory: physicalMemory)
         let strides = Dictionary(uniqueKeysWithValues: staged.map { ($0, layerBytes[$0] / experts) })
         let packing = Inkling2DecodeSlots.pack(slots, strides: strides, experts: experts, slabs: slabs)
@@ -616,6 +666,10 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// decode-cache bookkeeping and the slot-ownership fence.
     let staging: Inkling2StagedExpertLayers?
     private var open: [Int: [Inkling2StagedExpertLayers.Ticket]] = [:]
+    /// A first staged visit taken ahead for the next prefill chunk
+    /// (`prefetchFirstStagedVisit`); that chunk's `beginPrefillVisit` of the
+    /// layer takes it over.
+    private var prefetched: (layer: Int, ticket: Inkling2StagedExpertLayers.Ticket)?
     /// Set by a staged prefill visit (it overwrites the slabs the caches use).
     private var cachesStale = false
     /// Signalled by each ended decode visit's command buffer with its count.
@@ -775,12 +829,53 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         guard let staging, let template = templates[layer] else { preconditionFailure("layer \(layer)") }
         lock.lock()
         defer { lock.unlock() }
-        // The fill must not overwrite decode slots a queued command still reads.
-        let ticket = try staging.stage(layer: layer, after: (decodeDone, decodeIssued))
+        let ticket: Inkling2StagedExpertLayers.Ticket
+        if let ahead = prefetched, ahead.layer == layer {
+            ticket = ahead.ticket
+            prefetched = nil
+        } else {
+            try releasePrefetched(staging)
+            // The fill must not overwrite decode slots a queued command still reads.
+            ticket = try staging.stage(layer: layer, after: (decodeDone, decodeIssued))
+        }
         staging.encodeWait(ticket, commandBuffer: commandBuffer)
         open[layer, default: []].append(ticket)
         cachesStale = true
         return try template.rebound(to: ticket.slab)
+    }
+
+    /// Takes the next prefill chunk's first staged visit early: its slab
+    /// fill is queued now, after this chunk's visits in ticket order, and
+    /// starts as soon as its slab is released, so the read overlaps the end
+    /// of this chunk instead of the start of the next (coordinator ruling,
+    /// 2026-11-23; layer 0 waited about 60 ms per chunk). Call it only when
+    /// another prefill chunk follows, after this chunk's visits are begun.
+    /// A decode visit, an abandon or a recovery releases a ticket no chunk
+    /// took.
+    func prefetchFirstStagedVisit() throws {
+        guard let staging, let first = plan.placements.firstIndex(of: .staged) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard prefetched == nil else { return }
+        prefetched = (first, try staging.stage(layer: first, after: (decodeDone, decodeIssued)))
+        cachesStale = true
+    }
+
+    /// Releases a prefetched visit whose chunk will not run (cancelled between
+    /// chunks); every earlier staged visit's command buffer has completed.
+    func cancelPrefetch() throws {
+        guard let staging else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        try releasePrefetched(staging)
+    }
+
+    /// Releases a prefetched visit nothing took (call with the lock held, every
+    /// earlier staged visit's command buffer completed or committed).
+    private func releasePrefetched(_ staging: Inkling2StagedExpertLayers) throws {
+        guard let ahead = prefetched else { return }
+        prefetched = nil
+        try staging.abandon([ahead.ticket])
     }
 
     /// Ends a prefill visit: a staged layer's slab is released when the
@@ -805,8 +900,9 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// buffer has completed.
     func abandonOpenVisits() throws {
         lock.lock()
-        let tickets = open.values.flatMap { $0 }
+        let tickets = open.values.flatMap { $0 } + (prefetched.map { [$0.ticket] } ?? [])
         open.removeAll()
+        prefetched = nil
         if decodeDone.signaledValue < decodeIssued { decodeDone.signaledValue = decodeIssued }
         lock.unlock()
         try staging?.abandon(tickets)
@@ -819,6 +915,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     func recoverAfterFailedCommands() {
         lock.lock()
         open.removeAll()
+        prefetched = nil
         if decodeDone.signaledValue < decodeIssued { decodeDone.signaledValue = decodeIssued }
         cachesStale = true
         lock.unlock()
@@ -852,7 +949,13 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         defer { lock.unlock() }
         if cachesStale, let staging {
             // Prefill wrote the slabs: wait for its last read into them and
-            // for the GPU to finish reading them, then forget every cache.
+            // for the GPU to finish reading them, then forget every cache. A
+            // visit prefetched for a chunk that never came is released first.
+            do {
+                try releasePrefetched(staging)
+            } catch {
+                throw StoreError.timedOut("releasing an unused prefetched staging visit: \(error)")
+            }
             staging.drain()
             let last = staging.lastSequence
             if last > 0, staging.released.signaledValue < last,
