@@ -14,11 +14,16 @@ struct SourceTensor: Sendable, Hashable {
         case i64  = 4
         /// Integer lookup tables, including Maple FlashHead's token map.
         case i32  = 5
+        /// Opaque GGUF tensor bytes (a whole number of ggml blocks), addressed
+        /// by byte. Only the GGUF planner creates these; the logical type and
+        /// shape travel in the planned entry, not here.
+        case ggmlBlocks = 6
 
         var elementBytes: Int {
             switch self {
             case .u32: 4; case .bf16: 2; case .fp16: 2; case .fp32: 4
             case .i64: 8; case .i32: 4
+            case .ggmlBlocks: 1
             }
         }
     }
