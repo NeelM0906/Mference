@@ -108,9 +108,22 @@ def stage_row(d, stage, base, metal=None):
 
 
 def main():
-    d, baseline = sys.argv[1], sys.argv[2]
+    args, mb = sys.argv[1:], None
+    usage = "usage: native_table.py <native-dir> <baseline.md> [--metal-baseline <md>]"
+    for i, a in enumerate(list(args)):
+        if a == "--metal-baseline" or a.startswith("--metal-baseline="):
+            mb = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            del args[i:i + (1 if "=" in a else 2)]
+            if not mb:
+                sys.exit(usage + "\n--metal-baseline needs a file")
+            break
+    if len(args) != 2 or any(x.startswith("--") for x in args):
+        sys.exit(usage)
+    d, baseline = args
+    for path, what in ((d, "native dir"), (baseline, "baseline"), (mb, "metal baseline")):
+        if path is not None and not os.path.exists(path):
+            sys.exit(f"native_table.py: {what} {path} does not exist")
     base = baseline_rows(baseline)
-    mb = sys.argv[sys.argv.index("--metal-baseline") + 1] if "--metal-baseline" in sys.argv else None
     metal_rows = baseline_rows(mb) if mb else None
     rows, raw, notes = [], [], []
     for stage, text in STAGES:
