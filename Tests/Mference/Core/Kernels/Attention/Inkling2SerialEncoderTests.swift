@@ -204,26 +204,37 @@ final class Inkling2VisitFixture {
     var outputBytes: Int { outWeights.length }
     var gateBytes: Int { gateWeights.length }
 
-    /// Moves the state's cursor to `position` without GPU work (the cache rows stay as they are).
+    /// Moves the state's cursor to `position` without GPU work, and zero-fills every visit's
+    /// cache rows up to it, so each slot reads its own physical pages.
     func fastForward(_ r: Run, to position: Int) throws {
         while r.state.position < position {
             let n = min(Self.maxRows, position - r.state.position)
             try r.state.ensureCapacity(tokens: r.state.position + n)
             r.state.advance(by: n)
         }
+        try r.state.ensureCapacity(tokens: position + 1)
+        for visit in 0..<Inkling2VisitPlan.visitCount {
+            let kv = r.state.kv(slot: visit)
+            let rows = kv.ringCapacity > 0 ? kv.ringCapacity : position + 1
+            for half in [kv.keys, kv.values] { memset(half.buffer.contents() + half.offset, 0, rows * 2048) }
+        }
     }
 
     /// The kernels of one chunk (`rows` data rows at `row0`), in order. Call after `ensureCapacity`.
     /// - `set`: the weight set; `position`: the attention position of a decode step (default `row0`);
     /// - `gates`: run the q/k/v message gates (a loop pass) or not (a first-pass visit);
+    /// - `slot`: the visit's cache slot (default the fixture's; same layer kind);
+    /// - `normSet`: the three input norms in one `encodeSet` dispatch instead of three;
     /// - `only`: keep just these kinds (timing breakdowns).
     func steps(_ r: Run, row0: Int, rows: Int, set: Int = 0, position: Int? = nil, gates: Bool = true,
-               only: Set<StepKind>? = nil) -> [Step] {
+               slot: Int? = nil, normSet: Bool = false, only: Set<StepKind>? = nil) -> [Step] {
         let d = Self.d, decodeStep = rows == 1
         let pos = position ?? row0
         let projW = projWeightSets[set], outW = outWeightSets[set], gateW = gateWeightSets[set]
         let q = queryCount, maxRows = Self.maxRows
-        let kv = r.state.kv(slot: slot), vt = r.state.tails(slot: slot), mask = r.state.mask(slot: slot)
+        let visitSlot = slot ?? self.slot
+        precondition(Inkling2VisitPlan.bySlot[visitSlot].isGlobal == global)
+        let kv = r.state.kv(slot: visitSlot), vt = r.state.tails(slot: visitSlot), mask = r.state.mask(slot: visitSlot)
         let controllerFloats = 64 * 2 * d + 2 * d * 64
         func downOffset(_ c: Int) -> Int { c * controllerFloats * 4 }
         func forgetOffset(_ c: Int) -> Int { (c * controllerFloats + 64 * 2 * d) * 4 }
@@ -282,13 +293,22 @@ final class Inkling2VisitFixture {
                 }
             }
         }
-        for c in 0..<3 {
-            let input: Inkling2BufferRef = !decodeStep ? .init(r.gated, offset: c * maxRows * d * 4)
-                : .init(r.acts, offset: (gates ? 6 + c : (global ? c : 0)) * d * 4)
-            let weight = normWeights[global ? c : 0]
+        let normInputs = (0..<3).map { c in
+            Inkling2InputNorm.Input(
+                x: !decodeStep ? .init(r.gated, offset: c * maxRows * d * 4)
+                    : .init(r.acts, offset: (gates ? 6 + c : (global ? c : 0)) * d * 4),
+                weight: .init(normWeights[global ? c : 0]), output: .init(r.h, offset: c * maxRows * d * 2))
+        }
+        if normSet {
             add(.norm) { e in
-                self.norm.encode(encoder: e, x: input, xStride: d, weight: .init(weight),
-                                 output: .init(r.h, offset: c * maxRows * d * 2), outputStride: d, rows: rows)
+                self.norm.encodeSet(encoder: e, normInputs, xStride: d, outputStride: d, rows: rows)
+            }
+        } else {
+            for input in normInputs {
+                add(.norm) { e in
+                    self.norm.encode(encoder: e, x: input.x, xStride: d, weight: input.weight,
+                                     output: input.output, outputStride: d, rows: rows)
+                }
             }
         }
         let projectionSegments = segments.map { s in
@@ -348,9 +368,10 @@ final class Inkling2VisitFixture {
     }
 
     /// Encodes one chunk into `cb`: one compute encoder per kernel, or every kernel in one serial encoder.
-    func encode(_ r: Run, row0: Int, rows: Int, oneEncoder: Bool, into cb: MTLCommandBuffer) throws {
+    func encode(_ r: Run, row0: Int, rows: Int, oneEncoder: Bool, normSet: Bool = false,
+                into cb: MTLCommandBuffer) throws {
         try r.state.ensureCapacity(tokens: row0 + rows)
-        let list = steps(r, row0: row0, rows: rows)
+        let list = steps(r, row0: row0, rows: rows, normSet: normSet)
         if oneEncoder {
             let encoder = cb.makeComputeCommandEncoder()!
             for step in list { try step(encoder) }
@@ -366,8 +387,9 @@ final class Inkling2VisitFixture {
 }
 
 /// Every K3 kernel through its `encode(encoder:)` form: a whole visit's chain
-/// in one serial encoder, with no barriers, writes exactly the bytes that one
-/// encoder per kernel writes (outputs, KV rows, tails). The other suites
+/// in one serial encoder, with no barriers and the three input norms in one
+/// `encodeSet` dispatch, writes exactly the bytes that one encoder per kernel
+/// and one norm dispatch per input write (outputs, KV rows, tails). The other suites
 /// check each kernel's values through the `encode(commandBuffer:)` wrappers.
 @Suite(.serialized) struct Inkling2SerialEncoderTests {
     static func bytes(_ buffer: MTLBuffer, offset: Int = 0, count: Int? = nil) -> [UInt8] {
@@ -382,7 +404,7 @@ final class Inkling2VisitFixture {
         for (row0, rows) in [(0, Inkling2VisitFixture.maxRows), (Inkling2VisitFixture.maxRows, 1)] {
             let cb = f.ctx.queue.makeCommandBuffer()!
             try f.encode(perKernel, row0: row0, rows: rows, oneEncoder: false, into: cb)
-            try f.encode(shared, row0: row0, rows: rows, oneEncoder: true, into: cb)
+            try f.encode(shared, row0: row0, rows: rows, oneEncoder: true, normSet: true, into: cb)
             cb.commit()
             cb.waitUntilCompleted()
             #expect(cb.status == .completed)
