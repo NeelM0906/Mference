@@ -5,7 +5,9 @@
 #   guarded_run.sh [--timing] <log-dir> <gguf> -- <command> [args...]
 #
 # Run it as the single command of its own lock hold, for example
-#   lock.sh run [--quiet] --wait 3600 ws0 "ink <what>" -- guarded_run.sh --timing <log-dir> <gguf> -- llama-bench ...
+#   $INK/bin/model-hold.sh [--timing] ws0 "<what>" -- guarded_run.sh [--timing] <log-dir> <gguf> -- llama-bench ...
+# (spec v1.3: model runs start through model-hold.sh; any lock.sh run hold passes
+# the ancestor check below, but model-hold.sh is the program's rule)
 #
 # Before: refuses (exit 71) unless `lock.sh preflight` passes, the GGUF exists,
 # no other model process runs and, with --timing, `pmset -g batt` shows AC
