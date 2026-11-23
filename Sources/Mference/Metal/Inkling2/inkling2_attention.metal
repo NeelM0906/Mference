@@ -205,7 +205,10 @@ void inkling2_q8_stacked_mm(
 
 // Same product with 64 x 64 tiles: each simdgroup owns 32 rows x 32 tokens
 // (16 accumulators), halving the fragment loads per multiply. Grid: x =
-// ceil(tokens / 64), y = 64-row tiles as for the 32-token kernel.
+// ceil(tokens / 64), y = 64-row tiles as for the 32-token kernel. A partial
+// tile stores its 8 x 8 fragments that are cut by the edge through a small
+// per-simdgroup scratch, so the threadgroup needs 9 KB, not 16 (more
+// threadgroups resident per core: about 5% faster, the same bits).
 [[kernel, max_total_threads_per_threadgroup(128)]]
 void inkling2_q8_stacked_mm64(
     constant Inkling2ProjParams& p [[buffer(0)]],
@@ -214,9 +217,11 @@ void inkling2_q8_stacked_mm64(
     device float*       output     [[buffer(3)]],
     uint3  tgpig [[threadgroup_position_in_grid]],
     ushort tiitg [[thread_index_in_threadgroup]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]])
+    ushort sgitg [[simdgroup_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]])
 {
-    threadgroup float shmem[4096];                 // 16 KB: A (4 KB) + B (4 KB); edge store (16 KB)
+    threadgroup float shmem[2048];                 // 8 KB: A (4 KB) + B (4 KB)
+    threadgroup float edge[4 * 64];                // an 8 x 8 scratch per simdgroup
     threadgroup half* sa = (threadgroup half*)shmem;
     threadgroup half* sb = sa + 64 * 32;
 
@@ -325,18 +330,26 @@ void inkling2_q8_stacked_mm64(
             simdgroup_store(mc[i], C + 8 * (i % 4) + ulong(8 * (i / 4)) * p.outStride, p.outStride, 0, false);
         }
     } else {
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        threadgroup float* tmp = shmem;                       // [64 tokens][64 rows]
-        threadgroup float* base = tmp + (32 * (sgitg >> 1)) * 64 + 32 * (sgitg & 1);
+        // Fragments wholly inside the tile's rows and tokens store directly;
+        // a fragment cut by the edge goes through the scratch, lane by lane.
+        threadgroup float* scratch = edge + 64 * sgitg;
         INK2_UNROLL
         for (short i = 0; i < 16; ++i) {
-            simdgroup_store(mc[i], base + 8 * (i % 4) + 8 * 64 * (i / 4), 64, 0, false);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = tiitg; e < 64u * 64u; e += 128u) {
-            const uint tok = e / 64u, row = e % 64u;
-            if (tok < uint(nr1) && row < uint(nr0)) {
-                output[ulong(t0 + tok) * p.outStride + seg.outColumn + r0 + row] = tmp[e];
+            const uint lr = 32u * (sgitg & 1) + 8u * uint(i % 4), lt = 32u * (sgitg >> 1) + 8u * uint(i / 4);
+            if (lr >= uint(nr0) || lt >= uint(nr1)) { continue; }
+            device float* C = output + ulong(t0 + lt) * p.outStride + seg.outColumn + r0 + lr;
+            if (lr + 8u <= uint(nr0) && lt + 8u <= uint(nr1)) {
+                simdgroup_store(mc[i], C, p.outStride, 0, false);
+            } else {
+                simdgroup_store(mc[i], scratch, 8, 0, false);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint e = lane; e < 64u; e += 32u) {
+                    const uint tok = e / 8u, row = e % 8u;
+                    if (lt + tok < uint(nr1) && lr + row < uint(nr0)) {
+                        C[ulong(tok) * p.outStride + row] = scratch[e];
+                    }
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     }

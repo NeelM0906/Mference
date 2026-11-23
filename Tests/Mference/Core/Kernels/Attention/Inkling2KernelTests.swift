@@ -113,6 +113,63 @@ enum Inkling2TestSupport {
         let tolerance: Float = path == .rows ? 1e-4 : 2e-3
         #expect(RelError.computeStrict(actual: actual, reference: expected) < tolerance)
     }
+
+    /// The 64 x 64 and 64 x 32 tiles run the same fragment products in the same K order, so
+    /// they write the same bits; the 64 x 64 kernel's edge fragments (stored through a
+    /// per-simdgroup scratch) included. Q8_0, BF16 and F32 rows; partial row tiles (70, 24, 100,
+    /// 40 rows) and partial token tiles (37, 130 and 1,001 tokens cut an 8 x 8 fragment); columns
+    /// outside every segment untouched.
+    @Test(arguments: [37, 130, 1001])
+    func tiled64MatchesTiledBitForBit(tokens: Int) throws {
+        let ctx = try MetalContext()
+        let projection = try Inkling2Projection(library: Inkling2KernelLibrary(context: ctx))
+        let inputs = 2304
+        var rng = SeedTree(0x3b00 + UInt64(tokens)).key("ink2-proj-bits")
+        let rows = [70, 24, 100, 40]
+        let weights = [
+            Inkling2Q8Ref.quantize(rows: rows[0], inputs: inputs,
+                                   values: Inkling2TestSupport.random(rows[0] * inputs, &rng, -0.2, 0.2)),
+            Inkling2Q8Ref.bf16(Inkling2Q8Ref.bf16Rounded(Inkling2TestSupport.random(rows[1] * inputs, &rng, -0.2, 0.2))),
+            Inkling2Q8Ref.quantize(rows: rows[2], inputs: inputs,
+                                   values: Inkling2TestSupport.random(rows[2] * inputs, &rng, -0.2, 0.2)),
+            Inkling2Q8Ref.f32(Inkling2TestSupport.random(rows[3] * inputs, &rng, -0.2, 0.2)),
+        ]
+        var blob = [UInt8](repeating: 0xAB, count: 8)
+        var offsets: [Int] = []
+        for w in weights {
+            while blob.count % 16 != 0 { blob.append(0xCD) }
+            offsets.append(blob.count)
+            blob += w
+        }
+        let weightBuffer = Inkling2TestSupport.buffer(ctx.device, bytes: blob)
+        let x = Inkling2TestSupport.random(2 * tokens * inputs, &rng, -2, 2).map { Float16($0) }
+        let inputBuffer = Inkling2TestSupport.buffer(ctx.device, halves: x)
+        let outStride = rows.reduce(0, +) + 5     // columns 194 ..< 199 belong to no segment
+        var columns: [Int] = []
+        var column = 0
+        for (i, r) in rows.enumerated() {
+            columns.append(column)
+            column += r + (i == 2 ? 5 : 0)
+        }
+        let formats: [Inkling2WeightFormat] = [.q8_0, .bf16, .q8_0, .f32]
+        let segments = (0..<4).map { i in
+            Inkling2ProjectionSegment(weightOffset: offsets[i], inputOffset: i < 2 ? 0 : tokens * inputs,
+                                      inputStride: inputs, rows: rows[i], outColumn: columns[i], format: formats[i])
+        }
+        var bits: [[UInt32]] = []
+        for path in [Inkling2Projection.Path.tiled, .tiled64] {
+            let out = Inkling2TestSupport.buffer(ctx.device, floats: [Float](repeating: -12345, count: tokens * outStride))
+            Inkling2TestSupport.run(ctx) { cb in
+                projection.encode(commandBuffer: cb, weights: weightBuffer, input: inputBuffer, output: out,
+                                  tokens: tokens, inputs: inputs, outStride: outStride, segments: segments, path: path)
+            }
+            bits.append(Inkling2TestSupport.readFloats(out, count: tokens * outStride).map(\.bitPattern))
+        }
+        let differing = zip(bits[0], bits[1]).filter { $0 != $1 }.count
+        #expect(differing == 0, "\(differing) of \(tokens * outStride) outputs differ between the 64 x 32 and 64 x 64 tiles")
+        let untouched = (0..<tokens).allSatisfy { t in (194..<199).allSatisfy { bits[1][t * outStride + $0] == Float(-12345).bitPattern } }
+        #expect(untouched, "a column outside every segment was written")
+    }
 }
 
 @Suite(.serialized) struct Inkling2PrefillAttentionTests {
