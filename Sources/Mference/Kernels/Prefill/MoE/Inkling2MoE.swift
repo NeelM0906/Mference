@@ -303,13 +303,18 @@ final class Inkling2MoEKernels {
     private let reduce: MTLComputePipelineState
     private let encoded: [Inkling2MoEEncoding: Encoded]
 
-    init(context: MetalContext) throws {
+    /// `pipelined`: the simdgroup kernels load the next K step before the
+    /// current multiply (the default; false keeps the plain loop, for A/B
+    /// measurements).
+    init(context: MetalContext, pipelined: Bool = true) throws {
         let device = context.device
         let library = try Inkling2ShaderLibrary.compile(device: device, module: Self.module)
         func make(_ name: String, encoding: Inkling2MoEEncoding? = nil) throws -> MTLComputePipelineState {
             let values = MTLFunctionConstantValues()
             var raw = encoding?.rawValue ?? 0
+            var prefetch = pipelined
             values.setConstantValue(&raw, type: .uint, index: 200)
+            values.setConstantValue(&prefetch, type: .bool, index: 201)
             let function = try library.makeFunction(name: name, constantValues: values)
             let pipeline = try device.makeComputePipelineState(function: function)
             guard pipeline.maxTotalThreadsPerThreadgroup >= Self.threads else {

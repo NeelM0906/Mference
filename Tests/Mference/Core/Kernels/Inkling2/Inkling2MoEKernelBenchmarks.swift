@@ -325,4 +325,43 @@ import MferenceValidationSupport
                          label, gpu * 1000, wall * 1000, batched * 1000))
         }
     }
+
+    /// A/B of the pipelined and plain simdgroup loops, alternating in one
+    /// process so machine load affects both alike: one 2,048-row (and
+    /// 1,024-row) visit per encoding, five rounds of best-of-3 each.
+    @Test(.enabled(if: enabled))
+    func pipelineAB() throws {
+        let context = try MetalContext()
+        let pipelined = try Inkling2MoEKernels(context: context, pipelined: true)
+        let plain = try Inkling2MoEKernels(context: context, pipelined: false)
+        let device = context.device
+        let pools = try Inkling2MoEEncoding.allCases.map { try Self.pool(device, $0) }
+        let scratch = try Inkling2MoEPrefillScratch(device: device, shape: Self.shape, maxTokens: 2048)
+        let (hidden, _) = Inkling2MoETestSupport.halfBuffer(device, rows: 2048, stride: Self.shape.d, d: Self.shape.d,
+                                                            seed: 0xBD, range: 1)
+        let out = device.makeBuffer(length: 2048 * Self.shape.d * 4, options: .storageModeShared)!
+        for tokens in [1024, 2048] {
+            let r = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: Self.shape.experts, topK: 8, seed: 0xBE)
+            Inkling2MoETestSupport.write(r.ids, to: scratch.ids)
+            Inkling2MoETestSupport.write(r.weights, to: scratch.routeWeights)
+            for pool in pools {
+                var a: [Double] = [], b: [Double] = []
+                for _ in 0..<5 {
+                    for (kernels, sink) in [(pipelined, 0), (plain, 1)] {
+                        var best = Double.infinity
+                        for _ in 0..<3 {
+                            let cb = Inkling2MoETestSupport.run(context) {
+                                kernels.encodePrefill($0, hidden: hidden, hiddenStride: Self.shape.d, pool: pool,
+                                                      scratch: scratch, tokens: tokens, out: out, outStride: Self.shape.d)
+                            }
+                            best = min(best, cb.gpuEndTime - cb.gpuStartTime)
+                        }
+                        if sink == 0 { a.append(best) } else { b.append(best) }
+                    }
+                }
+                print(String(format: "[inkling2-moe-kbench] A/B rows=%d enc=%@ pipelined %.3f ms (min of rounds) plain %.3f ms",
+                             tokens, pool.encoding == .nvfp4 ? "nvfp4" : "q8_0", a.min()! * 1000, b.min()! * 1000))
+            }
+        }
+    }
 }

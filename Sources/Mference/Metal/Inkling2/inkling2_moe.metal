@@ -32,6 +32,10 @@ using namespace metal;
 
 constant uint FC_I2_ENCODING [[function_constant(200)]];
 constant uint kI2Encoding = is_function_constant_defined(FC_I2_ENCODING) ? FC_I2_ENCODING : 0u;
+// Load the next K step's raw weights and activations before this step's
+// multiply (default) or after the barrier like the tensor-ops kernels.
+constant bool FC_I2_PIPELINE [[function_constant(201)]];
+constant bool kI2Pipeline = is_function_constant_defined(FC_I2_PIPELINE) ? FC_I2_PIPELINE : true;
 constant constexpr uint kI2NVFP4 = 0;
 
 constant constexpr uint kI2Rows = 64;          // routed rows per threadgroup
@@ -128,6 +132,73 @@ static inline void i2_dequant_tile(device const uchar* mat, uint k, uint row0, u
     }
 }
 
+
+// The same decode split in two, so a K step's raw weights can be loaded into
+// registers one step ahead (software pipelining): `i2_load_raw` reads one
+// row's 32-weight slice (NVFP4: its two scale bytes and 16 code bytes; Q8_0:
+// its half scale and 32 bytes), `i2_store_raw` decodes it into the tile row.
+struct I2RawRow { uint v[9]; };
+
+static inline I2RawRow i2_load_raw(device const uchar* row, uint k0) {
+    I2RawRow r;
+    if (kI2Encoding == kI2NVFP4) {
+        device const uchar* block = row + (k0 / 64u) * 36u;
+        const uint sub0 = (k0 % 64u) / 16u;
+        r.v[0] = *reinterpret_cast<device const uint*>(block) >> (8u * sub0);
+        device const uint* q = reinterpret_cast<device const uint*>(block + 4u + sub0 * 8u);
+        I2_UNROLL for (uint i = 0; i < 4; ++i) r.v[1 + i] = q[i];
+    } else {
+        device const ushort* q = reinterpret_cast<device const ushort*>(row + (k0 / 32u) * 34u);
+        r.v[0] = q[0];
+        I2_UNROLL for (uint i = 0; i < 8; ++i) r.v[1 + i] = uint(q[1 + 2 * i]) | (uint(q[2 + 2 * i]) << 16);
+    }
+    return r;
+}
+
+static inline void i2_store_raw(thread const I2RawRow& r, threadgroup const half2* lut, threadgroup half* d) {
+    if (kI2Encoding == kI2NVFP4) {
+        I2_UNROLL for (uint s = 0; s < 2; ++s) {
+            const half2 scale = half2(half(i2_ue4m3((r.v[0] >> (8u * s)) & 0xFFu)));
+            I2_UNROLL for (uint w = 0; w < 2; ++w) {
+                const uint u = r.v[1 + s * 2u + w];
+                const half2 v0 = lut[u & 0xFFu] * scale, v1 = lut[(u >> 8) & 0xFFu] * scale;
+                const half2 v2 = lut[(u >> 16) & 0xFFu] * scale, v3 = lut[u >> 24] * scale;
+                *reinterpret_cast<threadgroup half4*>(d + s * 16u + w * 4u) = half4(v0.x, v1.x, v2.x, v3.x);
+                *reinterpret_cast<threadgroup half4*>(d + s * 16u + 8u + w * 4u) = half4(v0.y, v1.y, v2.y, v3.y);
+            }
+        }
+    } else {
+        const float scale = float(as_type<half>(ushort(r.v[0])));
+        I2_UNROLL for (uint i = 0; i < 8; ++i) {
+            const uint u = r.v[1 + i];
+            *reinterpret_cast<threadgroup half4*>(d + 4u * i) = half4(
+                half(float(as_type<char>(uchar(u & 0xFFu))) * scale),
+                half(float(as_type<char>(uchar((u >> 8) & 0xFFu))) * scale),
+                half(float(as_type<char>(uchar((u >> 16) & 0xFFu))) * scale),
+                half(float(as_type<char>(uchar(u >> 24))) * scale));
+        }
+    }
+}
+
+// Activation rows: the thread's slice of one routed row, held in registers
+// between the load and the tile store (zero past the block's end).
+template <uint ROWS>
+struct I2RawRows { half4 v[kI2K * ROWS / kI2Threads / 4u]; };
+
+template <uint ROWS>
+static inline I2RawRows<ROWS> i2_load_rows_raw(device const half* src_row, bool valid, uint k0) {
+    I2RawRows<ROWS> r;
+    device const half4* src = reinterpret_cast<device const half4*>(src_row + k0);
+    I2_UNROLL for (uint i = 0; i < kI2K * ROWS / kI2Threads / 4u; ++i) r.v[i] = valid ? src[i] : half4(0.0h);
+    return r;
+}
+
+template <uint ROWS>
+static inline void i2_store_rows_raw(thread const I2RawRows<ROWS>& r, threadgroup half* dst_row) {
+    threadgroup half4* dst = reinterpret_cast<threadgroup half4*>(dst_row);
+    I2_UNROLL for (uint i = 0; i < kI2K * ROWS / kI2Threads / 4u; ++i) dst[i] = r.v[i];
+}
+
 // SITU with clamped arguments: Metal's fast tanh and exp return NaN far
 // outside their useful range; at the clamps tanh is 1 and the sigmoid 0 or 1
 // to FP32 precision.
@@ -184,14 +255,26 @@ static inline void i2_gate_up_block(
     }
     const uint sg_m = (sg / SG_COLS) * 32u, sg_n = (sg % SG_COLS) * COLS;
 
+    // Each thread owns one weight row (gate rows for threads 0-63, up rows
+    // for 64-127); the next step's raw weights and activations are loaded
+    // before this step's multiply.
+    const uint w_row = tid % kI2GateUpCols;
+    device const uchar* w_src = (tid < kI2GateUpCols ? gate : up) + ulong(n_base + w_row) * i2_row_bytes(p.D);
+    threadgroup half* w_dst = (tid < kI2GateUpCols ? gate_tile : up_tile) + w_row * kI2Ld;
+    I2RawRow raw = i2_load_raw(w_src, 0);
+    I2RawRows<ROWS> rows_raw = i2_load_rows_raw<ROWS>(a_src, a_valid, 0);
     for (uint k0 = 0; k0 < p.D; k0 += kI2K) {
-        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
-        if (tid < kI2GateUpCols) {
-            i2_dequant_tile(gate, p.D, n_base, kI2GateUpCols, k0, lut, gate_tile, tid, kI2GateUpCols);
-        } else {
-            i2_dequant_tile(up, p.D, n_base, kI2GateUpCols, k0, lut, up_tile, tid - kI2GateUpCols, kI2GateUpCols);
+        if (!kI2Pipeline && k0 > 0) {
+            raw = i2_load_raw(w_src, k0);
+            rows_raw = i2_load_rows_raw<ROWS>(a_src, a_valid, k0);
         }
+        i2_store_rows_raw<ROWS>(rows_raw, rows_tile + a_row * kI2Ld + a_k);
+        i2_store_raw(raw, lut, w_dst);
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (kI2Pipeline && k0 + kI2K < p.D) {
+            raw = i2_load_raw(w_src, k0 + kI2K);
+            rows_raw = i2_load_rows_raw<ROWS>(a_src, a_valid, k0 + kI2K);
+        }
         I2_UNROLL for (uint kk = 0; kk < kI2K; kk += 8) {
             simdgroup_half8x8 a[4], g[NJ], u[NJ];
             I2_UNROLL for (uint i = 0; i < 4; ++i) {
@@ -257,10 +340,22 @@ static inline void i2_down_block(
     }
     const uint sg_m = (sg / SG_COLS) * 32u, sg_n = (sg % SG_COLS) * COLS;
 
+    device const uchar* w_src = down + ulong(n_base + tid) * i2_row_bytes(p.F);
+    threadgroup half* w_dst = weight_tile + uint(tid) * kI2Ld;
+    I2RawRow raw = i2_load_raw(w_src, 0);
+    I2RawRows<ROWS> rows_raw = i2_load_rows_raw<ROWS>(a_src, a_valid, 0);
     for (uint k0 = 0; k0 < p.F; k0 += kI2K) {
-        i2_load_rows<ROWS>(a_src, a_valid, k0, rows_tile + a_row * kI2Ld + a_k);
-        i2_dequant_tile(down, p.F, n_base, kI2DownCols, k0, lut, weight_tile, tid, kI2Threads);
+        if (!kI2Pipeline && k0 > 0) {
+            raw = i2_load_raw(w_src, k0);
+            rows_raw = i2_load_rows_raw<ROWS>(a_src, a_valid, k0);
+        }
+        i2_store_rows_raw<ROWS>(rows_raw, rows_tile + a_row * kI2Ld + a_k);
+        i2_store_raw(raw, lut, w_dst);
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (kI2Pipeline && k0 + kI2K < p.F) {
+            raw = i2_load_raw(w_src, k0 + kI2K);
+            rows_raw = i2_load_rows_raw<ROWS>(a_src, a_valid, k0 + kI2K);
+        }
         I2_UNROLL for (uint kk = 0; kk < kI2K; kk += 8) {
             simdgroup_half8x8 a[4], b[NJ];
             I2_UNROLL for (uint i = 0; i < 4; ++i) {
