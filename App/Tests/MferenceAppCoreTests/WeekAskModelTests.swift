@@ -222,6 +222,24 @@ import Testing
         #expect(ask.highlightedOpenTimes.isEmpty)
     }
 
+    @Test @MainActor func aCheckANewerAnswerOvertookLeavesThatAnswerCurrent() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
+        await ask.ask("When am I free for 2 hours?")
+        _ = try await service.add(ProposedEvent(title: "Dentist", start: CalendarFixtures.date(16, 15),
+                                                end: CalendarFixtures.date(16, 16), source: ItemSource(kind: .manual, label: "x")))
+        // The change check reads Calendar slowly; a new question answers
+        // from the changed calendar before it finishes.
+        await service.delayNextRead(by: .milliseconds(200))
+        let check = Task { await ask.calendarChanged() }
+        for _ in 0..<200 where await service.isNextReadDelayed { try await Task.sleep(for: .milliseconds(5)) }
+        await ask.ask("When am I free for 2 hours?")
+        #expect(ask.answers.count == 1)
+        await check.value
+        #expect(!ask.isStale)
+        #expect(!ask.highlightedOpenTimes.isEmpty)
+    }
+
     @Test @MainActor func movingABlockedEventMakesAnswersStale() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
         let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)

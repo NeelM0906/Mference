@@ -276,7 +276,11 @@ public final class WeekAskModel {
     /// marked out of date when what it read is no longer the same.
     public func calendarChanged() async {
         guard let week, let fingerprint, !answers.isEmpty, !isStale else { return }
-        guard let events = try? await calendar.events(in: week) else { return }
+        let mine = generation
+        // A newer question (or Clear) may have answered from a newer read
+        // during the wait: this check is about answers that are gone.
+        guard let events = try? await calendar.events(in: week), mine == generation,
+              week == self.week, fingerprint == self.fingerprint else { return }
         let now = WeekSnapshot(interval: week, now: calendar.currentTime, calendar: calendar.calendar,
                                events: events, todos: calendar.todos)
         if Self.fingerprint(now, ignoring: ignoredOwnEvents) != fingerprint { isStale = true }
