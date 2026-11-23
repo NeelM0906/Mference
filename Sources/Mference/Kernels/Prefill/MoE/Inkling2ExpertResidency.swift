@@ -7,9 +7,31 @@ enum Inkling2ExpertPlacement: String, Equatable, Sendable {
     /// Read once at load into an anonymous buffer (`ResidentExpertStreamer`,
     /// `.copied`) and kept for the model's lifetime.
     case resident
-    /// Read through the file cache into a staging slab one layer ahead of the
-    /// visit that needs it (`Inkling2StagedExpertLayers`).
+    /// Read into a staging slab one layer ahead of the visit that needs it
+    /// (`Inkling2StagedExpertLayers`), uncached by default below 48 GB
+    /// (`Inkling2StagedReadMode`).
     case staged
+}
+
+/// How the staged layers' bytes are read from their files: the prefill slab
+/// fills and the decode-cache misses. (Resident layers are always read
+/// uncached, once, at load.)
+enum Inkling2StagedReadMode: String, Equatable, Sendable {
+    /// `F_NOCACHE`: the reads do not fill the file cache, so a staged layer's
+    /// bytes are held only in the slab. Without it a run would also keep
+    /// every staged layer in clean file-cache pages (8.9 GB on the Mini),
+    /// which a 32 GB host cannot spare (coordinator ruling, 2026-11-23).
+    case uncached
+    /// Through the file cache: repeat reads of cached pages are faster, at
+    /// the cost of the cache's memory. An option, to be measured as a speed
+    /// setting on hosts with room for it.
+    case cached
+
+    /// Uncached on hosts below `Inkling2ExpertResidencyPlan.allResidentMemory`
+    /// (48 GB, the hosts that stage anything), cached at or above it.
+    static func forHost(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Self {
+        physicalMemory < Inkling2ExpertResidencyPlan.allResidentMemory ? .uncached : .cached
+    }
 }
 
 /// The residency ladder of the integration plan (section 4.5), per stored
@@ -57,8 +79,8 @@ struct Inkling2ExpertLayerFile: Sendable, Equatable {
     let bytes: Int
 }
 
-/// The layers the plan stages, read through the file cache into a ring of
-/// slabs one layer ahead of the GPU. A visit takes a ticket in visit order;
+/// The layers the plan stages, read (by `readMode`) into a ring of slabs one
+/// layer ahead of the GPU. A visit takes a ticket in visit order;
 /// the reader fills ticket `n`'s slab once the visit that used the slab
 /// before it (ticket `n - slabs`) has released it, then signals `filled`.
 /// The command buffer waits for `filled >= n` before the visit's MoE and
@@ -90,6 +112,8 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     let slabBytes: Int
     let filled: MTLSharedEvent
     let released: MTLSharedEvent
+    /// Whether the fills bypass the file cache.
+    let readMode: Inkling2StagedReadMode
     private let files: [Int: Inkling2ExpertLayerFile]
     private let queue = DispatchQueue(label: "inkling2.expert-staging", qos: .userInitiated)
     private let lock = NSLock()
@@ -102,7 +126,8 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     /// that never completes would otherwise hold the reader forever).
     var releaseTimeoutMS: UInt64 = 120_000
 
-    init(device: MTLDevice, files: [Int: Inkling2ExpertLayerFile], slabs count: Int = 2) throws {
+    init(device: MTLDevice, files: [Int: Inkling2ExpertLayerFile], slabs count: Int = 2,
+         readMode: Inkling2StagedReadMode = .forHost()) throws {
         precondition(count >= 2 && !files.isEmpty)
         let pageSize = Int(getpagesize())
         let largest = files.values.map(\.bytes).max() ?? 0
@@ -121,6 +146,7 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         }
         self.slabs = made
         self.files = files
+        self.readMode = readMode
         self.filled = filled
         self.released = released
     }
@@ -156,8 +182,7 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         let sequence = nextSequence
         let slab = slabs[Int((sequence - 1) % UInt64(slabs.count))]
         let ticket = Ticket(sequence: sequence, layer: layer, slab: slab)
-        nonisolated(unsafe) let wait = fence
-        queue.async { [self] in fill(ticket, file: file, after: wait) }
+        queue.async { [self] in fill(ticket, file: file, after: fence) }
         return ticket
     }
 
@@ -215,7 +240,7 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         }
         let start = DispatchTime.now().uptimeNanoseconds
         do {
-            try Inkling2ExpertStore.read(file, into: ticket.slab.contents(), bypassCache: false)
+            try Inkling2ExpertStore.read(file, into: ticket.slab.contents(), bypassCache: readMode == .uncached)
         } catch Inkling2ExpertStore.StoreError.openFailed(let path, let code) {
             record(.openFailed(path: path, errno: code))
             return
@@ -269,12 +294,16 @@ struct Inkling2DecodeBinding {
 ///   cache) into one anonymous buffer each; prefill and decode bind them
 ///   with no readback;
 /// * staged layers, prefill: the `Inkling2StagedExpertLayers` ring (whole
-///   layers read through the file cache one layer ahead);
+///   layers read one layer ahead);
 /// * staged layers, decode: after the runner reads back a visit's routed
 ///   ids, `prepareDecodeVisit` makes sure those experts are in the layer's
-///   cache slots (LRU, misses read through the file cache) and binds them.
+///   cache slots (LRU, misses read from the layer file) and binds them.
 ///   The slots live in the staging slabs, which decode leaves idle; a
 ///   prefill visit of a staged layer empties every cache.
+///
+/// Both staged paths read by `readMode`: uncached (`F_NOCACHE`) by default
+/// on hosts below 48 GB, so the staged layers are not held a second time in
+/// the file cache.
 ///
 /// Slot ownership: a decode visit's slots belong to its command buffer from
 /// `prepareDecodeVisit` until `endDecodeVisit`'s signal; the store waits for
@@ -371,6 +400,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
 
     let plan: Inkling2ExpertResidencyPlan
     let shape: Inkling2MoEShape
+    /// How staged layers are read (slab fills and decode-cache misses).
+    let readMode: Inkling2StagedReadMode
     private let resident: [Int: Inkling2ExpertPool]
     private let mapped: [Int: Inkling2ExpertPool]
     private let templates: [Int: Inkling2ExpertPool]
@@ -390,10 +421,11 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     var waitTimeoutMS: UInt64 = 120_000
 
     init(device: MTLDevice, shape: Inkling2MoEShape, layers: [Inkling2ExpertLayerSpec],
-         plan: Inkling2ExpertResidencyPlan) throws {
+         plan: Inkling2ExpertResidencyPlan, readMode: Inkling2StagedReadMode = .forHost()) throws {
         precondition(layers.count == plan.placements.count)
         self.plan = plan
         self.shape = shape
+        self.readMode = readMode
         let pageSize = Int(getpagesize())
         guard let ones = device.makeBuffer(length: max(16, shape.experts * 4), options: .storageModeShared) else {
             throw StoreError.allocationFailed("scale ones")
@@ -453,7 +485,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             }
         }
         let staging = stagedFiles.isEmpty ? nil
-            : try Inkling2StagedExpertLayers(device: device, files: stagedFiles, slabs: max(2, plan.stagingSlabs))
+            : try Inkling2StagedExpertLayers(device: device, files: stagedFiles, slabs: max(2, plan.stagingSlabs),
+                                             readMode: readMode)
 
         // Staged layers: a template over slab 0 (every staged layout must fit
         // a slab, so a visit's rebinding cannot fail after its ticket is
@@ -631,7 +664,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                 throw StoreError.timedOut("decode reads of layer \(layer)'s slots")
             }
             do {
-                try Self.readExperts(cache: cache, loads: loads.map { ($0.slot, $0.expert) })
+                try Self.readExperts(cache: cache, loads: loads.map { ($0.slot, $0.expert) },
+                                     bypassCache: readMode == .uncached)
             } catch {
                 // The slots may hold partial bytes: mark them empty.
                 rollBack(cache, loads, keepPrevious: false)
@@ -668,11 +702,14 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     }
 
     /// Reads each loaded expert's blob from the layer file into its slot, in
-    /// parallel, through the file cache.
-    private static func readExperts(cache: DecodeCache, loads: [(Int, Int)]) throws {
+    /// parallel; `bypassCache` sets `F_NOCACHE`.
+    private static func readExperts(cache: DecodeCache, loads: [(Int, Int)], bypassCache: Bool) throws {
         let fd = Darwin.open(cache.file.path, O_RDONLY)
         guard fd >= 0 else { throw StoreError.openFailed(path: cache.file.path, errno: errno) }
         defer { close(fd) }
+        if bypassCache, fcntl(fd, F_NOCACHE, 1) == -1 {
+            throw StoreError.readFailed(path: cache.file.path, errno: errno)
+        }
         nonisolated(unsafe) let base = cache.slab.contents() + cache.offset
         nonisolated(unsafe) var code: Int32 = 0
         let codeLock = NSLock()
@@ -697,14 +734,16 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     }
 
     /// Reads `file` into `destination` (32 MiB chunks, four readers);
-    /// `bypassCache` sets `F_NOCACHE` so a resident copy does not also fill
-    /// the file cache.
+    /// `bypassCache` sets `F_NOCACHE` so the copy does not also fill the file
+    /// cache (resident layers always; staged slabs by `readMode`).
     static func read(_ file: Inkling2ExpertLayerFile, into destination: UnsafeMutableRawPointer,
                      bypassCache: Bool) throws {
         let fd = Darwin.open(file.path, O_RDONLY)
         guard fd >= 0 else { throw StoreError.openFailed(path: file.path, errno: errno) }
         defer { close(fd) }
-        if bypassCache { _ = fcntl(fd, F_NOCACHE, 1) }
+        // A descriptor that cannot bypass the cache fails the read rather
+        // than fill the cache the caller asked to keep out of.
+        if bypassCache, fcntl(fd, F_NOCACHE, 1) == -1 { throw StoreError.readFailed(path: file.path, errno: errno) }
         let chunk = Inkling2StagedExpertLayers.chunkBytes
         let chunks = (file.bytes + chunk - 1) / chunk
         nonisolated(unsafe) let target = destination

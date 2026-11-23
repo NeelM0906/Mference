@@ -32,6 +32,20 @@ import MferenceValidationSupport
         #expect(small.residentBytes == 0)
     }
 
+    /// Coordinator ruling (2026-11-23): staged reads bypass the file cache by
+    /// default on hosts below 48 GB (the hosts that stage); cached stays an
+    /// option, and the store hands its mode to the staging ring.
+    @Test func stagedReadsDefaultToUncachedBelowFortyEightGigabytes() {
+        #expect(Inkling2StagedReadMode.forHost(physicalMemory: 32 << 30) == .uncached)
+        #expect(Inkling2StagedReadMode.forHost(physicalMemory: 36 << 30) == .uncached)
+        #expect(Inkling2StagedReadMode.forHost(physicalMemory: 47 << 30) == .uncached)
+        #expect(Inkling2StagedReadMode.forHost(physicalMemory: (48 << 30) - 1) == .uncached)
+        #expect(Inkling2StagedReadMode.forHost(physicalMemory: 48 << 30) == .cached)
+        #expect(Inkling2StagedReadMode.forHost(physicalMemory: 64 << 30) == .cached)
+        #expect(Inkling2StagedReadMode.forHost()
+                == (ProcessInfo.processInfo.physicalMemory < 48 << 30 ? .uncached : .cached))
+    }
+
     private static func writeLayers(_ pools: [Inkling2SyntheticPool], header: Int) throws -> (URL, [Int: Inkling2ExpertLayerFile]) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("inkling2-staging-\(UUID().uuidString)", isDirectory: true)
@@ -48,7 +62,8 @@ import MferenceValidationSupport
         return (directory, files)
     }
 
-    @Test func stagedVisitsMatchResidentLayers() throws {
+    @Test(arguments: [Inkling2StagedReadMode.uncached, .cached])
+    func stagedVisitsMatchResidentLayers(mode: Inkling2StagedReadMode) throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
         let shape = Inkling2MoEShape(d: 256, f: 128, experts: 8, topK: 4)
@@ -58,7 +73,8 @@ import MferenceValidationSupport
         }
         let (directory, files) = try Self.writeLayers(layers, header: 4096)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = try Inkling2StagedExpertLayers(device: context.device, files: files, slabs: 2)
+        let staged = try Inkling2StagedExpertLayers(device: context.device, files: files, slabs: 2, readMode: mode)
+        #expect(staged.readMode == mode)
 
         let tokens = 48
         let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B10)
@@ -120,7 +136,8 @@ import MferenceValidationSupport
         #expect(staged.error == .openFailed(path: missing.path, errno: ENOENT))
     }
 
-    @Test func storeServesResidentAndStagedLayers() throws {
+    @Test(arguments: [Inkling2StagedReadMode.uncached, .cached])
+    func storeServesResidentAndStagedLayers(mode: Inkling2StagedReadMode) throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
         let shape = Inkling2MoEShape(d: 256, f: 128, experts: 8, topK: 4)
@@ -138,7 +155,10 @@ import MferenceValidationSupport
         }
         let plan = Inkling2ExpertResidencyPlan(placements: [.resident, .staged, .staged], stagingSlabs: 2,
                                                residentBytes: files[0]!.bytes, stagingBytes: 0)
-        let store = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan)
+        let store = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan, readMode: mode)
+        #expect(store.readMode == mode && store.staging?.readMode == mode)
+        let byDefault = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan)
+        #expect(byDefault.readMode == .forHost() && byDefault.staging?.readMode == .forHost())
 
         let tokens = 40
         let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B30)
@@ -240,7 +260,8 @@ import MferenceValidationSupport
     /// a layer. Per token every staged layer is visited in turn, so slots
     /// evict and scales refresh; every visit equals the resident pool's
     /// output bit for bit.
-    private static func cacheStore(_ context: MetalContext, shape: Inkling2MoEShape, encoding: Inkling2MoEEncoding = .nvfp4)
+    private static func cacheStore(_ context: MetalContext, shape: Inkling2MoEShape, encoding: Inkling2MoEEncoding = .nvfp4,
+                                   readMode: Inkling2StagedReadMode = .forHost())
         throws -> (store: Inkling2ExpertStore, layers: [Inkling2SyntheticPool], directory: URL, files: [Int: Inkling2ExpertLayerFile]) {
         let layers = try (0..<4).map {
             try Inkling2SyntheticPool.make(device: context.device, encoding: encoding, shape: shape,
@@ -254,7 +275,9 @@ import MferenceValidationSupport
         }
         let plan = Inkling2ExpertResidencyPlan(placements: [.resident, .staged, .staged, .staged], stagingSlabs: 2,
                                                residentBytes: files[0]!.bytes, stagingBytes: 0)
-        let store = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan)
+        let store = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                            readMode: readMode)
+        #expect(store.readMode == readMode && store.staging?.readMode == readMode)
         return (store, layers, directory, files)
     }
 
@@ -281,11 +304,12 @@ import MferenceValidationSupport
         return Inkling2MoETestSupport.read(out, as: Float.self, count: shape.d)
     }
 
-    @Test func decodeCachesMatchResidentPoolsAcrossInterleavedLayers() throws {
+    @Test(arguments: [Inkling2StagedReadMode.uncached, .cached])
+    func decodeCachesMatchResidentPoolsAcrossInterleavedLayers(mode: Inkling2StagedReadMode) throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
         let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
-        let (store, layers, directory, _) = try Self.cacheStore(context, shape: shape)
+        let (store, layers, directory, _) = try Self.cacheStore(context, shape: shape, readMode: mode)
         defer { try? FileManager.default.removeItem(at: directory) }
         for layer in 1...3 { #expect(store.decodeSlots(layer: layer) == 8 && store.isStaged(layer: layer)) }
         #expect(!store.isStaged(layer: 0) && store.residentPool(layer: 0) != nil && store.residentPool(layer: 1) == nil)
@@ -353,6 +377,114 @@ import MferenceValidationSupport
         #expect(after.hits == 0 && after.misses == 4)
         #expect(throws: Inkling2ExpertStore.StoreError.notStaged(layer: 0)) {
             try store.prepareDecodeVisit(layer: 0, expertIDs: experts)
+        }
+    }
+
+    /// Looped layers on the staged path (llama.cpp issue 32710: with a looped
+    /// layer's experts not resident, passes 2 and 3 computed with the experts
+    /// loaded for pass 1). Layers 1 and 2 stand for a looped block visited
+    /// three times between layer 0 (resident) and layer 3, as in the all-staged
+    /// plan of a host under 30 GB; each pass of a looped layer routes only to
+    /// experts its earlier passes did not use (pass 1 to 0-4, pass 2 to 5-9,
+    /// pass 3 to 10-15). Prefill through the staging ring and decode through
+    /// the slot caches (keyed by stored layer) both equal the fixed pools bit
+    /// for bit, and on the first decode token every pass-2 and pass-3 visit
+    /// misses all four experts, so nothing pass 1 loaded stands in for them.
+    @Test func loopedPassesOnStagedLayersUseTheirOwnExperts() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let (store, layers, directory, _) = try Self.cacheStore(context, shape: shape)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // (stored layer, pass); layers 1 and 2 are the looped block.
+        let schedule = [(0, 1), (1, 1), (2, 1), (1, 2), (2, 2), (1, 3), (2, 3), (3, 1)]
+        let passExperts = [Array(0..<5), Array(5..<10), Array(10..<16)]
+        func experts(layer: Int, pass: Int, token: Int) -> [Int] {
+            let set = (1...2).contains(layer) ? passExperts[pass - 1] : Array(0..<shape.experts)
+            return (0..<shape.topK).map { set[(token + layer + $0) % set.count] }
+        }
+
+        // Prefill: one command buffer for the whole schedule, a route scratch
+        // per visit.
+        let tokens = 24
+        let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B60)
+        let count = tokens * shape.d
+        func output() -> MTLBuffer { context.device.makeBuffer(length: count * 4, options: .storageModeShared)! }
+        let scratches = try schedule.enumerated().map { visit, step in
+            let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+            let ids = (0..<tokens).flatMap { t in experts(layer: step.0, pass: step.1, token: t).map(UInt32.init) }
+            let weights = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK,
+                                                              seed: 0x2B61 + UInt64(visit)).weights
+            Inkling2MoETestSupport.write(ids, to: scratch.ids)
+            Inkling2MoETestSupport.write(weights, to: scratch.routeWeights)
+            return scratch
+        }
+        let expected: [[Float]] = schedule.enumerated().map { visit, step in
+            let out = output()
+            _ = Inkling2MoETestSupport.run(context) {
+                kernels.encodePrefill($0, hidden: hidden, hiddenStride: shape.d, pool: layers[step.0].pool,
+                                      scratch: scratches[visit], tokens: tokens, out: out, outStride: shape.d)
+            }
+            return Inkling2MoETestSupport.read(out, as: Float.self, count: count)
+        }
+        #expect(expected[1] != expected[3] && expected[3] != expected[5], "the passes must differ")
+        let outs = schedule.map { _ in output() }
+        let cb = context.queue.makeCommandBuffer()!
+        for (visit, step) in schedule.enumerated() {
+            let pool = try store.beginPrefillVisit(layer: step.0, commandBuffer: cb)
+            let encoder = cb.makeComputeCommandEncoder()!
+            kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: pool, scratch: scratches[visit],
+                                  tokens: tokens, out: outs[visit], outStride: shape.d)
+            encoder.endEncoding()
+            try store.endPrefillVisit(layer: step.0, commandBuffer: cb)
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+        store.drainStaging()
+        #expect(cb.status == .completed && store.stagingError == nil)
+        for (visit, step) in schedule.enumerated() {
+            let got = Inkling2MoETestSupport.read(outs[visit], as: Float.self, count: count)
+            #expect(got.allSatisfy { $0.isFinite })
+            #expect(got == expected[visit], "prefill visit \(visit) (layer \(step.0), pass \(step.1))")
+        }
+
+        // Decode: four tokens over the same schedule through the slot caches
+        // (8 slots per staged layer, so later passes also evict).
+        let decodeTokens = 4
+        let (x, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: decodeTokens, stride: shape.d, d: shape.d, seed: 0x2B62)
+        let visits = decodeTokens * schedule.count
+        let routeWeights = Inkling2MoETestSupport.randomRoutes(tokens: visits, experts: shape.experts, topK: shape.topK,
+                                                               seed: 0x2B63).weights
+        var routeIDs: [UInt32] = []
+        for t in 0..<decodeTokens {
+            for step in schedule { routeIDs += experts(layer: step.0, pass: step.1, token: t).map(UInt32.init) }
+        }
+        let ids = context.device.makeBuffer(length: visits * shape.topK * 4, options: .storageModeShared)!
+        let weights = context.device.makeBuffer(length: visits * shape.topK * 4, options: .storageModeShared)!
+        Inkling2MoETestSupport.write(routeIDs, to: ids)
+        Inkling2MoETestSupport.write(routeWeights, to: weights)
+        for t in 0..<decodeTokens {
+            for (visit, step) in schedule.enumerated() {
+                let r = t * schedule.count + visit, offset = r * shape.topK * 4
+                let want = Self.decode(context, kernels, shape: shape, x: x, xOffset: t * shape.d * 2, weights: weights,
+                                       weightsOffset: offset, pool: layers[step.0].pool, ids: ids, idsOffset: offset)
+                let got: [Float]
+                if let pool = store.residentPool(layer: step.0) {
+                    got = Self.decode(context, kernels, shape: shape, x: x, xOffset: t * shape.d * 2, weights: weights,
+                                      weightsOffset: offset, pool: pool, ids: ids, idsOffset: offset)
+                } else {
+                    let routed = routeIDs[(r * shape.topK)..<((r + 1) * shape.topK)].map(Int.init)
+                    let binding = try store.prepareDecodeVisit(layer: step.0, expertIDs: routed)
+                    #expect(binding.hits + binding.misses == shape.topK)
+                    if t == 0 && step.1 > 1 {
+                        #expect(binding.misses == shape.topK, "pass \(step.1) of layer \(step.0) loads its own experts")
+                    }
+                    got = Self.decode(context, kernels, shape: shape, x: x, xOffset: t * shape.d * 2, weights: weights,
+                                      weightsOffset: offset, binding: binding, store: store)
+                }
+                #expect(got.allSatisfy { $0.isFinite })
+                #expect(got == want, "decode token \(t) visit \(visit) (layer \(step.0), pass \(step.1))")
+            }
         }
     }
 

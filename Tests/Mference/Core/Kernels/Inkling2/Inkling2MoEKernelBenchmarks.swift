@@ -212,11 +212,12 @@ import MferenceValidationSupport
         }
     }
 
-    /// Staging a full-size layer through the file cache: synthetic layer
-    /// files of the install's sizes (NVFP4 574.6 MB, Q8_0 1,084.2 MB),
-    /// written in 32 MiB chunks, read back into a slab after the first read
-    /// warmed the cache; deleted afterwards. The steady state of a 32 GB
-    /// prefill re-reads 12 such layers per chunk.
+    /// Staging a full-size layer in each read mode: synthetic layer files of
+    /// the install's sizes (NVFP4 574.6 MB, Q8_0 1,084.2 MB), written past
+    /// the file cache, read back into a slab four times per mode, uncached
+    /// first (from the SSD), then cached (the first read fills the cache);
+    /// deleted afterwards. The steady state of a 32 GB prefill re-reads 12
+    /// such layers per chunk.
     @Test(.enabled(if: enabled))
     func stagingThroughput() throws {
         let context = try MetalContext()
@@ -227,22 +228,32 @@ import MferenceValidationSupport
         var files: [Int: Inkling2ExpertLayerFile] = [:]
         var rng = SeedTree(0xBA).key("staging")
         let chunk = Inkling2SyntheticPool.randomBlocks(encoding: .q8_0, bytes: 34 * 987_000, rng: &rng)
+        // Written through an `F_NOCACHE` descriptor from a page-aligned
+        // buffer, so the write leaves the pages out of the file cache and the
+        // uncached reads below come from the SSD.
+        let block = UnsafeMutableRawPointer.allocate(byteCount: 32 << 20, alignment: 16_384)
+        defer { block.deallocate() }
+        chunk.withUnsafeBytes { block.copyMemory(from: $0.baseAddress!, byteCount: 32 << 20) }
         for (layer, bytes) in [(0, 128 * 4_489_216), (1, 128 * 8_470_528)] {
             let url = directory.appendingPathComponent("layer_\(layer).bin")
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: url)
+            let fd = open(url.path, O_CREAT | O_WRONLY | O_TRUNC, 0o600)
+            #expect(fd >= 0 && fcntl(fd, F_NOCACHE, 1) != -1)
             var written = 0
             while written < bytes {
-                let n = min(chunk.count, bytes - written)
-                try handle.write(contentsOf: chunk[0..<n])
+                let n = write(fd, block, min(32 << 20, bytes - written))
+                guard n > 0 else { break }
                 written += n
             }
-            try handle.close()
+            close(fd)
+            #expect(written == bytes)
             files[layer] = Inkling2ExpertLayerFile(path: url.path, offset: 0, bytes: bytes)
         }
-        let staged = try Inkling2StagedExpertLayers(device: context.device, files: files, slabs: 2)
+        // Each read mode in turn: uncached (`F_NOCACHE`, the default below
+        // 48 GB) first, then through the file cache.
+        for mode in [Inkling2StagedReadMode.uncached, .cached] {
+        let staged = try Inkling2StagedExpertLayers(device: context.device, files: files, slabs: 2, readMode: mode)
         for layer in [0, 1] {
-            // First read warms the cache; then time three reads.
+            // The first read warms the cache in cached mode; four reads each.
             for _ in 0..<4 {
                 let cb = context.queue.makeCommandBuffer()!
                 let ticket = try staged.stage(layer: layer)
@@ -254,19 +265,20 @@ import MferenceValidationSupport
         }
         staged.drain()
         #expect(staged.error == nil)
-        print(String(format: "[inkling2-moe-kbench] staging %.2f GB in %.3f s (%.1f GB/s, first reads included)",
-                     Double(staged.bytesRead) / 1e9, staged.secondsReading,
+        print(String(format: "[inkling2-moe-kbench] staging (%@) %.2f GB in %.3f s (%.1f GB/s, first reads included)",
+                     mode.rawValue, Double(staged.bytesRead) / 1e9, staged.secondsReading,
                      Double(staged.bytesRead) / 1e9 / staged.secondsReading))
 
         // Decode-cache misses at full size: both files as staged layers of a
         // store (each cache then holds the whole layer, so every visit of
-        // fresh experts is 8 misses), warm file cache.
+        // fresh experts is 8 misses).
         let specs = [
             Inkling2ExpertLayerSpec(file: files[0]!, encoding: .nvfp4, expertStride: 4_489_216, gateUpScales: nil, downScales: nil),
             Inkling2ExpertLayerSpec(file: files[1]!, encoding: .q8_0, expertStride: 8_470_528, gateUpScales: nil, downScales: nil),
         ]
         let plan = Inkling2ExpertResidencyPlan(placements: [.staged, .staged], stagingSlabs: 2, residentBytes: 0, stagingBytes: 0)
-        let store = try Inkling2ExpertStore(device: context.device, shape: Self.shape, layers: specs, plan: plan)
+        let store = try Inkling2ExpertStore(device: context.device, shape: Self.shape, layers: specs, plan: plan,
+                                            readMode: mode)
         // The runner prefills before it decodes, so the slabs are touched;
         // here a first pass touches them, then a staged prefill visit empties
         // the caches, and the second pass is timed.
@@ -288,10 +300,12 @@ import MferenceValidationSupport
                 #expect(binding.misses == 8)
             }
             times.sort()
-            print(String(format: "[inkling2-moe-kbench] decode cache %@ (%@): 8 misses per visit, median %.2f ms, best %.2f ms, worst %.2f ms",
-                         label, pass == 0 ? "first touch of the slabs" : "slabs touched", times[times.count / 2],
-                         times[0], times[times.count - 1]))
+            print(String(format: "[inkling2-moe-kbench] decode cache %@ (%@, %@): 8 misses per visit, median %.2f ms, best %.2f ms, worst %.2f ms",
+                         label, mode.rawValue, pass == 0 ? "first touch of the slabs" : "slabs touched",
+                         times[times.count / 2], times[0], times[times.count - 1]))
         }
+        }
+        store.drainStaging()
         }
     }
 
