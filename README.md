@@ -59,7 +59,7 @@ Notes and Errands tabs they show are not built yet.</sub>
 | | [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (MoE) | 19.6 GB | 258 / 29 | 8.3 GB |
 | | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | 1.4 GB | 422 / 72 | 0.8 GB |
 | | [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) 20B-A1B (MoE) | 6.6 GB | 44 / 33 | 0.7 GB |
-| | [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) UD-Q4_K_XL (looped MoE), 32 GB Macs and up | 17.7 GB | not yet measured | not yet measured |
+| | [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) UD-Q4_K_XL (looped MoE), 32 GB Macs and up | 17.7 GB | 229 / 26 | 14.4 GB |
 
 Indicative readings from one 32 GB M1 Max with a 512-token prompt, not
 protocol benchmarks; your Mac will differ. The mixture-of-experts models keep

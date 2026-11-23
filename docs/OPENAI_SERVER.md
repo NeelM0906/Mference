@@ -204,6 +204,13 @@ the completion cap ended it). A turn that also produced a valid call ends with
 `"tool_calls"`. Such a turn is not kept for prompt-prefix reuse. For every
 other model, a malformed call fails the request as before.
 
+For Inkling 2 Mini, a call's `arguments` string keeps the model's own key
+order and number spelling, as compact JSON. A history call's arguments render
+from their text the way the vendor's renderers do: nested objects in the
+text's order, `1.0` as `1.0`. So send them back unchanged, and the next turn
+can continue from the call's cached prefix. An integer outside the 64-bit
+range in a history call's arguments gets HTTP 400.
+
 ## Library mode
 
 With `--library`, the server scans for completed installs and serves the
