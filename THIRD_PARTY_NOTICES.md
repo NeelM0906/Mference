@@ -93,10 +93,15 @@ Inkling 2 Mini: revision `45fd08764f2b0bf16b03a5483a80e5c7aaec8772` of
 the file `Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf_file` (17,629,760,736
 bytes, SHA-256
 `e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3`), a
-quantization of Thinking Machines' Inkling 2 Mini. The installer copies every
-tensor unchanged. The terms on the pinned repository and on the original
-checkpoint govern those weights; the GGUF's own metadata declares no license,
-and Mference makes no grant of rights to them.
+quantization of Thinking Machines'
+[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini). The
+installer copies every tensor unchanged. Both model cards declare
+`license: apache-2.0` (Thinking Machines' with a `license_link` to the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)), as read
+from their main branches on 2026-11-23 and not re-checked at the pinned
+revision; the GGUF's own metadata declares no license. The terms on the
+pinned repository and on the original checkpoint govern those weights, and
+Mference makes no grant of rights to them.
 
 MiniCPM5-2B: revision `cd199ce3ee67549c42ef7372f809f2c63599a3e9` of
 [`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B), the
