@@ -1,0 +1,419 @@
+{
+ "a": "generate/metal",
+ "b": "generate/metal-r2",
+ "prompts": [
+  {
+   "id": "g01-capital",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 48,
+   "generated_a": 48,
+   "logprobs": {
+    "positions": 52,
+    "top1_agreement": 1.0,
+    "max_abs_dlogprob_top1": 0.0,
+    "p99_abs_dlogprob_top1": 0.0,
+    "mean_abs_dlogprob_top1": 0.0,
+    "min_top20_overlap": 1.0,
+    "mean_kl_top20_approx": 0.0,
+    "max_kl_top20_approx": 0.0
+   }
+  },
+  {
+   "id": "g02-count",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 48,
+   "generated_a": 48
+  },
+  {
+   "id": "g03-code",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 64,
+   "generated_a": 64
+  },
+  {
+   "id": "g04-story",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 64,
+   "generated_a": 64
+  },
+  {
+   "id": "g05-wetlands",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 48,
+   "generated_a": 48,
+   "logprobs": {
+    "positions": 111,
+    "top1_agreement": 1.0,
+    "max_abs_dlogprob_top1": 0.0,
+    "p99_abs_dlogprob_top1": 0.0,
+    "mean_abs_dlogprob_top1": 0.0,
+    "min_top20_overlap": 1.0,
+    "mean_kl_top20_approx": 0.0,
+    "max_kl_top20_approx": 0.0
+   }
+  },
+  {
+   "id": "g06-chat-none",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 50,
+   "generated_a": 50,
+   "logprobs": {
+    "positions": 69,
+    "top1_agreement": 1.0,
+    "max_abs_dlogprob_top1": 0.0,
+    "p99_abs_dlogprob_top1": 0.0,
+    "mean_abs_dlogprob_top1": 0.0,
+    "min_top20_overlap": 1.0,
+    "mean_kl_top20_approx": 0.0,
+    "max_kl_top20_approx": 0.0
+   }
+  },
+  {
+   "id": "g07-chat-default",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 64,
+   "generated_a": 64
+  },
+  {
+   "id": "g08-chat-low",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 64,
+   "generated_a": 64
+  },
+  {
+   "id": "g09-tool",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 64,
+   "generated_a": 64
+  },
+  {
+   "id": "g10-after-tool",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 55,
+   "generated_a": 55
+  },
+  {
+   "id": "trace01",
+   "prompt_ids_equal": true,
+   "generated_identical": true,
+   "common_prefix": 1,
+   "generated_a": 1,
+   "trace": {
+    "visits": [
+     {
+      "visit": 0,
+      "layer": 0,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 1,
+      "layer": 1,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 2,
+      "layer": 2,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 3,
+      "layer": 3,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 4,
+      "layer": 4,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 5,
+      "layer": 5,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 6,
+      "layer": 6,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 7,
+      "layer": 7,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 8,
+      "layer": 8,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 9,
+      "layer": 9,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 10,
+      "layer": 10,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 11,
+      "layer": 11,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 12,
+      "layer": 12,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 13,
+      "layer": 13,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 14,
+      "layer": 14,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 15,
+      "layer": 15,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 16,
+      "layer": 16,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 17,
+      "layer": 17,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 18,
+      "layer": 6,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 19,
+      "layer": 7,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 20,
+      "layer": 8,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 21,
+      "layer": 9,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 22,
+      "layer": 10,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 23,
+      "layer": 11,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 24,
+      "layer": 12,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 25,
+      "layer": 13,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 26,
+      "layer": 14,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 27,
+      "layer": 15,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 28,
+      "layer": 16,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 29,
+      "layer": 17,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 30,
+      "layer": 6,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 31,
+      "layer": 7,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 32,
+      "layer": 8,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 33,
+      "layer": 9,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 34,
+      "layer": 10,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 35,
+      "layer": 11,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 36,
+      "layer": 12,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 37,
+      "layer": 13,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 38,
+      "layer": 14,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 39,
+      "layer": 15,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 40,
+      "layer": 16,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 41,
+      "layer": 17,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 42,
+      "layer": 18,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 43,
+      "layer": 19,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 44,
+      "layer": 20,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 45,
+      "layer": 21,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 46,
+      "layer": 22,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     },
+     {
+      "visit": 47,
+      "layer": 23,
+      "rel_l2": 0.0,
+      "expert_set_agreement": 1.0
+     }
+    ],
+    "zero_norm_visits": 0,
+    "max_rel_l2": 0.0,
+    "final_visit_rel_l2": 0.0,
+    "min_expert_set_agreement": 1.0,
+    "mean_expert_set_agreement": 1.0
+   }
+  }
+ ],
+ "summary": {
+  "prompts": 11,
+  "all_prompt_ids_equal": true,
+  "greedy_identical": 11,
+  "min_common_prefix": 1,
+  "top1_agreement_min": 1.0,
+  "max_abs_dlogprob_top1": 0.0,
+  "max_kl_top20_approx": 0.0
+ }
+}

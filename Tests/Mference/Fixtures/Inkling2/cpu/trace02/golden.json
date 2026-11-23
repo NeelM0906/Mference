@@ -1,0 +1,40 @@
+{
+ "id": "trace02",
+ "kind": "chat",
+ "prompt_text": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>What is the capital of France?<|end_message|>",
+ "prompt_ids": [
+  200002,
+  200004,
+  34182,
+  279,
+  154554,
+  150628,
+  25,
+  220,
+  15,
+  200010,
+  200000,
+  200004,
+  1775,
+  149884,
+  149876,
+  151451,
+  149879,
+  151194,
+  30,
+  200010
+ ],
+ "generated_ids": [
+  200001
+ ],
+ "generated_text": "<|message_model|>",
+ "generated_pieces": [
+  "<|message_model|>"
+ ],
+ "stop": "n_gen",
+ "prefill_s": 1.549721584,
+ "decode_s": 0.0189655,
+ "logprobs_file": "logprobs.json",
+ "logprobs_first_pos": 0,
+ "trace_file": "trace.json"
+}

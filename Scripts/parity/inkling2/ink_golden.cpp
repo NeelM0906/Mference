@@ -180,6 +180,25 @@ static njson pieces_json(const llama_vocab * vocab, const std::vector<llama_toke
     return a;
 }
 
+// a token's piece can be part of a multi-byte UTF-8 character: the readable
+// strings get U+FFFD for such bytes (see dump_out), so the exact bytes of every
+// piece are also recorded in hex
+static njson pieces_hex_json(const llama_vocab * vocab, const std::vector<llama_token> & ids) {
+    static const char * hx = "0123456789abcdef";
+    njson a = njson::array();
+    for (auto t : ids) {
+        const std::string p = piece(vocab, t);
+        std::string h;
+        for (unsigned char c : p) { h += hx[c >> 4]; h += hx[c & 15]; }
+        a.push_back(h);
+    }
+    return a;
+}
+
+static std::string dump_out(const njson & j, int indent = -1) {
+    return j.dump(indent, ' ', false, njson::error_handler_t::replace);
+}
+
 // ---------------------------------------------------------------- trace (eval callback)
 
 static const int N_EMBD = 2304;
@@ -329,6 +348,10 @@ static int cmd_generate(int argc, char ** argv) {
         const std::string kind = pr.value("kind", "raw");
         const int n_gen = pr.value("n_gen", 32);
         const bool want_lp = pr.value("logprobs", false);
+        // "logprobs_last": N records only the last N prompt positions (and every
+        // generated one), and requests logits only there: a 2,600-token prompt
+        // with logits everywhere would need a 2 GB output buffer
+        const int lp_last = pr.value("logprobs_last", 0);
         const bool want_trace = pr.value("trace", false);
         std::vector<llama_token> ids;
         std::string prompt_text;
@@ -375,14 +398,16 @@ static int cmd_generate(int argc, char ** argv) {
         batch.n_tokens = n_prompt;
         for (int i = 0; i < n_prompt; ++i) {
             batch.token[i] = ids[i]; batch.pos[i] = i; batch.n_seq_id[i] = 1; batch.seq_id[i][0] = 0;
-            batch.logits[i] = (want_lp || i == n_prompt - 1) ? 1 : 0;
+            const bool lp_here = want_lp && (lp_last <= 0 || i >= n_prompt - 1 - lp_last);
+            batch.logits[i] = (lp_here || i == n_prompt - 1) ? 1 : 0;
         }
         const auto t0 = std::chrono::steady_clock::now();
         if (llama_decode(ctx, batch) != 0) { fprintf(stderr, "ink-golden: prefill failed for %s\n", id.c_str()); return 1; }
         const auto t1 = std::chrono::steady_clock::now();
         g_trace.active = false;
         if (want_lp) {
-            for (int i = 0; i + 1 < n_prompt; ++i) record_lp(i, llama_get_logits_ith(ctx, i), ids[i + 1]);
+            const int first = lp_last > 0 ? std::max(0, n_prompt - 1 - lp_last) : 0;
+            for (int i = first; i + 1 < n_prompt; ++i) record_lp(i, llama_get_logits_ith(ctx, i), ids[i + 1]);
         }
         std::vector<llama_token> gen;
         std::vector<float> last_logits(llama_get_logits_ith(ctx, n_prompt - 1), llama_get_logits_ith(ctx, n_prompt - 1) + n_vocab);
@@ -418,7 +443,8 @@ static int cmd_generate(int argc, char ** argv) {
         rec["decode_s"] = std::chrono::duration<double>(t2 - t1).count();
         if (want_lp) {
             rec["logprobs_file"] = "logprobs.json";
-            write_file(pdir + "/logprobs.json", lp_rows.dump());
+            rec["logprobs_first_pos"] = lp_last > 0 ? std::max(0, n_prompt - 1 - lp_last) : 0;
+            write_file(pdir + "/logprobs.json", dump_out(lp_rows));
         }
         if (want_trace) {
             const njson & hp = pr.at("loop"); // {n_phys, start, end, passes}
@@ -461,17 +487,17 @@ static int cmd_generate(int argc, char ** argv) {
             // only the positions that produced logits (all with logprobs, else the last one)
             tr["result_norm_shape"] = njson::array({(int) (g_trace.result_norm.size() / N_EMBD), N_EMBD});
             tr["visits"] = tv;
-            write_file(pdir + "/trace.json", tr.dump());
+            write_file(pdir + "/trace.json", dump_out(tr));
             rec["trace_file"] = "trace.json";
         }
-        write_file(pdir + "/golden.json", rec.dump(1));
+        write_file(pdir + "/golden.json", dump_out(rec, 1));
         njson brief = njson::object();
         brief["id"] = id; brief["n_prompt"] = n_prompt; brief["n_generated"] = (int) gen.size(); brief["stop"] = rec["stop"];
         index["prompts"].push_back(brief);
         fprintf(stderr, "ink-golden: %s: %zu generated (%s) in %.2f s prefill, %.2f s decode\n", id.c_str(), gen.size(),
                 eog ? "eog" : "n_gen", (double) rec["prefill_s"], (double) rec["decode_s"]);
     }
-    write_file(out_dir + "/index.json", index.dump(1));
+    write_file(out_dir + "/index.json", dump_out(index, 1));
     llama_perf_context_print(ctx);
     llama_free(ctx);
     llama_model_free(model);
@@ -495,12 +521,13 @@ static int cmd_tokenize(int argc, char ** argv) {
             njson s = njson::object();
             s["ids"] = ids_json(ids);
             s["pieces"] = pieces_json(vocab, ids);
+            s["pieces_hex"] = pieces_hex_json(vocab, ids);
             s["roundtrip_equal"] = detok(vocab, ids) == text;
             r[special ? "parse_special" : "plain"] = s;
         }
         out.push_back(r);
     }
-    write_file(arg(argc, argv, "--out"), out.dump(1));
+    write_file(arg(argc, argv, "--out"), dump_out(out, 1));
     llama_model_free(model);
     return 0;
 }
@@ -524,7 +551,7 @@ static int cmd_chat(int argc, char ** argv) {
         }
         out.push_back(r);
     }
-    write_file(arg(argc, argv, "--out"), out.dump(1));
+    write_file(arg(argc, argv, "--out"), dump_out(out, 1));
     llama_model_free(model);
     return 0;
 }

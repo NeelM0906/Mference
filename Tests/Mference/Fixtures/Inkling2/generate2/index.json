@@ -1,0 +1,74 @@
+{
+ "format": "ink-golden-v1",
+ "model": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+ "model_desc": "inkling2_loop ?B Q8_0",
+ "llama_build": "MTL : EMBED_LIBRARY = 1 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | LLAMAFILE = 1 | ACCELERATE = 1 | REPACK = 1 | ",
+ "n_gpu_layers": 99,
+ "threads": 8,
+ "n_ctx": 4096,
+ "n_batch": 4096,
+ "n_ubatch": 512,
+ "n_vocab": 200058,
+ "cpu_only_devices": false,
+ "use_extra_bufts": true,
+ "op_offload": true,
+ "flash_attn_type": -1,
+ "type_k": "f16",
+ "type_v": "f16",
+ "prompts": [
+  {
+   "id": "lp04-chat-thinking",
+   "n_prompt": 52,
+   "n_generated": 39,
+   "stop": "eog"
+  },
+  {
+   "id": "lp05-tool-result",
+   "n_prompt": 300,
+   "n_generated": 48,
+   "stop": "n_gen"
+  },
+  {
+   "id": "lp06-raw-1300",
+   "n_prompt": 1300,
+   "n_generated": 16,
+   "stop": "n_gen"
+  },
+  {
+   "id": "lp07-raw-2600",
+   "n_prompt": 2600,
+   "n_generated": 16,
+   "stop": "n_gen"
+  },
+  {
+   "id": "lp08-code",
+   "n_prompt": 26,
+   "n_generated": 48,
+   "stop": "n_gen"
+  },
+  {
+   "id": "lp09-chat-default",
+   "n_prompt": 20,
+   "n_generated": 48,
+   "stop": "n_gen"
+  },
+  {
+   "id": "lp10-multilingual",
+   "n_prompt": 18,
+   "n_generated": 32,
+   "stop": "n_gen"
+  },
+  {
+   "id": "lp11-multi-turn",
+   "n_prompt": 43,
+   "n_generated": 41,
+   "stop": "eog"
+  },
+  {
+   "id": "trace02",
+   "n_prompt": 20,
+   "n_generated": 1,
+   "stop": "n_gen"
+  }
+ ]
+}
