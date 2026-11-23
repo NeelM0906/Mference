@@ -650,6 +650,7 @@ import MferenceValidationSupport
         let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
         let (store, layers, directory, _) = try Self.cacheStore(context, shape: shape)
         defer { try? FileManager.default.removeItem(at: directory) }
+        store.waitTimeoutMS = 10_000            // a regression fails instead of hanging
         let visits: [(layer: Int, ids: [UInt32])] = [
             (1, [0, 1, 2, 3]), (2, [4, 5, 6, 7]), (1, [8, 9, 10, 11]), (3, [1, 3, 5, 7]),
             (1, [12, 13, 0, 1]), (2, [4, 6, 15, 14]),

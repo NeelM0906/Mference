@@ -297,7 +297,7 @@ struct Inkling2ForwardRunnerToyTests {
         // tokens) against the whole-layer reads forced: the same bits.
         let swept = try await run(stored, shortPrefill: 0)
         #expect(swept.logits == fixed.logits && swept.outputs == fixed.outputs)
-        #expect(swept.short.visits == 0 && staged.short.visits > 0)
+        #expect(swept.short.visits == 0 && staged.short.visits > staged.short.fallbacks)
         // Decode visits deferred (the GPU waits on a CPU-signalled event; the
         // default) against split readbacks: the same bits, the same caching.
         let split = try await run(stored, splitReadbacks: true)
@@ -306,6 +306,7 @@ struct Inkling2ForwardRunnerToyTests {
         // buffer is current, the same bits on every path.
         #expect(split.routerLogits == fixed.routerLogits && swept.routerLogits == fixed.routerLogits)
         #expect(split.cache.visits == staged.cache.visits)
+        #expect(staged.cache.deferred == staged.cache.visits && staged.cache.deferred > 0 && split.cache.deferred == 0)
         #expect(staged.logits == fixed.logits)
         #expect(staged.outputs == fixed.outputs)
         #expect(staged.routes == fixed.routes)

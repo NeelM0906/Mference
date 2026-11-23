@@ -50,6 +50,8 @@ protocol Inkling2ExpertSource: AnyObject {
     func takeDeferredVisits() -> [Inkling2ExpertStore.DeferredVisit]
     /// Set when a deferred visit failed; the source is then unusable.
     var deferredDecodeFailure: String? { get }
+    /// Called from a failed command buffer's completion handler.
+    func commandBufferFailed()
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
@@ -66,6 +68,7 @@ extension Inkling2ExpertSource {
     }
     func takeDeferredVisits() -> [Inkling2ExpertStore.DeferredVisit] { [] }
     var deferredDecodeFailure: String? { nil }
+    func commandBufferFailed() {}
     func decodeNeedsRoutes(layer: Int) -> Bool { false }
     func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
@@ -287,6 +290,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// also printed to stderr.
     struct DecodeCacheStats: Equatable {
         var visits = 0
+        /// Of `visits`, those served deferred (no command-buffer split).
+        var deferred = 0
         var hits = 0
         var misses = 0
         var seconds: Double = 0
@@ -1347,6 +1352,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         let served = w.experts.takeDeferredVisits()
         for visit in served {
             decodeCacheStats.visits += 1
+            decodeCacheStats.deferred += 1
             decodeCacheStats.hits += visit.hits
             decodeCacheStats.misses += visit.misses
             decodeCacheStats.seconds += visit.seconds
@@ -1418,6 +1424,13 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private func commandBuffer() throws -> MTLCommandBuffer {
         guard let cb = ctx.queue.makeCommandBuffer() else {
             throw Inkling2ForwardRunnerError.commandFailed("unable to create an Inkling 2 command buffer")
+        }
+        // A failed buffer never runs its signals: release whatever waits on
+        // them (a deferred decode visit's worker, a slot refill) at once.
+        // The source is thread-safe for this call (it takes its own lock).
+        nonisolated(unsafe) let experts = w.experts
+        cb.addCompletedHandler { buffer in
+            if buffer.status == .error { experts.commandBufferFailed() }
         }
         return cb
     }

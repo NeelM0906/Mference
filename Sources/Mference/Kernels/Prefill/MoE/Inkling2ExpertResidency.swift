@@ -540,7 +540,10 @@ struct Inkling2DecodeBinding {
 ///   ids, `prepareDecodeVisit` makes sure those experts are in the layer's
 ///   cache slots (LRU, misses read from the layer file) and binds them.
 ///   The slots live in the staging slabs, which decode leaves idle; a
-///   prefill visit of a staged layer empties every cache.
+///   whole-layer prefill read empties the caches of the slab it writes.
+///   Short prefill chunks use the slots too (`beginShortPrefillVisit`), and
+///   decode visits can be deferred (`encodeDeferredDecodeVisit`: the GPU
+///   waits on an event while a worker fills the slots).
 ///
 /// Prefill slab fills read by `readMode`: uncached (`F_NOCACHE`) by default
 /// below 48 GB, so whole staged layers are not held a second time in the
@@ -553,7 +556,10 @@ struct Inkling2DecodeBinding {
 /// that signal before refilling a slot of the layer, and a prefill fill of
 /// the slabs waits for every decode visit ended so far. A decode visit waits
 /// for every prefill visit's GPU reads of the slabs before it refills them.
-/// Use the store from one thread (the runner's).
+/// Use the store from one thread (the runner's); the deferred-visit worker
+/// and `commandBufferFailed` (a Metal completion handler) are the only
+/// others, and take the store's lock. A deferred visit's command buffer must
+/// be committed (the runner commits all encoded work, even on a throw).
 ///
 /// Staged layer files are mapped read-only for CPU readers (references,
 /// checks) but never bound on the GPU: Metal makes a bound mapping resident
@@ -671,7 +677,6 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// (`prefetchFirstStagedVisit`); that chunk's `beginPrefillVisit` of the
     /// layer takes it over.
     private var prefetched: (layer: Int, ticket: Inkling2StagedExpertLayers.Ticket)?
-    /// Set by a staged prefill visit (it overwrites the slabs the caches use).
     /// Slabs a prefill read has written since their caches were last
     /// emptied: those caches are emptied before their next use. Caches in
     /// other slabs keep their experts (a short prefill chunk that falls back
@@ -988,6 +993,9 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                 recordDeferredFailure("deferred decode visit \(visit) of layer \(layer): the router never signalled")
                 return
             }
+            // After a failed command buffer the ids may never have been
+            // written: touch nothing.
+            if deferredDecodeFailure != nil { return }
             let p = (source.contents() + routerIDsOffset).bindMemory(to: UInt32.self, capacity: topK)
             let ids = (0..<topK).map { Int(p[$0]) }
             guard ids.allSatisfy({ $0 < experts }) else {
@@ -1010,6 +1018,21 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             }
         }
         return Inkling2DecodeBinding(layer: layer, pool: cache.pool, ids: cache.ids, hits: 0, misses: 0)
+    }
+
+    /// From a command buffer's completion handler when it failed: its
+    /// signals will never run, so the deferred worker and any refill waiting
+    /// on them are released now (the visits are marked failed; the runner
+    /// then recovers and refuses until the model reloads), instead of each
+    /// waiting out `waitTimeoutMS`.
+    func commandBufferFailed() {
+        lock.lock()
+        if deferredFailure == nil { deferredFailure = "a command buffer failed" }
+        let lastDeferred = deferredIssued, lastDecode = decodeIssued
+        lock.unlock()
+        if decodeDone.signaledValue < lastDecode { decodeDone.signaledValue = lastDecode }
+        if routed.signaledValue < lastDeferred { routed.signaledValue = lastDeferred }
+        if ready.signaledValue < lastDeferred { ready.signaledValue = lastDeferred }
     }
 
     /// The deferred visits served since the last call (waits for the worker).

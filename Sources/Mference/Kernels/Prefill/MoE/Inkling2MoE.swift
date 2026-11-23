@@ -717,6 +717,8 @@ final class Inkling2MoEKernels {
                        pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch, tokens: Int,
                        out: MTLBuffer, outOffset: Int = 0, outStride: Int,
                        inputQuantization: Inkling2MoEInputQuantization = .none, ids: MTLBuffer? = nil) {
+        // A slot pool's experts are slots: planning by expert id would read past them.
+        precondition(!pool.isSlotPool || ids != nil, "a slot pool needs the slot ids")
         encodeRoutePlan(encoder, scratch: scratch, tokens: tokens, ids: ids)
         encodeGroupedExperts(encoder, hidden: hidden, hiddenOffset: hiddenOffset, hiddenStride: hiddenStride,
                              pool: pool, scratch: scratch, tokens: tokens, inputQuantization: inputQuantization)
