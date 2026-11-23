@@ -56,7 +56,7 @@ import MferenceValidationSupport
         var worst: Float = 0
         for t in 0..<c.tokens {
             let row = Array(got[(t * outStride)..<(t * outStride + shape.d)])
-            worst = max(worst, RelError.compute(actual: row, reference: want[t]))
+            worst = max(worst, RelError.computeStrict(actual: row, reference: want[t]))
         }
         #expect(worst < Self.routedTolerance, "worst row rel err \(worst)")
     }
@@ -153,7 +153,7 @@ import MferenceValidationSupport
             let logits = Inkling2RouterRef.logits(weight: weight, experts: 128, x: row)
             let route = Inkling2RouterRef.route(logits: logits, selectionBias: bias)
             #expect(gotIds[(t * 8)..<(t * 8 + 8)].map(Int.init) == route.ids, "token \(t)")
-            let err = RelError.compute(actual: Array(gotWeights[(t * 8)..<(t * 8 + 8)]), reference: route.weights)
+            let err = RelError.computeStrict(actual: Array(gotWeights[(t * 8)..<(t * 8 + 8)]), reference: route.weights)
             #expect(err < Tolerance.identity, "token \(t) weights rel err \(err)")
         }
     }
@@ -180,7 +180,7 @@ import MferenceValidationSupport
         #expect(cb.status == .completed)
         let got = Inkling2MoETestSupport.read(out, as: Float.self, count: shape.d)
         let want = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)[0]
-        let err = RelError.compute(actual: got, reference: want)
+        let err = RelError.computeStrict(actual: got, reference: want)
         #expect(err < Self.routedTolerance, "rel err \(err)")
     }
 
@@ -217,7 +217,7 @@ import MferenceValidationSupport
         }
         let a = Inkling2MoETestSupport.read(prefillOut, as: Float.self, count: tokens * shape.d)
         let b = Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: tokens * shape.d)
-        let err = RelError.compute(actual: a, reference: b)
+        let err = RelError.computeStrict(actual: a, reference: b)
         #expect(err < (encoding == .nvfp4 ? 2e-3 : Self.routedTolerance), "rel err \(err)")
     }
 
@@ -252,9 +252,9 @@ import MferenceValidationSupport
         }
         let want = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
         let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
-        let err = RelError.compute(actual: got, reference: want.flatMap { $0 })
+        let err = RelError.computeStrict(actual: got, reference: want.flatMap { $0 })
         #expect(err < Self.routedTolerance, "prefill rel err \(err)")
-        let decodeErr = RelError.compute(actual: Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d),
+        let decodeErr = RelError.computeStrict(actual: Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d),
                                          reference: want[0])
         #expect(decodeErr < Self.routedTolerance, "decode rel err \(decodeErr)")
         #expect(!got.contains { !$0.isFinite })
@@ -284,7 +284,7 @@ import MferenceValidationSupport
         #expect(cb.status == .completed)
         let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
         let want = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
-        let err = RelError.compute(actual: got, reference: want.flatMap { $0 })
+        let err = RelError.computeStrict(actual: got, reference: want.flatMap { $0 })
         #expect(err < Self.routedTolerance, "rel err \(err)")
     }
 
@@ -349,18 +349,18 @@ import MferenceValidationSupport
         let bound = vendor ? 0.1 : Tolerance.fp16Reduction
         let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
         let flat = want.flatMap { $0 }
-        let err = RelError.compute(actual: got, reference: flat)
+        let err = RelError.computeStrict(actual: got, reference: flat)
         #expect(err < bound, "prefill rel err \(err)")
         let l1 = zip(got, flat).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / flat.reduce(Float(0)) { $0 + abs($1) }
         #expect(l1 < Tolerance.fp16Reduction, "prefill L1 rel err \(l1)")
         let decoded = Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d)
-        let decodeErr = RelError.compute(actual: decoded, reference: want[0])
+        let decodeErr = RelError.computeStrict(actual: decoded, reference: want[0])
         #expect(decodeErr < bound, "decode rel err \(decodeErr)")
         let decodeL1 = zip(decoded, want[0]).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / want[0].reduce(Float(0)) { $0 + abs($1) }
         #expect(decodeL1 < Tolerance.fp16Reduction, "decode L1 rel err \(decodeL1)")
         // The pass changes the result: the unquantized output differs.
         let plain = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
-        #expect(RelError.compute(actual: got, reference: plain.flatMap { $0 }) > 1e-4)
+        #expect(RelError.computeStrict(actual: got, reference: plain.flatMap { $0 }) > 1e-4)
     }
 
     /// The input-quantization kernel on its own, bit for bit against the
@@ -433,7 +433,7 @@ import MferenceValidationSupport
             let route = Inkling2RouterRef.route(logits: Inkling2RouterRef.logits(weight: weight, experts: 16, x: row),
                                                 selectionBias: bias, topK: 4)
             #expect(gotIds[(t * 4)..<(t * 4 + 4)].map(Int.init) == route.ids, "token \(t)")
-            #expect(RelError.compute(actual: Array(gotWeights[(t * 4)..<(t * 4 + 4)]), reference: route.weights)
+            #expect(RelError.computeStrict(actual: Array(gotWeights[(t * 4)..<(t * 4 + 4)]), reference: route.weights)
                     < Tolerance.identity)
         }
     }
@@ -466,7 +466,7 @@ import MferenceValidationSupport
         #expect(cb.status == .completed, "\(String(describing: cb.error))")
         let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
         let want = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
-        let err = RelError.compute(actual: got, reference: want.flatMap { $0 })
+        let err = RelError.computeStrict(actual: got, reference: want.flatMap { $0 })
         #expect(err < Self.routedTolerance, "rel err \(err)")
     }
 
@@ -489,5 +489,34 @@ import MferenceValidationSupport
         let second = try Inkling2MoECalibration.calibrate(context: context, kernels: other, pool: synthetic.pool,
                                                           scratch: scratch)
         #expect(second.variant == first.variant && other.variant == first.variant)
+    }
+
+    /// The pipelined loop (default) and the plain loop compute the same
+    /// thing in the same order: bit-identical outputs, both encodings, with
+    /// full and tail blocks.
+    @Test(arguments: [Inkling2MoEEncoding.nvfp4, .q8_0])
+    func pipelinedLoopMatchesPlainLoop(encoding: Inkling2MoEEncoding) throws {
+        let context = try MetalContext()
+        let pipelined = try Inkling2MoEKernels(context: context, pipelined: true)
+        let plain = try Inkling2MoEKernels(context: context, pipelined: false)
+        let shape = Self.small
+        let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: encoding, shape: shape,
+                                                       seed: 0x2A50, quantized: true)
+        let tokens = 200
+        let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2A51)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2A52)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+        Inkling2MoETestSupport.write(routes.ids, to: scratch.ids)
+        Inkling2MoETestSupport.write(routes.weights, to: scratch.routeWeights)
+        var outputs: [[Float]] = []
+        for kernels in [pipelined, plain] {
+            let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared)!
+            _ = Inkling2MoETestSupport.run(context) { encoder in
+                kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: synthetic.pool,
+                                      scratch: scratch, tokens: tokens, out: out, outStride: shape.d)
+            }
+            outputs.append(Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d))
+        }
+        #expect(outputs[0] == outputs[1])
     }
 }

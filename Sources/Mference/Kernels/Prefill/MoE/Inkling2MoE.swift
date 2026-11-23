@@ -89,6 +89,9 @@ struct Inkling2ExpertPool {
     let gateUpScalesOffset: Int
     let downScales: MTLBuffer
     let downScalesOffset: Int
+    /// A decode cache's slots (`Inkling2ExpertStore`): `shape.experts` is the
+    /// slot count and ids name slots, so it may be smaller than the model's.
+    let isSlotPool: Bool
 
     enum LayoutError: Error, Equatable {
         case misaligned(String)
@@ -99,7 +102,7 @@ struct Inkling2ExpertPool {
     init(buffer: MTLBuffer, offset: Int = 0, encoding: Inkling2MoEEncoding, shape: Inkling2MoEShape,
          expertStride: Int, gateUpOffset: Int = 0, downOffset: Int? = nil,
          gateUpScales: MTLBuffer, gateUpScalesOffset: Int = 0,
-         downScales: MTLBuffer, downScalesOffset: Int = 0) throws {
+         downScales: MTLBuffer, downScalesOffset: Int = 0, isSlotPool: Bool = false) throws {
         precondition(shape.isSupported, "unsupported Inkling 2 expert shape \(shape)")
         let down = downOffset ?? gateUpOffset + shape.gateUpBytes(encoding)
         for (name, value) in [("offset", offset), ("expert stride", expertStride),
@@ -135,6 +138,7 @@ struct Inkling2ExpertPool {
         self.gateUpScalesOffset = gateUpScalesOffset
         self.downScales = downScales
         self.downScalesOffset = downScalesOffset
+        self.isSlotPool = isSlotPool
     }
 }
 
@@ -145,7 +149,15 @@ extension Inkling2ExpertPool {
         try Inkling2ExpertPool(buffer: other, offset: newOffset, encoding: encoding, shape: shape,
                                expertStride: expertStride, gateUpOffset: gateUpOffset, downOffset: downOffset,
                                gateUpScales: gateUpScales, gateUpScalesOffset: gateUpScalesOffset,
-                               downScales: downScales, downScalesOffset: downScalesOffset)
+                               downScales: downScales, downScalesOffset: downScalesOffset,
+                               isSlotPool: isSlotPool)
+    }
+
+    /// Whether a decode step with the model's `shape` may bind this pool:
+    /// the same shape, or a decode cache's slots of the same D, F and top-k.
+    func servesDecode(of shape: Inkling2MoEShape) -> Bool {
+        self.shape == shape
+            || (isSlotPool && self.shape.d == shape.d && self.shape.f == shape.f && self.shape.topK == shape.topK)
     }
 }
 
@@ -303,13 +315,18 @@ final class Inkling2MoEKernels {
     private let reduce: MTLComputePipelineState
     private let encoded: [Inkling2MoEEncoding: Encoded]
 
-    init(context: MetalContext) throws {
+    /// `pipelined`: the simdgroup kernels load the next K step before the
+    /// current multiply (the default; false keeps the plain loop, for A/B
+    /// measurements).
+    init(context: MetalContext, pipelined: Bool = true) throws {
         let device = context.device
         let library = try Inkling2ShaderLibrary.compile(device: device, module: Self.module)
         func make(_ name: String, encoding: Inkling2MoEEncoding? = nil) throws -> MTLComputePipelineState {
             let values = MTLFunctionConstantValues()
             var raw = encoding?.rawValue ?? 0
+            var prefetch = pipelined
             values.setConstantValue(&raw, type: .uint, index: 200)
+            values.setConstantValue(&prefetch, type: .bool, index: 201)
             let function = try library.makeFunction(name: name, constantValues: values)
             let pipeline = try device.makeComputePipelineState(function: function)
             guard pipeline.maxTotalThreadsPerThreadgroup >= Self.threads else {
@@ -589,11 +606,24 @@ final class Inkling2MoEKernels {
         encodeReduce(encoder, scratch: scratch, tokens: tokens, out: out, outOffset: outOffset, outStride: outStride)
     }
 
+    /// A staged layer's decode visit through its cache binding: the binding's
+    /// slot ids and slot pool, everything else as `encodeDecode`.
+    func encodeDecode(_ encoder: MTLComputeCommandEncoder, shape: Inkling2MoEShape, x: MTLBuffer, xOffset: Int = 0,
+                      binding: Inkling2DecodeBinding, routeWeights: MTLBuffer, routeWeightsOffset: Int = 0,
+                      activation: MTLBuffer, activationOffset: Int = 0, out: MTLBuffer, outOffset: Int = 0,
+                      inputQuantization: Inkling2MoEInputQuantization = .none,
+                      inputScratch: (buffer: MTLBuffer, offset: Int)? = nil) {
+        encodeDecode(encoder, shape: shape, x: x, xOffset: xOffset, ids: binding.ids, routeWeights: routeWeights,
+                     routeWeightsOffset: routeWeightsOffset, pool: binding.pool, activation: activation,
+                     activationOffset: activationOffset, out: out, outOffset: outOffset,
+                     inputQuantization: inputQuantization, inputScratch: inputScratch)
+    }
+
     /// The first half of `encodeDecode`: gate-up and SITU into `activation`.
     func encodeDecodeGateUp(_ encoder: MTLComputeCommandEncoder, shape: Inkling2MoEShape,
                             x: MTLBuffer, xOffset: Int = 0, ids: MTLBuffer, idsOffset: Int = 0,
                             pool: Inkling2ExpertPool, activation: MTLBuffer, activationOffset: Int = 0) {
-        precondition(pool.shape == shape, "pool and decode shapes differ")
+        precondition(pool.servesDecode(of: shape), "pool and decode shapes differ")
         precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0)
         precondition(xOffset % 8 == 0 && activationOffset % 8 == 0 && idsOffset % 4 == 0,
                      "the decode kernels read half4 and uint")
@@ -623,7 +653,7 @@ final class Inkling2MoEKernels {
                       activation: MTLBuffer, activationOffset: Int = 0, out: MTLBuffer, outOffset: Int = 0,
                       inputQuantization: Inkling2MoEInputQuantization = .none,
                       inputScratch: (buffer: MTLBuffer, offset: Int)? = nil) {
-        precondition(pool.shape == shape, "pool and decode shapes differ")
+        precondition(pool.servesDecode(of: shape), "pool and decode shapes differ")
         precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0
                      && shape.d % Self.decodeRowsPerThreadgroup == 0)
         precondition(xOffset % 8 == 0 && activationOffset % 8 == 0, "the decode kernels read half4")
