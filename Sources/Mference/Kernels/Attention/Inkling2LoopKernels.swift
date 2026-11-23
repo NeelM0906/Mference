@@ -77,6 +77,96 @@ public final class Inkling2DepthMix {
         encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
+
+    /// One query's norm in `encodeNormed`: its norm weight (F32 `[width]`), its FP16 output and,
+    /// optionally, the same normed rows in FP32 (the MoE router's input).
+    public struct Norm {
+        public var weight: Inkling2BufferRef
+        public var output: Inkling2BufferRef
+        public var output32: Inkling2BufferRef?
+
+        public init(weight: Inkling2BufferRef, output: Inkling2BufferRef, output32: Inkling2BufferRef? = nil) {
+            self.weight = weight
+            self.output = output
+            self.output32 = output32
+        }
+    }
+
+    /// The mix, then each query's output normed with its own weight (`Inkling2InputNorm`'s
+    /// weighted RMS norm), in one dispatch: for the visits where nothing sits between the two
+    /// (first-pass attention inputs; the MoE input outside the loop passes). `output` takes the
+    /// mix as in `encode` (scratch); each `norms[j].output` gets the same bytes as `encode`
+    /// followed by `Inkling2InputNorm.encode` on query `j`. One to three queries; every norm
+    /// either has `output32` or none does.
+    public func encodeNormed(commandBuffer: MTLCommandBuffer,
+                             states: [(ref: Inkling2BufferRef, stride: Int)],
+                             queries: Inkling2BufferRef, queryCount: Int,
+                             output: Inkling2BufferRef, outputStride: Int,
+                             norms: [Norm], normedStride: Int, normed32Stride: Int = 0,
+                             rows: Int, width: Int = Inkling2AttentionShape.hidden,
+                             eps: Float = Inkling2AttentionShape.rmsEps,
+                             normEps: Float = Inkling2AttentionShape.rmsEps) throws {
+        try commandBuffer.inkling2Compute {
+            try encodeNormed(encoder: $0, states: states, queries: queries, queryCount: queryCount, output: output,
+                             outputStride: outputStride, norms: norms, normedStride: normedStride,
+                             normed32Stride: normed32Stride, rows: rows, width: width, eps: eps, normEps: normEps)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encodeNormed(encoder: MTLComputeCommandEncoder,
+                             states: [(ref: Inkling2BufferRef, stride: Int)],
+                             queries: Inkling2BufferRef, queryCount: Int,
+                             output: Inkling2BufferRef, outputStride: Int,
+                             norms: [Norm], normedStride: Int, normed32Stride: Int = 0,
+                             rows: Int, width: Int = Inkling2AttentionShape.hidden,
+                             eps: Float = Inkling2AttentionShape.rmsEps,
+                             normEps: Float = Inkling2AttentionShape.rmsEps) throws {
+        precondition(rows > 0 && (1...Self.maxStates).contains(states.count))
+        precondition((1...3).contains(queryCount) && norms.count == queryCount && outputStride >= queryCount * width)
+        let dual = norms[0].output32 != nil
+        precondition(norms.allSatisfy { ($0.output32 != nil) == dual } && (dual == (normed32Stride > 0)))
+        var strides = [UInt32](repeating: 0, count: 6)
+        for (i, state) in states.enumerated() { strides[i] = UInt32(state.stride) }
+        var params = Inkling2MixParams(rows: UInt32(rows), width: UInt32(width),
+                                       stateCount: UInt32(states.count), queryCount: UInt32(queryCount),
+                                       stateStride: (strides[0], strides[1], strides[2], strides[3], strides[4], strides[5]),
+                                       outStride: UInt32(outputStride), eps: eps)
+        var normParams = Inkling2MixNormParams(normedStride: UInt32(normedStride),
+                                               normed32Stride: UInt32(dual ? normed32Stride : 0),
+                                               normEps: normEps, reserved: 0)
+        let pipeline = try library.pipeline("inkling2_depth_mix_norm", constants: [
+            .init(index: 200, value: .uint32(UInt32(states.count))),
+            .init(index: 201, value: .uint32(UInt32(queryCount))),
+        ])
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBytes(&params, length: MemoryLayout<Inkling2MixParams>.stride, index: 0)
+        for slot in 0..<Self.maxStates {
+            let ref = states[min(slot, states.count - 1)].ref
+            encoder.setBuffer(ref.buffer, offset: ref.offset, index: 1 + slot)
+        }
+        encoder.setBuffer(queries.buffer, offset: queries.offset, index: 7)
+        encoder.setBuffer(output.buffer, offset: output.offset, index: 8)
+        encoder.setBytes(&normParams, length: MemoryLayout<Inkling2MixNormParams>.stride, index: 9)
+        for j in 0..<3 {
+            let norm = norms[min(j, norms.count - 1)]          // unused slots repeat the last query's
+            encoder.setBuffer(norm.weight.buffer, offset: norm.weight.offset, index: 10 + j)
+            encoder.setBuffer(norm.output.buffer, offset: norm.output.offset, index: 13 + j)
+            let wide = norm.output32 ?? output                  // bound but unread without FP32 outputs
+            encoder.setBuffer(wide.buffer, offset: wide.offset, index: 16 + j)
+        }
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    }
+}
+
+/// Mirrors `Inkling2MixNormParams` in `inkling2_attention.metal`.
+struct Inkling2MixNormParams {
+    var normedStride: UInt32
+    var normed32Stride: UInt32
+    var normEps: Float
+    var reserved: UInt32
 }
 
 /// The loop's message gate, `(1 - tanh(F z)) x + tanh(G z) m` with
@@ -156,6 +246,7 @@ public final class Inkling2MessageGateKernels {
             precondition([c.down, c.forget, c.gain].allSatisfy { $0 % 16 == 0 })
             precondition([c.x, c.message, c.output].allSatisfy { $0 % 4 == 0 })
             precondition(!overlaps(c.output, c.message), "controller \(i) output overwrites its message")
+            precondition(c.output == c.x || !overlaps(c.output, c.x), "controller \(i) output partly overlaps its x")
             for (j, other) in controllers.enumerated() where j != i {
                 precondition(!overlaps(c.output, other.x) && !overlaps(c.output, other.message)
                              && !overlaps(c.output, other.output),
@@ -183,14 +274,14 @@ public final class Inkling2MessageGateKernels {
         encoder.setBuffer(weights, offset: 0, index: 1)
         encoder.setBuffer(activations, offset: 0, index: 2)
         encoder.setBuffer(z.buffer, offset: z.offset, index: 3)
-        encoder.dispatchThreadgroups(MTLSize(width: controllers.count, height: rank / 8, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: controllers.count, height: rank / 2, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.setComputePipelineState(combineDecode)
         bytes.withUnsafeBytes { encoder.setBytes($0.baseAddress!, length: $0.count, index: 0) }
         encoder.setBuffer(weights, offset: 0, index: 1)
         encoder.setBuffer(activations, offset: 0, index: 2)
         encoder.setBuffer(z.buffer, offset: z.offset, index: 3)
-        encoder.dispatchThreadgroups(MTLSize(width: (width + 255) / 256, height: controllers.count, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: width / 16, height: controllers.count, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
 

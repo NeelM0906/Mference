@@ -328,7 +328,7 @@ public final class Inkling2InputNorm {
 /// as `Inkling2PrefillAttention` with one row; `partials` is scratch of at
 /// least `partialsLength(keys:)` bytes.
 public final class Inkling2DecodeAttention {
-    public static let blockKeys = 64
+    public static let blockKeys = 128
 
     public struct Arguments {
         public var queries: Inkling2BufferRef
@@ -419,7 +419,7 @@ public final class Inkling2DecodeAttention {
             encoder.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
         }
         encoder.dispatchThreadgroups(MTLSize(width: blocks, height: Inkling2AttentionShape.numKVHeads, depth: 1),
-                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.setComputePipelineState(merge)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2DecodeParams>.stride, index: 0)
         let gate = a.gate ?? a.sink

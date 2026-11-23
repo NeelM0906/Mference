@@ -1107,6 +1107,25 @@ static inline void ink2_rms_row(uint width, float eps, device const float* xr, d
     for (uint i = tid; i < width; i += 256u) { orow[i] = half(xr[i] * inv * weight[i]); }
 }
 
+// `ink2_rms_row` that also writes the normed row in FP32; its FP16 output is the same bytes.
+static inline void ink2_rms_row_dual(uint width, float eps, device const float* xr, device const float* weight,
+                                     device half* orow, device float* frow, ushort tid, ushort lane, ushort sgitg,
+                                     threadgroup float* partial) {
+    float acc = 0.0f;
+    for (uint i = tid; i < width; i += 256u) { acc = fma(xr[i], xr[i], acc); }
+    acc = simd_sum(acc);
+    if (lane == 0) { partial[sgitg] = acc; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (short s = 0; s < 8; ++s) { total += partial[s]; }
+    const float inv = rsqrt(total / float(width) + eps);
+    for (uint i = tid; i < width; i += 256u) {
+        const float y = xr[i] * inv * weight[i];
+        frow[i] = y;
+        orow[i] = half(y);
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_rms_f32_to_f16(
     constant Inkling2NormParams& p [[buffer(0)]],
@@ -1156,12 +1175,14 @@ void inkling2_rms_f32_to_f16_set(
 // ----------------------------------------------------------------------------
 // Decode attention (one query row), split over key blocks.
 //
-// Pass 1, grid (blocks, KV heads): a threadgroup takes the three query heads
-// of one KV head over one block of keys; each simdgroup walks every fourth
-// key with the lanes on head dims (4 each) and folds the 16-wide bias into the
-// same simd_sum as q.k. Partial (max, sum, out[128]) per (query head, block).
-// Pass 2, grid (query heads): merges the blocks with the sink as the starting
-// state and applies the sigmoid gate.
+// Pass 1, grid (blocks, KV heads): a threadgroup of 8 simdgroups takes the
+// three query heads of one KV head over one block of keys; each simdgroup walks
+// every eighth key with the lanes on head dims (4 each) and folds the 16-wide
+// bias into the same simd_sum as q.k. Partial (max, sum, out[128]) per (query
+// head, block). Pass 2, grid (query heads): merges the blocks with the sink as
+// the starting state (block maxima and sums by simd reductions) and applies the
+// sigmoid gate. 8 simdgroups and 128-key blocks, with that merge, measured 16%
+// (window, 1,024 keys) and 20% (global, 4,096 keys) faster than 4 and 64.
 // ----------------------------------------------------------------------------
 
 struct Inkling2DecodeParams {
@@ -1185,7 +1206,7 @@ struct Inkling2DecodeParams {
 
 constant constexpr uint INK2_PARTIAL = 2u + 128u;   // max, sum, 128 outputs
 
-[[kernel, max_total_threads_per_threadgroup(128)]]
+[[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_attention_decode_partial(
     constant Inkling2DecodeParams& p [[buffer(0)]],
     device const half*  Q        [[buffer(1)]],
@@ -1199,7 +1220,7 @@ void inkling2_attention_decode_partial(
     ushort sgitg [[simdgroup_index_in_threadgroup]],
     ushort lane  [[thread_index_in_simdgroup]])
 {
-    threadgroup float stage[4][3][INK2_PARTIAL];
+    threadgroup float stage[8][3][INK2_PARTIAL];
     const uint block = tgpig.x, g = tgpig.y;
     const uint group = p.numQHeads / p.numKVHeads;     // 3
     const float qs = p.scale * p.tau;
@@ -1216,7 +1237,7 @@ void inkling2_attention_decode_partial(
 
     const uint first = block * p.blockKeys;
     const uint last = min(first + p.blockKeys, p.keyCount);
-    for (uint n = first + sgitg; n < last; n += 4u) {
+    for (uint n = first + sgitg; n < last; n += 8u) {
         const uint key = p.keyBegin + n;
         const uint slot = p.ringCapacity != 0u ? key % p.ringCapacity : key;
         const ulong base = ulong(slot) * p.kvStride + g * 128u;
@@ -1242,13 +1263,14 @@ void inkling2_attention_decode_partial(
         for (short i = 0; i < 4; ++i) { stage[sgitg][j][2u + 4u * lane + uint(i)] = o[j][i]; }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    // 128 threads: thread = output dim; loop the three heads.
+    // The first 128 threads: thread = output dim; loop the three heads.
+    if (tiitg >= 128u) { return; }
     const uint d = tiitg;
     for (uint j = 0; j < 3u; ++j) {
         float M = -INFINITY;
-        for (short s = 0; s < 4; ++s) { M = max(M, stage[s][j][0]); }
+        for (short s = 0; s < 8; ++s) { M = max(M, stage[s][j][0]); }
         float L = 0.0f, O = 0.0f;
-        for (short s = 0; s < 4; ++s) {
+        for (short s = 0; s < 8; ++s) {
             const float ms = stage[s][j][0];
             const float w = ms == -INFINITY ? 0.0f : exp(ms - M);
             L += stage[s][j][1] * w;
@@ -1267,19 +1289,33 @@ void inkling2_attention_decode_merge(
     device const float* sink     [[buffer(2)]],
     device const float* gate     [[buffer(3)]],
     device half*        out      [[buffer(4)]],
-    uint   h   [[threadgroup_position_in_grid]],
-    ushort tid [[thread_index_in_threadgroup]])
+    uint   h     [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
+    threadgroup float shared[2];
     device const float* base = partials + ulong(h) * p.blocks * INK2_PARTIAL;
     const float s = sink[h];
-    float M = s;
-    for (uint b = 0; b < p.blocks; ++b) { M = max(M, base[b * INK2_PARTIAL]); }
-    float L = exp(s - M), O = 0.0f;
+    // The block maxima and sums: one simdgroup, a lane per block, simd reductions.
+    if (sgitg == 0) {
+        float M = s;
+        for (uint b = lane; b < p.blocks; b += 32u) { M = max(M, base[b * INK2_PARTIAL]); }
+        M = simd_max(M);
+        float L = 0.0f;
+        for (uint b = lane; b < p.blocks; b += 32u) {
+            const float mb = base[b * INK2_PARTIAL];
+            L += mb == -INFINITY ? 0.0f : base[b * INK2_PARTIAL + 1u] * exp(mb - M);
+        }
+        L = simd_sum(L) + exp(s - M);
+        if (lane == 0) { shared[0] = M; shared[1] = L; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float M = shared[0], L = shared[1];
+    float O = 0.0f;
     for (uint b = 0; b < p.blocks; ++b) {
         const float mb = base[b * INK2_PARTIAL];
-        const float w = mb == -INFINITY ? 0.0f : exp(mb - M);
-        L += base[b * INK2_PARTIAL + 1u] * w;
-        O += base[b * INK2_PARTIAL + 2u + tid] * w;
+        O += mb == -INFINITY ? 0.0f : base[b * INK2_PARTIAL + 2u + tid] * exp(mb - M);
     }
     float result = O / L;
     if (p.hasGate != 0u) { result *= ink2_sigmoid(gate[h * 128u + tid]); }
@@ -1317,26 +1353,16 @@ constant uint FC_MIX_QUERIES [[function_constant(201)]];
 constant uint kMixStates  = is_function_constant_defined(FC_MIX_STATES) ? FC_MIX_STATES : 1u;
 constant uint kMixQueries = is_function_constant_defined(FC_MIX_QUERIES) ? FC_MIX_QUERIES : 1u;
 
-[[kernel, max_total_threads_per_threadgroup(256)]]
-void inkling2_depth_mix(
-    constant Inkling2MixParams& p [[buffer(0)]],
-    device const float* s0 [[buffer(1)]],
-    device const float* s1 [[buffer(2)]],
-    device const float* s2 [[buffer(3)]],
-    device const float* s3 [[buffer(4)]],
-    device const float* s4 [[buffer(5)]],
-    device const float* s5 [[buffer(6)]],
-    device const float* queries [[buffer(7)]],
-    device float*       out     [[buffer(8)]],
-    uint   row   [[threadgroup_position_in_grid]],
-    ushort tid   [[thread_index_in_threadgroup]],
-    ushort lane  [[thread_index_in_simdgroup]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]])
+// The depth mix of one token row, shared by the mix kernel and the mix + norm kernel.
+static inline void ink2_depth_mix_row(constant Inkling2MixParams& p,
+                                      device const float* s0, device const float* s1, device const float* s2,
+                                      device const float* s3, device const float* s4, device const float* s5,
+                                      device const float* queries, device float* out, uint row,
+                                      ushort tid, ushort lane, ushort sgitg,
+                                      threadgroup float (*partial)[30], threadgroup float (*weights)[6],
+                                      threadgroup float* inv)
 {
-    constexpr uint NS = 6, NQ = 4, NA = NS + NQ * NS;
-    threadgroup float partial[8][NA];
-    threadgroup float weights[NQ][NS];
-    threadgroup float inv[NS];
+    constexpr uint NS = 6, NQ = 4, NA = NS + NQ * NS;   // NA = 30: the threadgroup arrays' widths
     device const float* rowp[NS] = {
         s0 + ulong(row) * p.stateStride[0], s1 + ulong(row) * p.stateStride[1], s2 + ulong(row) * p.stateStride[2],
         s3 + ulong(row) * p.stateStride[3], s4 + ulong(row) * p.stateStride[4], s5 + ulong(row) * p.stateStride[5]};
@@ -1420,6 +1446,91 @@ void inkling2_depth_mix(
                 orow[j * p.width + i] = o;
             }
         }
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_depth_mix(
+    constant Inkling2MixParams& p [[buffer(0)]],
+    device const float* s0 [[buffer(1)]],
+    device const float* s1 [[buffer(2)]],
+    device const float* s2 [[buffer(3)]],
+    device const float* s3 [[buffer(4)]],
+    device const float* s4 [[buffer(5)]],
+    device const float* s5 [[buffer(6)]],
+    device const float* queries [[buffer(7)]],
+    device float*       out     [[buffer(8)]],
+    uint   row   [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float mixPartial[8][30];
+    threadgroup float mixWeights[4][6];
+    threadgroup float mixInv[6];
+    ink2_depth_mix_row(p, s0, s1, s2, s3, s4, s5, queries, out, row, tid, lane, sgitg, mixPartial, mixWeights, mixInv);
+}
+
+// ----------------------------------------------------------------------------
+// The depth mix fused with the weighted RMS norm of each of its outputs, for
+// the visits where nothing sits between them (first-pass attention inputs, and
+// the MoE input outside the loop passes): the mix as `inkling2_depth_mix` into
+// `out` (FP32 scratch), then each query's row normed as `inkling2_rms_f32_to_f16`
+// does (each thread reads back the elements it wrote, in that kernel's order),
+// so `normed` is byte-identical to the two kernels. Up to three queries, each
+// with its own norm weight and FP16 output; `normed32` (optional) also takes
+// the normed rows in FP32 (the MoE router's input). One threadgroup per token.
+// ----------------------------------------------------------------------------
+
+struct Inkling2MixNormParams {
+    uint  normedStride;   // halves between token rows of each FP16 output
+    uint  normed32Stride; // floats between token rows of each FP32 output (0 = none)
+    float normEps;
+    uint  reserved;
+};
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_depth_mix_norm(
+    constant Inkling2MixParams& p        [[buffer(0)]],
+    device const float* s0               [[buffer(1)]],
+    device const float* s1               [[buffer(2)]],
+    device const float* s2               [[buffer(3)]],
+    device const float* s3               [[buffer(4)]],
+    device const float* s4               [[buffer(5)]],
+    device const float* s5               [[buffer(6)]],
+    device const float* queries          [[buffer(7)]],
+    device float*       out              [[buffer(8)]],
+    constant Inkling2MixNormParams& n    [[buffer(9)]],
+    device const float* w0               [[buffer(10)]],
+    device const float* w1               [[buffer(11)]],
+    device const float* w2               [[buffer(12)]],
+    device half*        h0               [[buffer(13)]],
+    device half*        h1               [[buffer(14)]],
+    device half*        h2               [[buffer(15)]],
+    device float*       f0               [[buffer(16)]],
+    device float*       f1               [[buffer(17)]],
+    device float*       f2               [[buffer(18)]],
+    uint   row   [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float mixPartial[8][30];
+    threadgroup float mixWeights[4][6];
+    threadgroup float mixInv[6];
+    ink2_depth_mix_row(p, s0, s1, s2, s3, s4, s5, queries, out, row, tid, lane, sgitg, mixPartial, mixWeights, mixInv);
+    threadgroup float partial[8];
+    for (uint j = 0; j < kMixQueries && j < 3u; ++j) {
+        device const float* xr = out + ulong(row) * p.outStride + j * p.width;
+        device const float* w = j == 0u ? w0 : (j == 1u ? w1 : w2);
+        device half* hrow = (j == 0u ? h0 : (j == 1u ? h1 : h2)) + ulong(row) * n.normedStride;
+        if (n.normed32Stride == 0u) {
+            ink2_rms_row(p.width, n.normEps, xr, w, hrow, tid, lane, sgitg, partial);
+        } else {
+            device float* frow = (j == 0u ? f0 : (j == 1u ? f1 : f2)) + ulong(row) * n.normed32Stride;
+            ink2_rms_row_dual(p.width, n.normEps, xr, w, hrow, frow, tid, lane, sgitg, partial);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);   // `partial` is reused by the next query
     }
 }
 
@@ -1529,6 +1640,11 @@ struct Inkling2GateDecodeParams {
     Inkling2GateController c[4];
 };
 
+// Down product: each z row's dot product is split over 4 simdgroups (x first
+// half, x second half, m first half, m second half), two rows per threadgroup of
+// 8; every threadgroup also reduces the RMS of x and m. Grid: (controllers,
+// rank / 2), 256 threads. (One simdgroup per row measured 46 us per three
+// controllers with the old combine; this form and the combine below, 28 us.)
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_gate_down_decode(
     constant Inkling2GateDecodeParams& p [[buffer(0)]],
@@ -1541,53 +1657,70 @@ void inkling2_gate_down_decode(
     ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
     threadgroup float partial[8][2];
+    threadgroup float dots[8];
     const Inkling2GateController c = p.c[tg.x];
     device const float* x = acts + c.x;
     device const float* m = acts + c.m;
+    const uint row = tg.y * 2u + sgitg / 4u, quarter = sgitg % 4u;
+    const uint halfWidth = p.width / 2u;
+    float d = 0.0f;
+    if (row < p.rank) {
+        device const float* w = (device const float*)(weights + c.down) + ulong(row) * 2u * p.width
+                                + (quarter / 2u) * p.width + (quarter % 2u) * halfWidth;
+        device const float* v = (quarter < 2u ? x : m) + (quarter % 2u) * halfWidth;
+        for (uint i = lane * 4u; i < halfWidth; i += 128u) {
+            d += dot(*((device const float4*)(w + i)), *((device const float4*)(v + i)));
+        }
+    }
+    d = simd_sum(d);
     float ax = 0.0f, am = 0.0f;
     for (uint i = tid; i < p.width; i += 256u) { ax = fma(x[i], x[i], ax); am = fma(m[i], m[i], am); }
     ax = simd_sum(ax);
     am = simd_sum(am);
-    if (lane == 0) { partial[sgitg][0] = ax; partial[sgitg][1] = am; }
+    if (lane == 0) { partial[sgitg][0] = ax; partial[sgitg][1] = am; dots[sgitg] = d; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid >= 2u) { return; }
     float tx = 0.0f, tm = 0.0f;
     for (short s = 0; s < 8; ++s) { tx += partial[s][0]; tm += partial[s][1]; }
     const float ix = rsqrt(tx / float(p.width) + p.eps), im = rsqrt(tm / float(p.width) + p.eps);
-    const uint row = tg.y * 8u + sgitg;
-    if (row >= p.rank) { return; }
-    device const float* w = (device const float*)(weights + c.down) + ulong(row) * 2u * p.width;
-    float dx = 0.0f, dm = 0.0f;
-    for (uint i = lane * 4u; i < p.width; i += 128u) {
-        dx += dot(*((device const float4*)(w + i)), *((device const float4*)(x + i)));
-        dm += dot(*((device const float4*)(w + p.width + i)), *((device const float4*)(m + i)));
+    const uint r = tg.y * 2u + tid;
+    if (r < p.rank) {
+        const uint s0 = tid * 4u;
+        z[tg.x * p.rank + r] = ix * (dots[s0] + dots[s0 + 1u]) + im * (dots[s0 + 2u] + dots[s0 + 3u]);
     }
-    dx = simd_sum(dx);
-    dm = simd_sum(dm);
-    if (lane == 0) { z[tg.x * p.rank + row] = ix * dx + im * dm; }
 }
 
+// Forget, gain and the mix: 16 lanes per channel read its forget and gain rows
+// as float4 (rank / 4 of them), two channels per simdgroup, 16 per threadgroup.
+// Grid: (width / 16, controllers), 256 threads.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_gate_combine_decode(
     constant Inkling2GateDecodeParams& p [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],
     device float*       acts    [[buffer(2)]],
     device const float* z       [[buffer(3)]],
-    uint2  tg  [[threadgroup_position_in_grid]],
-    ushort tid [[thread_index_in_threadgroup]])
+    uint2  tg    [[threadgroup_position_in_grid]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
-    threadgroup float4 zs[32];
     const Inkling2GateController c = p.c[tg.y];
-    for (uint r = tid; r < p.rank / 4u; r += 256u) { zs[r] = ((device const float4*)(z + tg.y * p.rank))[r]; }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint i = tg.x * 256u + tid;
-    if (i >= p.width) { return; }
+    const uint part = lane % 16u;
+    const uint i = tg.x * 16u + sgitg * 2u + lane / 16u;          // channel; width % 16 == 0
+    device const float4* zv = (device const float4*)(z + tg.y * p.rank);
     device const float4* fr = (device const float4*)((device const float*)(weights + c.forget) + ulong(i) * p.rank);
     device const float4* gr = (device const float4*)((device const float*)(weights + c.gain) + ulong(i) * p.rank);
     float f = 0.0f, g = 0.0f;
-    for (uint r = 0; r < p.rank / 4u; ++r) { f += dot(fr[r], zs[r]); g += dot(gr[r], zs[r]); }
-    const float xv = acts[c.x + i], mv = acts[c.m + i];
-    const float tf = tanh(clamp(f, -20.0f, 20.0f)), tgv = tanh(clamp(g, -20.0f, 20.0f));
-    acts[c.out + i] = xv - tf * xv + tgv * mv;
+    for (uint q = part; q < p.rank / 4u; q += 16u) {
+        const float4 zq = zv[q];
+        f += dot(fr[q], zq);
+        g += dot(gr[q], zq);
+    }
+    for (ushort off = 8; off > 0; off >>= 1) { f += simd_shuffle_xor(f, off); g += simd_shuffle_xor(g, off); }
+    if (part == 0u) {
+        const float xv = acts[c.x + i], mv = acts[c.m + i];
+        const float tf = tanh(clamp(f, -20.0f, 20.0f)), tgv = tanh(clamp(g, -20.0f, 20.0f));
+        acts[c.out + i] = xv - tf * xv + tgv * mv;
+    }
 }
 
 // ============================================================================

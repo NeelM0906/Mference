@@ -232,6 +232,8 @@ import MferenceValidationSupport
         DecodeCase(position: 40, mask: .window(100), ringCapacity: 140, relExtent: 100, gate: false),
         DecodeCase(position: 150, mask: .global(logFloor: 32, logAlpha: 0.1), ringCapacity: 0, relExtent: 24, gate: true),
         DecodeCase(position: 0, mask: .global(logFloor: 8192, logAlpha: 0.1), ringCapacity: 0, relExtent: 1024, gate: true),
+        // 4,201 keys: 33 blocks of 128, more than the merge's one lane per block.
+        DecodeCase(position: 4200, mask: .global(logFloor: 2048, logAlpha: 0.1), ringCapacity: 0, relExtent: 1024, gate: true),
     ]
 
     @Test(arguments: decodeCases.indices)
