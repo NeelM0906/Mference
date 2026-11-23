@@ -244,18 +244,95 @@ import Mference
     }
 
     /// `--reasoning-effort` takes the Qwen 3.8 source template's levels, only
-    /// with `--chat`; "high" is not one of them.
+    /// with `--chat` or messages. Inkling 2's other names (minimal, high, max)
+    /// parse too, and `run` refuses them for every other dialect
+    /// (`otherDialectsRefuseInklingNamesAsParsingRefusesUnknownValues`).
     @Test func reasoningEffortParsesOnlyInChatMode() throws {
         for effort in QwenReasoningEffort.allCases {
             let args = try Args.parse(["--model", "candidate.gturbo", "--chat", "--reasoning-effort", effort.rawValue])
             #expect(args.reasoningEffort == effort)
+            #expect(args.inkling2Effort == nil)
         }
-        #expect(throws: (any Error).self) {
-            try Args.parse(["--model", "candidate.gturbo", "--prompt", "Hi", "--reasoning-effort", "low"])
+        for value in ["low", "high"] {
+            #expect(throws: ArgsError.invalidValue(flag: "--reasoning-effort",
+                                                   value: "requires chat or messages, not raw --prompt")) {
+                try Args.parse(["--model", "candidate.gturbo", "--prompt", "Hi", "--reasoning-effort", value])
+            }
         }
-        #expect(throws: (any Error).self) {
-            try Args.parse(["--model", "candidate.gturbo", "--chat", "--reasoning-effort", "high"])
+        for value in ["extreme", "HIGH", " high", "high ", "0.5", "", "on"] {
+            #expect(throws: ArgsError.invalidValue(flag: "--reasoning-effort", value: value), "\(value)") {
+                try Args.parse(["--model", "candidate.gturbo", "--chat", "--reasoning-effort", value])
+            }
         }
+    }
+
+    /// Inkling 2's names come from the template's own table, the one the
+    /// server's `reasoning_effort` uses: the shared four stay
+    /// `reasoningEffort`, the other three are `inkling2Effort`. The last flag
+    /// given wins.
+    @Test func inklingEffortNamesParseFromTheSharedTable() throws {
+        for name in MFTokenizer.Inkling2Effort.namedLevels.keys {
+            let args = try Args.parse(["--model", "m.gturbo", "--chat", "--reasoning-effort", name])
+            if let shared = QwenReasoningEffort(rawValue: name) {
+                #expect(args.reasoningEffort == shared && args.inkling2Effort == nil, "\(name)")
+            } else {
+                #expect(args.inkling2Effort == .named(name) && args.reasoningEffort == nil, "\(name)")
+            }
+        }
+        let own = MFTokenizer.Inkling2Effort.namedLevels.keys.filter { QwenReasoningEffort(rawValue: $0) == nil }
+        #expect(Set(own) == ["minimal", "high", "max"])
+        let lowLast = try Args.parse(["--model", "m.gturbo", "--chat",
+                                      "--reasoning-effort", "high", "--reasoning-effort", "low"])
+        #expect(lowLast.reasoningEffort == .low && lowLast.inkling2Effort == nil)
+        let maxLast = try Args.parse(["--model", "m.gturbo", "--messages-file", "m.json",
+                                      "--reasoning-effort", "low", "--reasoning-effort", "max"])
+        #expect(maxLast.inkling2Effort == .named("max") && maxLast.reasoningEffort == nil)
+    }
+
+    /// Every other dialect refuses minimal, high and max with exactly what
+    /// `main` writes for an unknown value at parse time (the error, the
+    /// usage, exit 2); Inkling 2 takes them. The shared names are never refused.
+    @Test func otherDialectsRefuseInklingNamesAsParsingRefusesUnknownValues() throws {
+        func parseFailureText(_ value: String) -> String? {
+            do {
+                _ = try Args.parse(["--model", "m.gturbo", "--chat", "--reasoning-effort", value])
+                return nil
+            } catch {
+                return "error: \(error)\n\n" + Args.usage + "\n"   // as `main` writes it
+            }
+        }
+        #expect(parseFailureText("extreme") == "error: invalid value for --reasoning-effort: extreme\n\n"
+                + Args.usage + "\n")
+        for name in ["minimal", "high", "max"] {
+            let args = try Args.parse(["--model", "m.gturbo", "--chat", "--reasoning-effort", name])
+            let expected = "error: invalid value for --reasoning-effort: \(name)\n\n" + Args.usage + "\n"
+            for dialect in [ChatDialect.chatml, .minicpm] {
+                #expect(inkling2EffortRefusal(args, dialect: dialect) == expected, "\(name) \(dialect)")
+            }
+            #expect(inkling2EffortRefusal(args, dialect: .inkling2) == nil, "\(name)")
+        }
+        for name in ["xhigh", "medium", "low", "none"] {
+            let args = try Args.parse(["--model", "m.gturbo", "--chat", "--reasoning-effort", name])
+            for dialect in [ChatDialect.chatml, .minicpm, .inkling2] {
+                #expect(inkling2EffortRefusal(args, dialect: dialect) == nil, "\(name) \(dialect)")
+            }
+        }
+        #expect(inkling2EffortRefusal(try Args.parse(["--model", "m.gturbo", "--chat"]), dialect: .chatml) == nil)
+    }
+
+    /// The help keeps its Qwen lines word for word and adds one for Inkling 2,
+    /// aligned with them.
+    @Test func reasoningEffortHelpKeepsTheQwenLines() throws {
+        let lines = Args.usage.components(separatedBy: "\n")
+        let first = try #require(lines.firstIndex { $0.contains("--reasoning-effort <mode>") })
+        #expect(lines[first].trimmingCharacters(in: .whitespaces)
+                == "--reasoning-effort <mode>  Qwen chat: xhigh, medium, low, or none.")
+        let next = Array(lines[(first + 1)...(first + 3)])
+        #expect(next.map { $0.trimmingCharacters(in: .whitespaces) }
+                == ["Qwen 3.6 uses binary on/off aliases. Not", "applied to raw prompts.",
+                    "Inkling 2 also takes minimal, high, or max."])
+        let indent = { (line: String) in line.prefix { $0 == " " }.count }
+        #expect(Set(next.map(indent)).count == 1)
     }
 
     @Test func shadowBudgetIsUnsetUnlessGiven() throws {

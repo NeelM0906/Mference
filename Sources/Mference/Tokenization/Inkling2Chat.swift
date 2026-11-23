@@ -52,6 +52,14 @@ extension MFTokenizer {
             "high": 0.9, "xhigh": 0.99, "max": 0.99,
         ]
 
+        /// `name` as one of the template's own effort names, exactly as
+        /// written; nil when it is not one. The server's `reasoning_effort`
+        /// and the CLI's `--reasoning-effort` resolve Inkling 2's names
+        /// beyond the shared four (minimal, high, max) through this.
+        public static func knownName(_ name: String) -> Inkling2Effort? {
+            namedLevels[name] != nil ? .named(name) : nil
+        }
+
         /// The level the template will print.
         public var level: Double? {
             switch self {

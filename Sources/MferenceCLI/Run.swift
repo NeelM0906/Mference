@@ -34,6 +34,10 @@ public func run(args: Args,
         let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
                                                          modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
+        if let refusal = inkling2EffortRefusal(args, dialect: tokenizer.dialect) {
+            stderr.write(Data(refusal.utf8))
+            return RunResult(exitCode: 2)
+        }
         let promptIds: [Int32]
         if let rawPrompt = args.prompt {
             promptIds = tokenizer.encode(rawPrompt, addBOS: true)
@@ -48,7 +52,8 @@ public func run(args: Args,
                 return MFTokenizer.Message(role: role, content: row.content,
                                            reasoningContent: row.reasoning_content)
             }
-            promptIds = try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort)
+            promptIds = try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort,
+                                                 inkling2Effort: args.inkling2Effort)
         } else {
             return errored(stderr, "one of --prompt or --messages-file is required", 2)
         }
@@ -277,6 +282,17 @@ public func run(args: Args,
     }
 }
 
+/// What `run` writes, exiting 2, when `--reasoning-effort` gave one of
+/// Inkling 2's own names (minimal, high, max) and the model's dialect is not
+/// Inkling 2: exactly what parsing writes for an unknown value (the error,
+/// then the usage), so every other model refuses these names as it always
+/// has, only once its tokenizer is loaded instead of while parsing. Nil when
+/// there is nothing to refuse.
+func inkling2EffortRefusal(_ args: Args, dialect: ChatDialect) -> String? {
+    guard case .named(let name)? = args.inkling2Effort, dialect != .inkling2 else { return nil }
+    return "error: \(ArgsError.invalidValue(flag: "--reasoning-effort", value: name))\n\n" + Args.usage + "\n"
+}
+
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
     stderr.write(Data("error: \(message)\n".utf8))
     return RunResult(exitCode: code)
@@ -348,6 +364,10 @@ private func runChat(args: Args,
         let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
                                                          modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
+        if let refusal = inkling2EffortRefusal(args, dialect: tokenizer.dialect) {
+            stderr.write(Data(refusal.utf8))
+            return RunResult(exitCode: 2)
+        }
         let baseConfig = try args.generationConfig(defaults: tokenizer.generationDefaults,
                                                    maxNewTokens: args.maxNew)
         let prefillChunkTokens = args.prefillChunk.chatChunkTokens(
@@ -403,7 +423,8 @@ private func runChat(args: Args,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: "")
         let promptTokens = { (messages: [MFTokenizer.Message]) throws -> Int in
-            try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort).count
+            try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort,
+                                     inkling2Effort: args.inkling2Effort).count
         }
 
         stderr.write(Data("Interactive chat. Commands: /clear, /history, /quit.\n".utf8))
@@ -446,8 +467,10 @@ private func runChat(args: Args,
             }
             history = fitted.messages
 
-            let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort)
-            let cacheTurn = PromptPrefixCacheTurn(messages: history, reasoningEffort: args.reasoningEffort)
+            let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort,
+                                                     inkling2Effort: args.inkling2Effort)
+            let cacheTurn = PromptPrefixCacheTurn(messages: history, reasoningEffort: args.reasoningEffort,
+                                                  inkling2Effort: args.inkling2Effort)
             var plan = ChatPrefixReuse.Plan(promptIDs: promptIds, start: .reset)
             let checkpoint: (position: Int, capture: () throws -> Void)? = nil
             if args.reusePrefix {
