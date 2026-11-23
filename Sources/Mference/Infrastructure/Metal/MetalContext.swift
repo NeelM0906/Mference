@@ -164,7 +164,6 @@ public final class MetalContext: @unchecked Sendable {
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",
-        "inkling2_attention": "Metal/Inkling2",
         "logit": "Metal/Sampling",
         "maple_add_rmsnorm": "Metal/Primitives",
         "maple_attention": "Metal/Attention",

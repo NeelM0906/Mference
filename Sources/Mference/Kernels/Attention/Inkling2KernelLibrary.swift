@@ -5,8 +5,15 @@ import Metal
 /// compiled on demand rather than into the shared runtime library, with its
 /// own pipeline cache. One instance per `MetalContext` is enough; it is safe
 /// to share between encoders and threads.
+///
+/// It finds the source itself, with the same bundle lookup as
+/// `MetalContext` (the packaged app's resource bundle first, then
+/// `Bundle.module`), so the shared shader tables stay unchanged; the module
+/// can move into `MetalContext.shaderSubdirectories` later without changing
+/// any caller.
 public final class Inkling2KernelLibrary: @unchecked Sendable {
     public static let module = "inkling2_attention"
+    static let subdirectory = "Metal/Inkling2"
 
     public let context: MetalContext
     private let library: MTLLibrary
@@ -15,7 +22,31 @@ public final class Inkling2KernelLibrary: @unchecked Sendable {
 
     public init(context: MetalContext) throws {
         self.context = context
-        self.library = try MetalContext.moduleLibrary(device: context.device, module: Self.module)
+        self.library = try Self.compile(device: context.device)
+    }
+
+    private static let resourceBundle: Bundle = {
+        if let resources = Bundle.main.resourceURL {
+            let packaged = resources.appendingPathComponent("Mference_Mference.bundle")
+            if FileManager.default.fileExists(atPath: packaged.path), let bundle = Bundle(url: packaged) {
+                return bundle
+            }
+        }
+        return .module
+    }()
+
+    static func compile(device: MTLDevice) throws -> MTLLibrary {
+        guard let url = resourceBundle.url(forResource: module, withExtension: "metal", subdirectory: subdirectory) else {
+            throw MetalError.missingShaderResource(module)
+        }
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let options = MTLCompileOptions()
+        options.languageVersion = MetalContext.shaderLanguageVersion
+        do {
+            return try device.makeLibrary(source: source, options: options)
+        } catch {
+            throw MetalError.libraryCompileFailed("\(error)")
+        }
     }
 
     public func pipeline(_ name: String) throws -> MTLComputePipelineState {
