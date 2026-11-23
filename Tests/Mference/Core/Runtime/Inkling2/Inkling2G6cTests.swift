@@ -209,7 +209,7 @@ struct Inkling2PositionLogitsToyTests {
 }
 
 /// The runner's trace margins (re-based G6c rule (a)) on the Mini-width
-/// toy: a prefill in chunks of 4 and 2, then a decode step. The router logits
+/// toy: a prefill in balanced chunks of 3 and 3, then a decode step. The router logits
 /// the trace records come from the visit's own MoE input, so their top-8 is
 /// the runner's own expert set wherever the margin is not a near-tie; and
 /// the margins they give equal the reference's at the runner's states
