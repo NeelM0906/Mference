@@ -382,8 +382,8 @@ class ForcedReportTests(unittest.TestCase):
         self.assertAlmostEqual(r["max_shortfall"], 0.004)
 
     def test_stale_and_malformed(self):
-        self.forced(candidate="cand-other")
-        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
+        self.forced(candidate="cand-other")  # another candidate directory with byte-identical traces is fine (v1.16)
+        self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "ok")
         self.forced(runner_trace_sha256="0" * 64)
         self.assertEqual(gv.forced_report(self.root, "t", self.tdir)["status"], "stale")
         self.forced(disagreement_count=2)
@@ -401,6 +401,129 @@ class ForcedReportTests(unittest.TestCase):
 
     def test_absent_is_none(self):
         self.assertIsNone(gv.forced_report(self.root, "t", self.tdir))
+
+
+class V116Tests(unittest.TestCase):
+    """The closing form: (a) as the forced per-visit view on four prompts, the reference against llama.cpp."""
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self._tmp.name, "precision")
+        self.tdir = os.path.join(self._tmp.name, "cand-x", "traces")
+        self.saved = (gv.FORCED_PROMPTS, gv.FORCED_TOTAL)
+        gv.FORCED_PROMPTS = ("t",)
+
+    def tearDown(self):
+        gv.FORCED_PROMPTS, gv.FORCED_TOTAL = self.saved
+        self._tmp.cleanup()
+
+    def forced(self, pid="t", where=None, shortfall=0.0004, inc=0.001, precision=None, positions=3, extra=None,
+               runner_margin=None):
+        """A forced file over a runner trace of 2 visits x `positions` tokens (written to match)."""
+        import hashlib
+        n = positions
+        write_trace(self.tdir, "t", experts_with(0, visits=2, tokens=n))
+        gv.FORCED_TOTAL = 2 * n
+        with open(os.path.join(self.tdir, "t", "trace.json"), "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        visits = [{"visit": v, "layer": v, "slot": 0, "own_experts": [list(range(8))] * n, "fp32_margins": [0.01] * n,
+                   "shortfalls": [0.0] * n, "differs": [v == 1 and t == 1 for t in range(n)],
+                   "increment_rel_l2": [inc if not callable(inc) else inc(t) for t in range(n)]} for v in range(2)]
+        d = {"schema": "inkling2-forced-routing-v1", "id": pid, "candidate": "cand-other", "runner_tip": "abc",
+             "runner_trace_sha256": sha, "reference_commit": "def", "precision": precision, "n_tokens": n,
+             "top_k": 8, "near_tie_bound": 0.0258, "token_visits": 2 * n, "disagreement_count": 1,
+             "disagreement_rate": 1 / (2 * n), "not_near_tie_count": 0, "visits": visits,
+             "disagreements": [{"visit": 1, "layer": 1, "pos": 1, "shortfall": shortfall, "fp32_margin": shortfall / 2,
+                                "runner_margin": runner_margin, "runner_only": [9], "fp32_only": [7], "near_tie": True}]}
+        d.update(extra or {})
+        path = where or os.path.join(self.root, pid, "forced", f"{pid}.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dump(d, path)
+
+    def test_a_forced_bounds(self):
+        self.forced()  # 1 of 6 token-visits is far above 0.5%
+        a = gv.forced_gate(self.root, self.tdir)
+        self.assertIn("rate", a["prompts"]["t"]["fails"])
+        self.forced(positions=300)  # 1 of 600; another candidate directory with the same trace bytes is fine
+        self.assertTrue(gv.forced_gate(self.root, self.tdir)["prompts"]["t"]["pass"])
+        self.forced(positions=300, shortfall=0.002)
+        self.assertIn("shortfall", gv.forced_gate(self.root, self.tdir)["prompts"]["t"]["fails"])
+        self.forced(positions=300, inc=0.02)
+        self.assertIn("increment", gv.forced_gate(self.root, self.tdir)["prompts"]["t"]["fails"])
+
+    def test_a_stale_wrong_or_short_files_are_incomplete(self):
+        for extra in ({"runner_trace_sha256": "0" * 64}, {"runner_trace_sha256": None}, {"id": "other"}):
+            self.forced(positions=300, extra=extra)
+            a = gv.forced_gate(self.root, self.tdir)
+            self.assertIsNone(a["prompts"]["t"]["pass"], extra)
+            self.assertTrue(a["missing"], extra)
+        self.forced(positions=300)
+        write_trace(self.tdir, "t", experts_with(0, visits=2, tokens=5))  # the runner's trace is not the forced one
+        self.assertIsNone(gv.forced_gate(self.root, self.tdir)["prompts"]["t"]["pass"])
+        self.forced(positions=300)
+        gv.FORCED_TOTAL = 18816  # the four files must cover the measured total
+        self.assertTrue(any("not 18816" in m for m in gv.forced_gate(self.root, self.tdir)["missing"]))
+
+    def ref(self, **kw):
+        kw.setdefault("positions", 300)
+        self.forced(where=os.path.join(self.root, gv.REF_LLAMA), precision=kw.pop("precision", "llamaExperts"), **kw)
+        return gv.reference_check(self.root)
+
+    def test_reference_check(self):
+        self.assertEqual(gv.reference_check(self.root)["status"], "pending")
+        self.assertTrue(self.ref(shortfall=0.01)["pass"])
+        self.assertIn("margin", self.ref(shortfall=0.06)["fails"])  # .llamaExperts margin 0.03
+        self.assertIn("margin", self.ref(shortfall=0.01, runner_margin=0.5)["fails"])  # llama.cpp's own margin
+        self.assertFalse(self.ref(shortfall=0.01, runner_margin=0.001)["fails"])
+        grow = self.ref(shortfall=0.01, inc=lambda t: 0.0002 * t)
+        self.assertFalse(grow["pass"])
+        self.assertFalse(grow["flat_miss"])
+        # one spike at position 0 must not hide growth after it
+        spike = self.ref(shortfall=0.01, inc=lambda t: 0.05 if t == 0 else 0.001 + 0.0002 * t)
+        self.assertFalse(spike["flat_miss"])
+        self.assertFalse(spike["pass"])
+        flat = self.ref(shortfall=0.01, inc=0.03)
+        self.assertTrue(flat["flat_miss"])
+        # past position 400 still counts
+        far = self.ref(shortfall=0.01, positions=450, inc=lambda t: 0.5 if t == 420 else 0.001)
+        self.assertFalse(far["pass"])
+        # one visit grows while the others stay flat above 0.02: growth, not flat
+        self.forced(where=os.path.join(self.root, gv.REF_LLAMA), precision="llamaExperts", positions=300, shortfall=0.01,
+                    inc=0.05, extra={})
+        import json as _j
+        refp = os.path.join(self.root, gv.REF_LLAMA)
+        with open(refp) as f:
+            d = _j.load(f)
+        d["visits"][1]["increment_rel_l2"] = [0.05 + 0.0015 * t for t in range(300)]
+        dump(d, refp)
+        one = gv.reference_check(self.root)
+        self.assertFalse(one["flat_miss"])
+        self.assertFalse(one["pass"])
+        # a NaN shortfall row and scalar extras
+        d["visits"][1]["increment_rel_l2"] = [0.001] * 300
+        d["visits"][0]["element_rel_max"] = 0.001
+        dump(d, refp)
+        self.assertEqual(gv.reference_check(self.root)["status"], "ok")
+        with open(refp) as f:
+            raw = f.read()
+        open(refp, "w").write(raw.replace('"shortfall": 0.01', '"shortfall": NaN', 1))
+        self.assertEqual(gv.reference_check(self.root)["status"], "malformed")
+        self.assertEqual(self.ref(precision="llamaCPU")["status"], "malformed")
+        self.assertEqual(self.ref(positions=20)["status"], "malformed")
+        self.assertEqual(self.ref(extra={"visits": [], "token_visits": 0})["status"], "malformed")
+
+    def test_state(self):
+        b_ok = {"prompts": {"x": {"pass": True, "fails": {}}}, "missing": []}
+        d_ok = {"missing": [], "positions": 10, "pass": True}
+        a_ok = {"prompts": {"t": {"pass": True}}, "missing": []}
+        ref_ok = {"status": "ok", "pass": True, "flat_miss": False}
+        v = {"a": a_ok, "reference": ref_ok, "b": b_ok, "d": d_ok, "unmeasured": []}
+        self.assertEqual(gv.v116_state(v)[0], "pass")
+        self.assertEqual(gv.v116_state(dict(v, unmeasured=["g06-chat-none"]))[0], "incomplete")
+        self.assertEqual(gv.v116_state(dict(v, reference={"status": "pending"}))[0], "incomplete")
+        self.assertEqual(gv.v116_state(dict(v, reference={"status": "ok", "pass": False, "flat_miss": True}))[0], "incomplete")
+        self.assertEqual(gv.v116_state(dict(v, reference={"status": "ok", "pass": False, "flat_miss": False}))[0], "fail")
+        self.assertEqual(gv.v116_state(dict(v, a={"prompts": {"t": {"pass": False}}, "missing": []}))[0], "fail")
+        self.assertEqual(gv.v116_state(dict(v, d=dict(d_ok, missing=["lp06"])))[0], "incomplete")
 
 
 class ExpertRuleTests(unittest.TestCase):

@@ -16,8 +16,30 @@ $INK/results/k4/precision) holds K4's reference runs:
 <root>/<prompt>/<mode>/traces/<prompt>/..., mode `fp32` (exact), `llamaCPU` or
 `llamaExperts` (llama.cpp's rounding).
 
-The gate (spec v1.12, section 8: G6c re-based on the exact model; goldens
-README, "G6c re-based"). Rules 1, 3 and 4 as in v1.8; rule 2 is (a)-(d):
+The gate (spec v1.16, section 8, "Closing form"; goldens README). Rules 1, 3
+and 4 as in v1.8; rule 2 is:
+- (a) K4's per-visit forced measurement (`.fp32` fed the runner's own state
+  at every visit; <precision-root>/<id>/forced/<id>.json, precision fp32) on
+  trace01, trace02, lp09-chat-default and trace03-tool-result: per prompt at
+  most 0.5% of token-visits with a different expert set, every disagreement
+  a near-tie with shortfall below 1e-3, every per-visit increment within 1e-2
+  relative L2. The runner's trace for each must be byte-identical to the one
+  the run was forced on (SHA-256); otherwise that prompt is STALE and the
+  verdict incomplete ("report to the coordinator before C1").
+- the reference against llama.cpp: K4's `.llamaExperts` forced on llama.cpp's
+  CPU trace of trace03 (<precision-root>/trace03-llama/forced/...): every
+  routing disagreement at a llama.cpp margin below 0.0258, and the per-bin
+  (by position) maximum increment error within G6a's 0.02. Pending until the
+  file exists; a miss that is flat from position 0 goes to the coordinator
+  (incomplete), one that grows with position fails.
+- (b) as already run (`.llamaCPU` under 32 tokens, `.llamaExperts` from 32
+  up, against generate-tf/metal under the addendum bounds; trace02, g06, lp09).
+- (d) as adopted on its five natural-text prompts.
+(c1) and (c2) are printed, not gated, with llama.cpp's own Metal-against-CPU
+figure beside each. The v1.12 verdict (the re-based tier, below) and the
+v1.8 verdict are printed for the record.
+
+The v1.12 tier, printed for the record:
 - (a) the runner against `.fp32`, teacher-forced, on every teacher-forced
   prompt of at most 347 tokens (g01, g05, g06, lp04, lp05, lp08, lp09, lp10,
   lp11, trace02; lp06 and lp07 are left to (c1)) and trace01 and trace03:
@@ -318,7 +340,7 @@ def forced_report(root, pid, tdir):
         problems = []
         if d.get("schema") != "inkling2-forced-routing-v1":
             problems.append(f"schema {d.get('schema')}")
-        if d.get("precision", "fp32") != "fp32":  # rule (a) is the exact reference only; absent = the early fp32 files
+        if (d.get("precision") or "fp32") != "fp32":  # (a) is the exact reference only; absent or null = the early fp32 files
             problems.append(f"precision {d.get('precision')}, not fp32")
         if len(visits) * n != d["token_visits"]:
             problems.append("visits x n_tokens != token_visits")
@@ -330,15 +352,27 @@ def forced_report(root, pid, tdir):
             problems.append("not_near_tie_count disagrees with the rows")
         if not all(finite(x) for k in ("fp32_margins", "shortfalls", "increment_rel_l2") for x in flat(k)):
             problems.append("a non-finite float")
+        if not all(finite(x.get("shortfall")) for x in dis):
+            problems.append("a disagreement row without a finite shortfall")
+        if d.get("id") != pid:
+            problems.append(f"id {d.get('id')} for {pid}")
+        if not d.get("runner_trace_sha256"):
+            problems.append("no runner_trace_sha256")
         if problems:
             return {"status": "malformed", "why": "; ".join(problems), "path": path}
         trace = os.path.join(tdir, pid, "trace.json") if tdir else None
         sha = hashlib.sha256(open(trace, "rb").read()).hexdigest() if trace and os.path.isfile(trace) else None
         cand = os.path.basename(os.path.dirname(os.path.abspath(tdir))) if tdir else None
-        if sha != d.get("runner_trace_sha256") or cand != d.get("candidate"):
-            return {"status": "stale", "why": f"written from {d.get('candidate')} (trace sha256 "
-                                              f"{str(d.get('runner_trace_sha256'))[:12]}), judging {cand} ({str(sha)[:12]})",
+        if sha != d.get("runner_trace_sha256"):
+            return {"status": "stale", "why": f"the runner's trace differs from the one this run was forced on "
+                                              f"({d.get('candidate')}, sha256 {str(d.get('runner_trace_sha256'))[:12]}; "
+                                              f"judging {cand}, {str(sha)[:12]}): report to the coordinator before C1",
                     "path": path}
+        with open(trace) as f:
+            rt = json.load(f)
+        if len(rt["visits"]) != len(visits) or any(len(v["experts"]) != n for v in rt["visits"]):
+            return {"status": "malformed", "why": f"depth or visit count differs from the runner's trace "
+                                                  f"({len(rt['visits'])} visits)", "path": path}
         per_layer = {}
         for x in dis:
             per_layer[x["layer"]] = per_layer.get(x["layer"], 0) + 1
@@ -347,6 +381,7 @@ def forced_report(root, pid, tdir):
                 "max_shortfall": max([x["shortfall"] for x in dis], default=0.0),
                 "max_increment_rel_l2": max(flat("increment_rel_l2"), default=0.0),
                 "per_layer": dict(sorted(per_layer.items())), "runner_tip": d.get("runner_tip"),
+                "forced_on": d.get("candidate"),
                 "reference_commit": d.get("reference_commit")}
     except (ValueError, KeyError, TypeError, OSError) as e:
         return {"status": "malformed", "why": f"{type(e).__name__}: {e}", "path": path}
@@ -418,7 +453,8 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
             bound = 2 * addendum_bound(k, v, n)[0]
             if not within(got[k][0], bound):
                 fails[k] = f"{fmt4(got[k][0])} > {fmt4(bound)}"
-        out["c1"]["prompts"][pid] = {"pass": not fails, "fails": fails}
+        out["c1"]["prompts"][pid] = {"pass": not fails, "fails": fails, "metrics": {k: got[k][0] for k in got},
+                                     "metal_vs_cpu": {k: v for k, (v, n) in meas_g[pid].items()}}
         # (c2) no farther from tf CPU than fp32 is (+10%, addendum floors), where (a) applies
         if pid in a_cover:
             le = pair(cpu, os.path.join(root, pid, "fp32", "tf"), pid) if has_run(root, pid, "fp32") else None
@@ -436,7 +472,9 @@ def rebased(goldens, cand, tdir, root, meas_g, expected):
                     bound = max(1.1 * ge[k][0], floor) if finite(ge[k][0]) else float("nan")
                     if not within(got[k][0], bound):
                         fails[k] = f"{fmt4(got[k][0])} > {fmt4(bound)} (fp32 {fmt4(ge[k][0])})"
-                out["c2"]["prompts"][pid] = {"pass": not fails, "fails": fails}
+                out["c2"]["prompts"][pid] = {"pass": not fails, "fails": fails, "metrics": {k: got[k][0] for k in got},
+                                             "fp32": {k: ge[k][0] for k in ge},
+                                             "metal_vs_cpu": {k: v for k, (v, n) in meas_g[pid].items()}}
     # (a), expert sets: required on the three traces; checked on any other covered
     # prompt where both the runner and fp32 wrote a trace
     for pid in list(TRACE_GOLDENS) + [p for p in a_cover if p not in TRACE_GOLDENS]:
@@ -534,7 +572,7 @@ def print_rebased(rb):
               ("b", "(b) llama.cpp-mode reference vs tf Metal, addendum bounds"),
               ("c1", "(c1) runner vs tf CPU within 2x the addendum bounds"),
               ("c2", "(c2) runner no farther from tf CPU than fp32 (+10%)"))
-    print("\nRule 2, re-based (spec v1.12; gates):")
+    print("\nRule 2, re-based (spec v1.12; for the record):")
     print("| Part | Prompts judged | Result | Missing (required) |")
     print("|---|---|---|---|")
     for key, title in titles:
@@ -587,6 +625,207 @@ def print_rebased(rb):
         print(f"    first form, superseded (lower bound >= -{QUALITY_MARGIN}; llama.cpp Metal - CPU "
               + ("passes" if d["llama_passes_superseded"] else "fails") + " it too): "
               + ("pass" if d["pass_superseded"] else "fail"))
+
+
+# ---------------------------------------------------------------- the gate: closing form (spec v1.16)
+FORCED_PROMPTS = ("trace01", "trace02", "lp09-chat-default", "trace03-tool-result")
+FORCED_RATE_MAX = 0.005       # at most 0.5% of token-visits with a different expert set
+FORCED_SHORTFALL_MAX = 1e-3   # every disagreement a near-tie
+FORCED_INCREMENT_MAX = 1e-2   # every per-visit increment, relative L2
+FORCED_TOTAL = 18816          # spec v1.16: the four prompts' token-visits, to depth 300
+REF_LLAMA = os.path.join("trace03-llama", "forced", "trace03-tool-result.json")  # under the precision root
+REF_MARGIN_MAX = 0.0258       # every routing disagreement at a llama.cpp margin below this
+REF_INCREMENT_MAX = 0.02      # G6a's per-visit bound; per position bin
+POS_BINS = ((0, 10), (10, 25), (25, 50), (50, 100), (100, 200), (200, 10 ** 9))  # the last is open-ended
+REF_MIN_TOKENS = 300          # trace03's depth
+FLAT_TOLERANCE = 1.2          # a later bin's mean at most this times bin 0's, for a miss to read as flat
+
+
+def forced_gate(root, tdir):
+    """(a) in v1.16: K4's per-visit forced measurement on the four prompts."""
+    out = {"prompts": {}, "missing": []}
+    for pid in FORCED_PROMPTS:
+        fr = forced_report(root, pid, tdir)
+        if fr is None:
+            out["missing"].append(f"{pid}: no forced file")
+            continue
+        if fr["status"] != "ok":
+            out["missing"].append(f"{pid}: {fr['status']}: {fr['why']}")
+            out["prompts"][pid] = dict(fr, **{"pass": None})
+            continue
+        fails = {}
+        if not fr["rate"] <= FORCED_RATE_MAX + 1e-12:
+            fails["rate"] = f"{fr['disagreements']}/{fr['token_visits']} = {fr['rate']:.4f} > {FORCED_RATE_MAX}"
+        if not fr["max_shortfall"] < FORCED_SHORTFALL_MAX:
+            fails["shortfall"] = f"{fmt4(fr['max_shortfall'])} >= {FORCED_SHORTFALL_MAX}"
+        if not fr["max_increment_rel_l2"] <= FORCED_INCREMENT_MAX + 1e-12:
+            fails["increment"] = f"{fmt4(fr['max_increment_rel_l2'])} > {FORCED_INCREMENT_MAX}"
+        out["prompts"][pid] = dict(fr, **{"pass": not fails, "fails": fails})
+    ok = [v for v in out["prompts"].values() if v.get("status") == "ok"]
+    out["total"] = {"token_visits": sum(v["token_visits"] for v in ok), "disagreements": sum(v["disagreements"] for v in ok)}
+    if len(ok) == len(FORCED_PROMPTS) and out["total"]["token_visits"] != FORCED_TOTAL:
+        out["missing"].append(f"the four files cover {out['total']['token_visits']} token-visits, not {FORCED_TOTAL}")
+    return out
+
+
+def reference_check(root):
+    """The reference against llama.cpp at depth (v1.16): K4's .llamaExperts forced on llama.cpp's CPU trace of
+    trace03. Pending until the file exists. A routing disagreement's margin is llama.cpp's own
+    (`runner_margin`; the forced side's `fp32_margin`, here .llamaExperts, when llama.cpp's trace carries
+    none). Increment error by position bin: a miss (any bin's maximum above 0.02) reads as flat only when
+    bin 0's mean is already above 0.02 and no later bin's mean exceeds it by more than FLAT_TOLERANCE;
+    otherwise it grows with position and fails."""
+    path = os.path.join(root, REF_LLAMA) if root else None
+    if not path or not os.path.isfile(path):
+        return {"status": "pending", "path": path}
+    as_list = lambda x: x if isinstance(x, list) else ([] if x is None else [x])
+    try:
+        with open(path) as f:
+            d = json.load(f, parse_constant=lambda c: float("nan"))
+        n, visits, dis = d["n_tokens"], d["visits"], d["disagreements"]
+        problems = []
+        if d.get("precision") != "llamaExperts":
+            problems.append(f"precision {d.get('precision')}, not llamaExperts")
+        if n < REF_MIN_TOKENS or not visits:
+            problems.append(f"{n} tokens, {len(visits)} visits (trace03 is {REF_MIN_TOKENS} tokens deep)")
+        if len(visits) * n != d["token_visits"] or d["disagreement_count"] != len(dis):
+            problems.append("counts disagree")
+        if any(len(v[k]) != n for v in visits for k in ("increment_rel_l2", "differs", "shortfalls")):
+            problems.append("a per-visit list is not n_tokens long")
+        incs = [(t, x) for v in visits for t, x in enumerate(v["increment_rel_l2"])]
+        per_visit = [v["increment_rel_l2"] for v in visits]
+        margins, sources = [], set()
+        for x in dis:
+            m = x.get("runner_margin")
+            sources.add("llama.cpp's own" if m is not None else ".llamaExperts'")
+            margins.append(m if m is not None else x.get("fp32_margin"))
+        if not all(finite(x) for _, x in incs) or not all(finite(m) for m in margins) \
+                or not all(finite(x.get("shortfall")) for x in dis):
+            problems.append("a non-finite or missing value")
+        if problems:
+            return {"status": "malformed", "why": "; ".join(problems), "path": path}
+        bins = []
+        for lo, hi in POS_BINS:
+            sel = [x for t, x in incs if lo <= t < hi]
+            if sel:
+                bins.append({"bin": [lo, min(hi, n)], "max": max(sel), "mean": sum(sel) / len(sel), "n": len(sel)})
+        extra = lambda key: max([y for v in visits for y in as_list(v.get(key)) if finite(y)], default=None)
+        res = {"status": "ok", "precision": d.get("precision"), "token_visits": d["token_visits"],
+               "disagreements": len(dis), "max_margin": max(margins, default=0.0), "margin_source": sorted(sources),
+               "max_shortfall": max([x["shortfall"] for x in dis], default=0.0), "bins": bins,
+               "element_rel_max": extra("element_rel_max"), "route_weight_err": extra("route_weight_err"),
+               "final_norm_rel": d.get("final_norm_rel") if finite(d.get("final_norm_rel")) else None}
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+        return {"status": "malformed", "why": f"{type(e).__name__}: {e}", "path": path}
+    fails, flat = {}, False
+    if not res["max_margin"] < REF_MARGIN_MAX:
+        fails["margin"] = f"a disagreement at llama.cpp margin {fmt4(res['max_margin'])} >= {REF_MARGIN_MAX}"
+    if any(b["max"] > REF_INCREMENT_MAX for b in bins):
+        first = bins[0]["mean"]
+        def visit_flat(row):  # no later bin's mean above 1.2 x this visit's bin-0 mean (or 0.02, if larger)
+            means = [sum(row[lo:min(hi, n)]) / len(row[lo:min(hi, n)]) for lo, hi in POS_BINS if row[lo:min(hi, n)]]
+            return all(m <= max(FLAT_TOLERANCE * means[0], REF_INCREMENT_MAX) for m in means[1:])
+        flat = (first > REF_INCREMENT_MAX and all(b["mean"] <= FLAT_TOLERANCE * first for b in bins[1:])
+                and all(visit_flat(row) for row in per_visit))
+        what = "flat from position 0 (for the coordinator: the mode, not the model)" if flat else "grows with position"
+        fails["increment"] = (f"per-bin max {', '.join(fmt4(b['max']) for b in bins)}, mean "
+                              f"{', '.join(fmt4(b['mean']) for b in bins)}; above {REF_INCREMENT_MAX}: {what}")
+    res.update({"fails": fails, "flat_miss": flat and "margin" not in fails, "pass": not fails})
+    return res
+
+
+def v116(rb, root, tdir, unmeasured=()):
+    return {"a": forced_gate(root, tdir), "reference": reference_check(root), "b": rb["b"], "d": rb["d"],
+            "c1": rb["c1"], "c2": rb["c2"], "unmeasured": list(unmeasured)}
+
+
+def v116_state(v):
+    failed, missing = [], []
+    a = v["a"]
+    if any(p.get("pass") is False for p in a["prompts"].values()):
+        failed.append("(a) forced")
+    if a["missing"]:
+        missing.append("(a) forced")
+    r = v["reference"]
+    if r["status"] == "pending":
+        missing.append("reference vs llama.cpp (pending)")
+    elif r["status"] != "ok":
+        missing.append(f"reference vs llama.cpp ({r['status']})")
+    elif r["flat_miss"]:
+        missing.append("reference vs llama.cpp (flat miss: the coordinator's reading)")
+    elif not r["pass"]:
+        failed.append("reference vs llama.cpp")
+    if any(not p["pass"] for p in v["b"]["prompts"].values()):
+        failed.append("(b)")
+    if v["b"]["missing"]:
+        missing.append("(b)")
+    d = v["d"]
+    if d["missing"] or not d["positions"]:
+        missing.append("(d)")
+    elif not d["pass"]:
+        failed.append("(d)")
+    if v.get("unmeasured"):
+        missing.append("prompts without a noise measurement: " + ", ".join(v["unmeasured"]))
+    return ("fail" if failed else "incomplete" if missing else "pass"), failed, missing
+
+
+def print_v116(v):
+    print("Rule 2, closing form (spec v1.16; gates):")
+    a = v["a"]
+    for pid in FORCED_PROMPTS:
+        p = a["prompts"].get(pid)
+        if p is None:
+            print(f"  (a) {pid}: no forced file")
+        elif p.get("status") != "ok":
+            print(f"  (a) {pid}: {p['status'].upper()}: {p['why']}")
+        else:
+            res = "pass" if p["pass"] else "FAIL " + "; ".join(f"{k} {x}" for k, x in p["fails"].items())
+            print(f"  (a) {pid}, forced per visit: {p['disagreements']}/{p['token_visits']} token-visits differ "
+                  f"({p['rate']:.4f}, <= {FORCED_RATE_MAX}), max shortfall {fmt4(p['max_shortfall'])} "
+                  f"(< {FORCED_SHORTFALL_MAX}), max increment rel L2 {fmt4(p['max_increment_rel_l2'])} "
+                  f"(<= {FORCED_INCREMENT_MAX}); forced on {p.get('forced_on')}: {res}")
+    t = a["total"]
+    print(f"  (a) all four: {t['disagreements']}/{t['token_visits']} token-visits differ")
+    r = v["reference"]
+    if r["status"] == "pending":
+        print(f"  reference vs llama.cpp (trace03, per visit): PENDING, no file at {r['path']}")
+    elif r["status"] != "ok":
+        print(f"  reference vs llama.cpp: {r['status'].upper()}: {r['why']}")
+    else:
+        res = "pass" if r["pass"] else ("FLAT MISS (the coordinator reads it)" if r["flat_miss"] else
+                                        "FAIL " + "; ".join(f"{k} {x}" for k, x in r["fails"].items()))
+        print(f"  reference vs llama.cpp ({r['precision']} forced on llama.cpp's CPU trace of trace03): "
+              f"{r['disagreements']}/{r['token_visits']} routing disagreements, max llama.cpp margin "
+              f"{fmt4(r['max_margin'])} (< {REF_MARGIN_MAX}), max shortfall {fmt4(r['max_shortfall'])}; increment "
+              f"rel L2 per position bin (max) " + ", ".join(f"{b['bin'][0]}-{b['bin'][1]} {fmt4(b['max'])}" for b in r["bins"])
+              + f" (<= {REF_INCREMENT_MAX}; margin from {', '.join(r['margin_source']) or '-'}); element rel max {fmt4(r['element_rel_max'])}, route weight err "
+              f"{fmt4(r['route_weight_err'])}, final norm rel {fmt4(r['final_norm_rel'])}: {res}")
+    b = v["b"]
+    bad = {p: x["fails"] for p, x in b["prompts"].items() if not x["pass"]}
+    print(f"  (b) llama.cpp-mode reference vs tf Metal: {len(b['prompts']) - len(bad)}/{len(b['prompts'])} pass"
+          + (f"; FAIL {bad}" if bad else "") + (f"; missing {'; '.join(b['missing'])}" if b["missing"] else ""))
+    d = v["d"]
+    if not d["positions"]:
+        print(f"  (d) quality: no positions; missing {', '.join(d['missing']) or '-'}")
+    else:
+        pairs = "; ".join(f"{k} {x['mean']:+.4f} [{x['ci95'][0]:+.4f}, {x['ci95'][1]:+.4f}]" for k, x in d["pairs"].items())
+        mc = d["llama_metal_minus_cpu"]
+        state = (f"incomplete (missing {', '.join(d['missing'])})" if d["missing"] else "pass" if d["pass"] else "FAIL")
+        print(f"  (d) quality, {d['positions']} positions: {pairs}; llama.cpp Metal - CPU {mc['mean']:+.4f} "
+              f"[{mc['ci95'][0]:+.4f}, {mc['ci95'][1]:+.4f}]: {state}")
+    print("\nPrinted, not gated (v1.16): whole-prompt differences, with llama.cpp's own Metal-against-CPU beside each")
+    print("| Prompt | Metric | runner vs tf CPU (c1) | .fp32 vs tf CPU | runner within 1.1 x fp32 (c2) | llama.cpp Metal vs CPU |")
+    print("|---|---|---:|---:|---|---:|")
+    for pid, c in v["c1"]["prompts"].items():
+        if "metrics" not in c:
+            print(f"| {pid} | - | {c['fails']} | | | |")
+            continue
+        c2 = v["c2"]["prompts"].get(pid, {})
+        for k in ("top1", "mean_dlp", "p95_dlp", "mean_kl", "p95_kl"):
+            fp = c2.get("fp32", {}).get(k)
+            within2 = "" if not c2 or "fp32" not in c2 else ("yes" if k not in c2.get("fails", {}) else "no")
+            print(f"| {pid} | {k} | {fmt4(c['metrics'][k])} | {fmt4(fp) if fp is not None else ''} | {within2} | "
+                  f"{fmt4(c['metal_vs_cpu'][k])} |")
 
 
 def verdict(checked_ok, state, missing, traces_given):
@@ -668,15 +907,23 @@ def main():
     # Rule 2, re-based: the gate
     rb = rebased(goldens, cand, tdir, root, meas_g, expected)
     rb["c1"]["missing"] += [f"{q}: in generate_prompts_tf.json but not in noise/tf-metal-vs-tfcpu.json" for q in unmeasured]
-    state, failed, missing = rebased_state(rb)
-    report["rule2_rebased"], report["rule2_state"] = rb, {"state": state, "failed": failed, "missing": missing}
+    state12, failed12, missing12 = rebased_state(rb)
+    report["rule2_rebased"] = rb
+    report["v112"] = {"state": state12, "failed": failed12, "missing": missing12}
+    checked12 = state12 != "fail" and report["pooled"]["pass"] and tr_ok
+    report["v112"]["verdict"] = verdict(checked12, state12, missing12, bool(tdir))[0]
+    # the gate: v1.16's closing form
+    rb["b"]["missing"] += [f"{q}: required, but not in noise/tf-metal-vs-tfcpu.json" for q in B_REQUIRED if q not in meas_g]
+    v = v116(rb, root, tdir, unmeasured)
+    state, failed, missing = v116_state(v)
+    report["v116"], report["rule2_state"] = v, {"state": state, "failed": failed, "missing": missing}
     checked_ok = state != "fail" and report["pooled"]["pass"] and tr_ok
     report["gate_pass"] = checked_ok and state == "pass" and bool(tdir)
     report["as_written_v18_pass"] = all(r[1][0] for r in rows) and report["pooled"]["pass"] and tr_ok and bool(tdir)
     report["plain_v2_pass"] = all(r[2][0] for r in rows) and report["pooled_plain_v2"]["pass"] and tr_ok
 
-    fmt = lambda r: "pass" if r[0] else "FAIL: " + "; ".join(f"{k} {v}" for k, v in r[1].items())
-    print_rebased(rb)
+    fmt = lambda r: "pass" if r[0] else "FAIL: " + "; ".join(f"{k} {x}" for k, x in r[1].items())
+    print_v116(v)
     p = report["pooled"]
     num = lambda x: "n/a" if x is None else f"{x:.4f}"
     print(f"\nRule 3, pooled against tf Metal: {p['positions']} positions, top-1 {num(p['top1'])} (>= 0.93), "
@@ -687,10 +934,13 @@ def main():
     if not tdir:
         print("Rule 4: no --traces given; NOT checked")
     gate, code = verdict(checked_ok, state, missing, bool(tdir))
-    print(f"\nG6c gate (spec v1.12, re-based): {gate}"
+    print(f"\nG6c gate (spec v1.16, closing form): {gate}"
           + (f"; failing: rule 2 {', '.join(failed)}" if failed else "")
           + ("; rule 3" if not report["pooled"]["pass"] else "") + ("; rule 4" if not tr_ok else ""))
 
+    print(f"\nFor the record (does not gate): v1.12 (re-based) verdict: {report['v112']['verdict']}"
+          + (f"; failing: rule 2 {', '.join(failed12)}" if failed12 else ""))
+    print_rebased(rb)
     print("\nFor the record (does not gate): rule 2 as written in v1.8, and plain v2 (v1.7)")
     print("| Prompt | As written, v1.8 | Plain v2 | Note |")
     print("|---|---|---|---|")
