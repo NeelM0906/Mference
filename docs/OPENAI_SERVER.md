@@ -451,7 +451,8 @@ context is shorter refuses to load: with `--model` the server exits at
 startup, and in library mode the request that asked for it gets HTTP 400
 `context_exceeds_model`. Inkling 2 Mini (native 262,144) is the exception on
 a Mac under 48 GB, where its expert residency plan cannot hold every layer:
-there any larger value, `max` included, runs it at 40,960 tokens, and
+there any larger value, `max` included, runs it at 16,384 tokens (the tested
+maximum on 32 GB), and
 `/v1/models` lists that.
 
 Qwen 3.6 does not reserve its full-attention KV for

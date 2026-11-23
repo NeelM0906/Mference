@@ -52,7 +52,7 @@ import Mference
 
     @Test func inkling2IsCappedWhereLayersAreStagedWhoeverBuiltTheDescriptor() throws {
         let cap = Inkling2MemoryFootprint.stagedHostContextCap
-        #expect(cap == 40_960)
+        #expect(cap == 16_384)
         // A descriptor not built by discovery (no host cap of its own).
         let bare = EngineModelDescriptor(id: "inkling", displayName: "Inkling", engine: .mference,
                                          format: .gturbo(family: .inkling2Loop, checkpointID: nil),

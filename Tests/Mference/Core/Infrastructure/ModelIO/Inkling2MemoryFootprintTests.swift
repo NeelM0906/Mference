@@ -70,12 +70,12 @@ import Testing
         #expect(f.bytes(contextTokens: -1) == f.bytesBeforeContext)
     }
 
-    /// 40,960 tokens on hosts where the plan stages layers (under 48 GB),
+    /// 16,384 tokens on hosts where the plan stages layers (under 48 GB),
     /// none where every layer is resident; no other family has a host cap.
     @Test func contextIsCappedWhereLayersAreStaged() {
         for gigabytes: UInt64 in [24, 32, 36, 47] {
-            #expect(Inkling2MemoryFootprint.contextCap(physicalMemory: gigabytes << 30) == 40_960)
-            #expect(ModelFamily.inkling2Loop.memoryContextCap(physicalMemory: gigabytes << 30) == 40_960)
+            #expect(Inkling2MemoryFootprint.contextCap(physicalMemory: gigabytes << 30) == 16_384)
+            #expect(ModelFamily.inkling2Loop.memoryContextCap(physicalMemory: gigabytes << 30) == 16_384)
         }
         for gigabytes: UInt64 in [48, 64, 128] {
             #expect(Inkling2MemoryFootprint.contextCap(physicalMemory: gigabytes << 30) == nil)
