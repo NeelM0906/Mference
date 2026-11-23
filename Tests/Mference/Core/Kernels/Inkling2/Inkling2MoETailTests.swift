@@ -13,7 +13,8 @@ import MferenceValidationSupport
 /// shape also checks the CPU reference.
 @Suite(.serialized) struct Inkling2MoETailTests {
     private static func compare(shape: Inkling2MoEShape, encoding: Inkling2MoEEncoding, tokens: Int,
-                                seed: UInt64, reference: Bool, expectsTails: Bool = true) throws {
+                                seed: UInt64, reference: Bool, expectsTails: Bool = true,
+                                fixedRoutes: (ids: [UInt32], weights: [Float])? = nil) throws {
         let context = try MetalContext()
         let skipping = try Inkling2MoEKernels(context: context)
         let plain = try Inkling2MoEKernels(context: context, tailFragmentSkip: false)
@@ -21,8 +22,8 @@ import MferenceValidationSupport
                                                        seed: seed, quantized: reference)
         let (hidden, rows) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d,
                                                                d: shape.d, seed: seed &+ 1)
-        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK,
-                                                         seed: seed &+ 2)
+        let routes = fixedRoutes ?? Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts,
+                                                                        topK: shape.topK, seed: seed &+ 2)
         var outputs: [[UInt32]] = [], activations: [[UInt16]] = []
         var tails = 0
         for kernels in [plain, skipping] {
@@ -80,9 +81,21 @@ import MferenceValidationSupport
                          tokens: c.tokens, seed: 0x7A11 + UInt64(c.tokens), reference: true)
     }
 
+    /// Every tail size: top-1 over 32 experts, expert e taking exactly e + 1 tokens, so the tail
+    /// blocks hold 1 to 32 rows and the fragment switch takes each of its four cases.
+    @Test(arguments: [Inkling2MoEEncoding.nvfp4, .q8_0])
+    func everyTailSizeSameBitsAndReference(_ encoding: Inkling2MoEEncoding) throws {
+        var ids: [UInt32] = []
+        for e in 0..<32 { ids += [UInt32](repeating: UInt32(e), count: e + 1) }
+        try Self.compare(shape: Inkling2MoEShape(d: 256, f: 128, experts: 32, topK: 1), encoding: encoding,
+                         tokens: ids.count, seed: 0x7A31, reference: true,
+                         fixedRoutes: (ids, [Float](repeating: 1, count: ids.count)))
+    }
+
     /// Inkling 2 Mini's d and f, 16 experts, top-8: 100 tokens (about 50 rows each: partly filled
-    /// full blocks and tails) and 300 (two full blocks and a tail each).
-    @Test(arguments: [(Inkling2MoEEncoding.nvfp4, 100), (.nvfp4, 300), (.q8_0, 100), (.q8_0, 300)])
+    /// full blocks and tails) and 300 (two full blocks and a tail each). Full tier: the random
+    /// pools are 72 MB (NVFP4) and 135 MB (Q8_0) per case in a debug build.
+    @Test(.fullTier, arguments: [(Inkling2MoEEncoding.nvfp4, 100), (.nvfp4, 300), (.q8_0, 100), (.q8_0, 300)])
     func miniWidthsSameBits(_ c: (encoding: Inkling2MoEEncoding, tokens: Int)) throws {
         try Self.compare(shape: Inkling2MoEShape(d: 2304, f: 1152, experts: 16, topK: 8), encoding: c.encoding,
                          tokens: c.tokens, seed: 0x7A21 + UInt64(c.tokens), reference: false,
