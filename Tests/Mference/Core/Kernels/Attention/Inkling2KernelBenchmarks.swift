@@ -389,4 +389,51 @@ import Testing
         print(String(format: "[ink2-kbench] decode-gate x3 one row: decode form %.1f us, many-row path %.1f us (per visit)",
                      fused.best / 48 * 1e6, rowsPath.best / 48 * 1e6))
     }
+
+    /// A decode step's attention block (with the loop gates), as `Inkling2VisitFixture` encodes it,
+    /// chained 48 times in one command buffer (one token's visits; the same weights each time, so
+    /// the 48 MB SLC flatters every row alike): one compute encoder per kernel, one serial encoder
+    /// per visit, and one serial encoder for all 48.
+    @Test(.enabled(if: enabled && only("serial"))) func serialEncoder() throws {
+        let visits = 48
+        for global in [false, true] {
+            let f = try Inkling2VisitFixture(global: global)
+            let run = try f.makeRun()
+            let fill = f.ctx.queue.makeCommandBuffer()!
+            try f.encode(run, row0: 0, rows: Inkling2VisitFixture.maxRows, oneEncoder: true, into: fill)
+            fill.commit()
+            fill.waitUntilCompleted()
+            run.state.advance(by: Inkling2VisitFixture.maxRows)
+            try run.state.ensureCapacity(tokens: Inkling2VisitFixture.maxRows + 1)
+            let steps = f.steps(run, row0: Inkling2VisitFixture.maxRows, rows: 1)
+            let dispatches = steps.count + 2       // the gate and decode attention dispatch twice each
+            let perKernel = try Self.time(f.ctx) { cb in
+                for _ in 0..<visits {
+                    for step in steps {
+                        let encoder = cb.makeComputeCommandEncoder()!
+                        try step(encoder)
+                        encoder.endEncoding()
+                    }
+                }
+            }
+            let perVisit = try Self.time(f.ctx) { cb in
+                for _ in 0..<visits {
+                    let encoder = cb.makeComputeCommandEncoder()!
+                    for step in steps { try step(encoder) }
+                    encoder.endEncoding()
+                }
+            }
+            let perToken = try Self.time(f.ctx) { cb in
+                let encoder = cb.makeComputeCommandEncoder()!
+                for _ in 0..<visits { for step in steps { try step(encoder) } }
+                encoder.endEncoding()
+            }
+            func us(_ t: (best: Double, median: Double)) -> String {
+                String(format: "%.1f us (median %.1f)", t.best / Double(visits) * 1e6, t.median / Double(visits) * 1e6)
+            }
+            print("[ink2-kbench] serial \(global ? "global" : "window") decode visit, \(steps.count) kernels, "
+                  + "\(dispatches) dispatches, per visit: one encoder per kernel \(us(perKernel)); "
+                  + "one per visit \(us(perVisit)); one for all \(visits) \(us(perToken))")
+        }
+    }
 }

@@ -372,7 +372,7 @@ public final class Inkling2DecodeAttention {
             encoder.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
         }
         encoder.dispatchThreadgroups(MTLSize(width: blocks, height: Inkling2AttentionShape.numKVHeads, depth: 1),
-                                   threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         encoder.setComputePipelineState(merge)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2DecodeParams>.stride, index: 0)
         let gate = a.gate ?? a.sink
@@ -380,7 +380,7 @@ public final class Inkling2DecodeAttention {
             encoder.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
         }
         encoder.dispatchThreadgroups(MTLSize(width: Inkling2AttentionShape.numQHeads, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 }
 
