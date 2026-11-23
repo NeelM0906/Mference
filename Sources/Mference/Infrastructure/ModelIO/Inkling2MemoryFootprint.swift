@@ -13,10 +13,17 @@ public struct Inkling2MemoryFootprint: Sendable, Equatable {
     /// Routed experts read once and kept (the looped core's layers on 30 to
     /// 47 GB hosts, every layer from 48 GB).
     public let expertResidentBytes: UInt64
-    /// Staging slabs for the layers read one layer ahead. The staged layers'
-    /// files are not counted: wherever the plan stages, the runtime reads
-    /// them uncached (`Inkling2StagedReadMode.forHost`), so their pages do
-    /// not stay in the file cache.
+    /// Staging slabs for the layers the plan does not hold. Below 48 GB that
+    /// is three slabs filling what the runner's 40% expert guard
+    /// (`Inkling2ExpertResidencyPlan.expertBudget`) leaves beside the resident
+    /// layers, carved into decode slots for the staged layers; prefill stages
+    /// whole layers through them (the coordinator's three-slab ruling of
+    /// 2026-11-23, K2's hand-in 06). At
+    /// 32 GB that is 6.84 GB: 88 decode slots for four staged layers and 104
+    /// for the other eight, 13.74 GB of experts bound with the resident ones. The staged layers' files are not
+    /// counted: wherever the plan stages, the runtime reads them uncached
+    /// (`Inkling2StagedReadMode.forHost`), so their pages do not stay in the
+    /// file cache.
     public let expertStagingBytes: UInt64
     /// `model_weights.bin` and the sidecars: the install less its expert pool.
     public let denseBytes: UInt64
@@ -29,14 +36,21 @@ public struct Inkling2MemoryFootprint: Sendable, Equatable {
 
     /// K3's sliding-window rings (480 MiB) and the runner's and MoE's scratch
     /// at chunk 2,048 (about 800 MiB), as K3 and K4 sized them on 2026-11-23.
-    /// Provisional until the C2 run with a 4K-token prompt reports its
-    /// footprint. The only whole-model measurement so far (K4's CLI on the
-    /// real install, bounded path, 5-token prompt, context 4,096): peak
-    /// footprint 9.47 GB and max RSS 9.34 GB against 9.07 GB of resident
-    /// experts and slabs; the footprint does not count the 1.82 GB of mapped
-    /// dense weights. So for short prompts this estimate (12.24 GB before
-    /// context on a 32 GB Mac) is about 1 GB conservative: a 5-token prompt
-    /// does not exercise the chunk-2,048 scratch.
+    /// Chunk 2,048 is Inkling 2's prefill chunk on every path
+    /// (`RuntimeConfiguration.familyPrefillChunkTokens`).
+    ///
+    /// Against the measured footprint (K2, 2026-11-23, the three-slab layout
+    /// on a 32 GB Mac): 15.3 GB after prefilling a 4K-token prompt at chunk
+    /// 2,048 (`phys_footprint` logged after each prefill), and a 14.2 GB peak
+    /// decoding. Neither counts the mapped `model_weights.bin` (1.82 GB,
+    /// file-backed and clean). This estimate on that Mac is 16.92 GB before
+    /// context and 17.05 GB at a 4,096-token context; less its dense term
+    /// (1.83 GB: the weights file and the sidecars), 15.22 GB. That is within 0.1 GB of the prefill peak
+    /// and about 1.0 GB above the decode peak, which does not touch the chunk
+    /// scratch. The app shows it at 32K tokens (`EngineProductSlot
+    /// .estimateContextTokens`), 17.99 GB with the dense weights. The earlier
+    /// two-slab layout's estimate was 12.24 GB before context, against a
+    /// measured peak of 9.47 GB on a 5-token prompt (K4).
     public static let stateBytes: UInt64 = (480 << 20) + (800 << 20)
 
     /// Everything but the context's global KV.
