@@ -112,6 +112,22 @@ public final class Inkling2Projection {
                        tokens: Int, inputs: Int, outStride: Int,
                        segments: [Inkling2ProjectionSegment],
                        path forced: Path? = nil) -> Path {
+        commandBuffer.inkling2Compute {
+            encode(encoder: $0, weights: weights, input: input, output: output, outputOffset: outputOffset,
+                   tokens: tokens, inputs: inputs, outStride: outStride, segments: segments, path: forced)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    @discardableResult
+    public func encode(encoder: MTLComputeCommandEncoder,
+                       weights: MTLBuffer,
+                       input: MTLBuffer,
+                       output: MTLBuffer, outputOffset: Int = 0,
+                       tokens: Int, inputs: Int, outStride: Int,
+                       segments: [Inkling2ProjectionSegment],
+                       path forced: Path? = nil) -> Path {
         precondition(tokens > 0 && inputs > 0 && inputs % 32 == 0)
         precondition(!segments.isEmpty && segments.count <= Self.maxSegments)
         precondition(outputOffset % MemoryLayout<Float>.stride == 0)
@@ -133,8 +149,6 @@ public final class Inkling2Projection {
             }
         }
         var params = Self.packParams(tokens: tokens, inputs: inputs, outStride: outStride, table: table)
-
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         switch path {
         case .tiled: encoder.setComputePipelineState(tiled)
         case .tiled64: encoder.setComputePipelineState(tiled64)
@@ -163,7 +177,6 @@ public final class Inkling2Projection {
                 MTLSize(width: groups, height: (tokens + Self.tensorTileTokens - 1) / Self.tensorTileTokens, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         }
-        encoder.endEncoding()
         return path
     }
 
@@ -172,6 +185,19 @@ public final class Inkling2Projection {
     /// strides in floats, multiples of 4). For the loop gates' products, which
     /// the vendor keeps in FP32.
     public func encodeFloat(commandBuffer: MTLCommandBuffer,
+                            weights: MTLBuffer, input: MTLBuffer,
+                            output: MTLBuffer, outputOffset: Int = 0,
+                            tokens: Int, inputs: Int, outStride: Int,
+                            segments: [Inkling2ProjectionSegment]) {
+        commandBuffer.inkling2Compute {
+            encodeFloat(encoder: $0, weights: weights, input: input, output: output, outputOffset: outputOffset,
+                        tokens: tokens, inputs: inputs, outStride: outStride, segments: segments)
+        }
+    }
+
+    /// The same, into `encoder`: a serial compute encoder the caller owns and ends. A serial
+    /// encoder orders its dispatches, so no barrier is needed before or after this one.
+    public func encodeFloat(encoder: MTLComputeCommandEncoder,
                             weights: MTLBuffer, input: MTLBuffer,
                             output: MTLBuffer, outputOffset: Int = 0,
                             tokens: Int, inputs: Int, outStride: Int,
@@ -188,7 +214,6 @@ public final class Inkling2Projection {
             groups += (segment.rows + Self.tileRows - 1) / Self.tileRows
         }
         var params = Self.packParams(tokens: tokens, inputs: inputs, outStride: outStride, table: table)
-        let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(float64)
         params.withUnsafeMutableBytes { encoder.setBytes($0.baseAddress!, length: $0.count, index: 0) }
         encoder.setBuffer(weights, offset: 0, index: 1)
@@ -196,7 +221,6 @@ public final class Inkling2Projection {
         encoder.setBuffer(output, offset: outputOffset, index: 3)
         encoder.dispatchThreadgroups(MTLSize(width: (tokens + 63) / 64, height: groups, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     /// `Inkling2ProjParams`: four uints, then eight 32-byte segments
