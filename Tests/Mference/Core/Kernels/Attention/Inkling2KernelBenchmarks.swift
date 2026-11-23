@@ -393,7 +393,7 @@ import Testing
     /// A decode step's attention block (with the loop gates), as `Inkling2VisitFixture` encodes it,
     /// chained 48 times in one command buffer (one token's visits; the same weights each time, so
     /// the 48 MB SLC flatters every row alike): one compute encoder per kernel, one serial encoder
-    /// per visit, and one serial encoder for all 48.
+    /// per visit, and one serial encoder for all 48; the three interleaved over 20 rounds.
     @Test(.enabled(if: enabled && only("serial"))) func serialEncoder() throws {
         let visits = 48
         for global in [false, true] {
@@ -407,33 +407,78 @@ import Testing
             try run.state.ensureCapacity(tokens: Inkling2VisitFixture.maxRows + 1)
             let steps = f.steps(run, row0: Inkling2VisitFixture.maxRows, rows: 1)
             let dispatches = steps.count + 2       // the gate and decode attention dispatch twice each
-            let perKernel = try Self.time(f.ctx) { cb in
-                for _ in 0..<visits {
-                    for step in steps {
+            let encodings: [(MTLCommandBuffer) throws -> Void] = [
+                { cb in                                   // one compute encoder per kernel
+                    for _ in 0..<visits {
+                        for step in steps {
+                            let encoder = cb.makeComputeCommandEncoder()!
+                            try step(encoder)
+                            encoder.endEncoding()
+                        }
+                    }
+                },
+                { cb in                                   // one serial encoder per visit
+                    for _ in 0..<visits {
                         let encoder = cb.makeComputeCommandEncoder()!
-                        try step(encoder)
+                        for step in steps { try step(encoder) }
                         encoder.endEncoding()
                     }
-                }
-            }
-            let perVisit = try Self.time(f.ctx) { cb in
-                for _ in 0..<visits {
+                },
+                { cb in                                   // one serial encoder for all 48
                     let encoder = cb.makeComputeCommandEncoder()!
-                    for step in steps { try step(encoder) }
+                    for _ in 0..<visits { for step in steps { try step(encoder) } }
                     encoder.endEncoding()
+                },
+            ]
+            // The three encodings interleaved, round after round, so contention from other GPU work
+            // hits them alike; the minimum of each is the figure.
+            var samples = [[Double]](repeating: [], count: encodings.count)
+            for round in 0...20 {
+                for (mode, encode) in encodings.enumerated() {
+                    let cb = f.ctx.queue.makeCommandBuffer()!
+                    try encode(cb)
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    #expect(cb.status == .completed)
+                    if round > 0 { samples[mode].append(cb.gpuEndTime - cb.gpuStartTime) }
                 }
             }
-            let perToken = try Self.time(f.ctx) { cb in
-                let encoder = cb.makeComputeCommandEncoder()!
-                for _ in 0..<visits { for step in steps { try step(encoder) } }
-                encoder.endEncoding()
+            let stats = samples.map { s -> (best: Double, median: Double) in
+                let sorted = s.sorted()
+                return (sorted[0], sorted[sorted.count / 2])
             }
+            let (perKernel, perVisit, perToken) = (stats[0], stats[1], stats[2])
             func us(_ t: (best: Double, median: Double)) -> String {
                 String(format: "%.1f us (median %.1f)", t.best / Double(visits) * 1e6, t.median / Double(visits) * 1e6)
             }
             print("[ink2-kbench] serial \(global ? "global" : "window") decode visit, \(steps.count) kernels, "
                   + "\(dispatches) dispatches, per visit: one encoder per kernel \(us(perKernel)); "
                   + "one per visit \(us(perVisit)); one for all \(visits) \(us(perToken))")
+            guard !global else { continue }
+            // For scale, in the same conditions: 480 chained tiny dispatches (the one-row tail update).
+            let vt = run.state.tails(slot: f.slot)
+            let tailRuns = vt.keyValueRuns(keyColumn: f.columns.keys, valueColumn: f.columns.values)
+            let chain = 480
+            var tiny = [[Double]](repeating: [], count: 2)
+            for round in 0...20 {
+                for mode in 0..<2 {
+                    let cb = f.ctx.queue.makeCommandBuffer()!
+                    let shared = mode == 1 ? cb.makeComputeCommandEncoder()! : nil
+                    for _ in 0..<chain {
+                        let encoder = shared ?? cb.makeComputeCommandEncoder()!
+                        f.tails.encode(encoder: encoder, x: .init(run.y), xStride: f.stride, rows: 1, tails: vt.keys,
+                                       runs: tailRuns)
+                        if shared == nil { encoder.endEncoding() }
+                    }
+                    shared?.endEncoding()
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    if round > 0 { tiny[mode].append(cb.gpuEndTime - cb.gpuStartTime) }
+                }
+            }
+            let tinyBest = tiny.map { $0.min()! / Double(chain) * 1e6 }
+            print(String(format: "[ink2-kbench] serial tiny dispatch (tail update, %ld chained): one encoder each %.2f us, "
+                         + "one serial encoder %.2f us", chain, tinyBest[0], tinyBest[1]))
         }
     }
 }
