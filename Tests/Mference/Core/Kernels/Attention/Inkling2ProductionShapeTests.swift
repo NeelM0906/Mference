@@ -68,7 +68,7 @@ import MferenceValidationSupport
                     sink: .init(sinkBuffer), gate: .init(gateBuffer), output: .init(out), rows: rows,
                     startPosition: start, mask: mask), variant: variant)
             }
-            #expect(RelError.compute(actual: S.readHalves(out, count: rows * 3072), reference: reference)
+            #expect(RelError.computeStrict(actual: S.readHalves(out, count: rows * 3072), reference: reference)
                     < Tolerance.fp16Reduction, "variant \(variant)")
         }
         S.run(ctx) { cb in
@@ -78,7 +78,7 @@ import MferenceValidationSupport
                 gate: .init(gateBuffer, offset: (rows - 1) * 3072 * 4), output: .init(last), partials: .init(partials),
                 position: positions - 1, mask: mask))
         }
-        #expect(RelError.compute(actual: S.readHalves(last, count: 3072),
+        #expect(RelError.computeStrict(actual: S.readHalves(last, count: 3072),
                                  reference: Array(reference[((rows - 1) * 3072)...])) < Tolerance.fp16Reduction)
     }
 }

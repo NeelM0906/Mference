@@ -111,7 +111,7 @@ enum Inkling2TestSupport {
         }
         // Weights decode to half in the tiled paths (d*q rounded); FP32 in the rows path.
         let tolerance: Float = path == .rows ? 1e-4 : 2e-3
-        #expect(RelError.compute(actual: actual, reference: expected) < tolerance)
+        #expect(RelError.computeStrict(actual: actual, reference: expected) < tolerance)
     }
 }
 
@@ -190,6 +190,6 @@ enum Inkling2TestSupport {
             window: window, logScale: logScale)
         if c.gate { reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: gate) }
         let got = Inkling2TestSupport.readHalves(outBuffer, count: c.rows * hq * d)
-        #expect(RelError.compute(actual: got, reference: reference) < Tolerance.fp16Reduction)
+        #expect(RelError.computeStrict(actual: got, reference: reference) < Tolerance.fp16Reduction)
     }
 }

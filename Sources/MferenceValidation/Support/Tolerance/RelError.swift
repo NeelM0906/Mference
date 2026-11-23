@@ -15,6 +15,22 @@ public enum RelError {
         return maxAbsDiff / max(refNorm, 1e-6)
     }
 
+    /// `compute`, except that any non-finite element (NaN or an infinity) in
+    /// either input makes the error `.infinity`.
+    ///
+    /// `compute` cannot see NaN: Swift's `max(x, y)` returns `x` when `y` is
+    /// NaN, so a NaN in either input leaves its running maximum unchanged, and
+    /// an infinity in `reference` divides the error down to zero. A test that
+    /// NaN-fills an output to catch unwritten elements therefore passes on the
+    /// leftovers under `compute`; under this it fails.
+    public static func computeStrict(actual: [Float], reference: [Float]) -> Float {
+        precondition(actual.count == reference.count, "length mismatch")
+        for i in 0..<actual.count where !actual[i].isFinite || !reference[i].isFinite {
+            return .infinity
+        }
+        return compute(actual: actual, reference: reference)
+    }
+
     public static func maxAbsDiff(_ a: [Float], _ b: [Float]) -> Float {
         precondition(a.count == b.count, "length mismatch")
         var m: Float = 0

@@ -85,7 +85,7 @@ import MferenceValidationSupport
         let c = AttentionCase(seed: seed)
         let reference = c.run(window: window)
         let folded = Self.foldedSink(c, window: window)
-        #expect(RelError.compute(actual: folded, reference: reference) < 1e-5)
+        #expect(RelError.computeStrict(actual: folded, reference: reference) < 1e-5)
     }
 
     @Test func attentionWithoutBiasOrSinkMatchesGenericReference() {
@@ -97,7 +97,7 @@ import MferenceValidationSupport
             let generic = AttentionRef.apply(q: c.q, k: c.k, v: c.v, headDim: c.d,
                                              numQHeads: c.hq, numKVHeads: c.hkv,
                                              seqLen: c.start + 1, window: window)
-            #expect(RelError.compute(actual: ours, reference: generic) < 1e-5)
+            #expect(RelError.computeStrict(actual: ours, reference: generic) < 1e-5)
         }
     }
 
@@ -122,7 +122,7 @@ import MferenceValidationSupport
         var wide = c
         wide.extent = 40
         wide.table = c.table + [Float](repeating: 0, count: (40 - 3) * c.dRel)
-        #expect(RelError.compute(actual: wide.run(window: nil), reference: short) < 1e-6)
+        #expect(RelError.computeStrict(actual: wide.run(window: nil), reference: short) < 1e-6)
         c.table[0] += 1
         #expect(c.run(window: nil) != short)
     }
@@ -155,7 +155,7 @@ import MferenceValidationSupport
             for j in 0..<(c.hq * c.d) { c.q[i * c.hq * c.d + j] *= tau }
             for j in 0..<(c.hq * c.dRel) { c.rel[i * c.hq * c.dRel + j] *= tau }
         }
-        #expect(RelError.compute(actual: c.run(window: nil), reference: scaled) < 1e-5)
+        #expect(RelError.computeStrict(actual: c.run(window: nil), reference: scaled) < 1e-5)
         #expect(logScale.tau(position: 2) == 1)
         #expect(abs(Inkling2AttentionRef.LogScale().tau(position: 131_071) - (1 + 0.1 * log(16.0))) < 1e-6)
     }
