@@ -165,4 +165,42 @@ import MferenceValidationSupport
             #expect(RelError.computeStrict(actual: got, reference: reference) < 1e-4, "controller \(c)")
         }
     }
+
+    /// The decode gate at other shapes than the model's: one controller at rank 128 (the
+    /// combine's rank loop runs twice per lane), two at rank 16 (most lanes idle), and a width
+    /// whose half is not a multiple of 128 (the down product's last lane stride is partial).
+    @Test(arguments: [(1, 128, 1152), (2, 16, 1152)])
+    func decodeGateMatchesReferenceAtOtherShapes(controllers count: Int, rank: Int, width: Int) throws {
+        let ctx = try MetalContext()
+        let gate = try Inkling2MessageGateKernels(library: Inkling2KernelLibrary(context: ctx))
+        var rng = SeedTree(0x6e00 + UInt64(rank)).key("ink2-gate-decode-shapes")
+        let x = S.random(width, &rng, -3, 3)
+        let messages = (0..<count).map { _ in S.random(width, &rng, -3, 3) }
+        // Activations: [x | m0 | m1 | out0 | out1], outputs NaN-filled.
+        let acts = S.buffer(ctx.device, floats: x + messages.flatMap { $0 } + [Float](repeating: .nan, count: count * width))
+        var weights: [Float] = []
+        var controllers: [Inkling2MessageGateKernels.DecodeController] = []
+        var refs: [(down: [Float], forget: [Float], gain: [Float])] = []
+        for c in 0..<count {
+            let down = S.random(rank * 2 * width, &rng, -0.03, 0.03)
+            let forget = S.random(width * rank, &rng, -0.2, 0.2), gain = S.random(width * rank, &rng, -0.2, 0.2)
+            let base = weights.count * 4
+            weights += down + forget + gain
+            refs.append((down, forget, gain))
+            controllers.append(.init(down: base, forget: base + down.count * 4, gain: base + (down.count + forget.count) * 4,
+                                     x: 0, message: (1 + c) * width, output: (1 + count + c) * width))
+        }
+        let z = ctx.device.makeBuffer(length: count * rank * 4, options: .storageModeShared)!
+        S.run(ctx) { cb in
+            gate.encodeDecode(commandBuffer: cb, weights: S.buffer(ctx.device, floats: weights), activations: acts,
+                              z: .init(z), controllers: controllers, width: width, rank: rank)
+        }
+        for c in 0..<count {
+            let reference = Inkling2LoopRef.messageGate(x: x, message: messages[c], down: refs[c].down,
+                                                        forget: refs[c].forget, gain: refs[c].gain,
+                                                        rows: 1, hidden: width, rank: rank)
+            let got = S.readFloats(acts, count: width, offset: controllers[c].output * 4)
+            #expect(RelError.computeStrict(actual: got, reference: reference) < 1e-4, "controller \(c)")
+        }
+    }
 }

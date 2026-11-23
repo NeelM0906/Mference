@@ -156,6 +156,7 @@ public final class Inkling2MessageGateKernels {
             precondition([c.down, c.forget, c.gain].allSatisfy { $0 % 16 == 0 })
             precondition([c.x, c.message, c.output].allSatisfy { $0 % 4 == 0 })
             precondition(!overlaps(c.output, c.message), "controller \(i) output overwrites its message")
+            precondition(c.output == c.x || !overlaps(c.output, c.x), "controller \(i) output partly overlaps its x")
             for (j, other) in controllers.enumerated() where j != i {
                 precondition(!overlaps(c.output, other.x) && !overlaps(c.output, other.message)
                              && !overlaps(c.output, other.output),
