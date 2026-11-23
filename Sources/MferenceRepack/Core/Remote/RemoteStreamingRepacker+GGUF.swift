@@ -170,9 +170,13 @@ extension RemoteStreamingRepacker {
         try recordOutputFile(relativePath: "packed_experts/layout.json", path: layoutPath, progress: progress)
 
         let tokenizerDir = (paths.partialDirectory as NSString).appendingPathComponent("tokenizer")
-        for (name, data) in [("tokenizer.json", sidecars.tokenizerJSON),
-                             ("tokenizer_config.json", sidecars.tokenizerConfigJSON),
-                             ("chat_template.jinja", Data(sidecars.chatTemplate.utf8))] {
+        var sidecarFiles = [("tokenizer.json", sidecars.tokenizerJSON),
+                            ("tokenizer_config.json", sidecars.tokenizerConfigJSON),
+                            ("chat_template.jinja", Data(sidecars.chatTemplate.utf8))]
+        if let generation = sidecars.generationConfigJSON {
+            sidecarFiles.append(("generation_config.json", generation))
+        }
+        for (name, data) in sidecarFiles {
             let path = (tokenizerDir as NSString).appendingPathComponent(name)
             try writeSmall(path: path, data: data)
             try recordOutputFile(relativePath: "tokenizer/" + name, path: path, progress: progress)

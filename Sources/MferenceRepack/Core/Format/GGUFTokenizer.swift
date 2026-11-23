@@ -46,6 +46,35 @@ enum GGUFTokenizer {
         let tokenizerJSON: Data
         let tokenizerConfigJSON: Data
         let chatTemplate: String
+        /// `generation_config.json` from the GGUF's `general.sampling.*`
+        /// defaults and its EOS / padding ids; nil when the file carries no
+        /// sampling defaults.
+        let generationConfigJSON: Data?
+    }
+
+    /// The sampling defaults a GGUF records, as `generation_config.json`
+    /// writes them: `do_sample` and `temperature` always, `top_k`, `top_p`
+    /// and `min_p` only when they restrict sampling (the vendor file of
+    /// Inkling 2 Mini sets none of them), and the EOS and padding ids.
+    static func generationConfig(metadata md: [String: GGUF.Value], eos: Int?, pad: Int?) throws -> Data? {
+        func float(_ key: String) -> Double? {
+            switch md[key] {
+            case .f32(let f)?: return Double(f)
+            case .f64(let d)?: return d
+            default: return nil
+            }
+        }
+        guard let temperature = float("general.sampling.temp") else { return nil }
+        var config: [String: Any] = ["do_sample": temperature > 0, "temperature": temperature]
+        if let topK = md["general.sampling.top_k"]?.uint64.flatMap({ Int(exactly: $0) }), topK > 0 {
+            config["top_k"] = topK
+        }
+        if let topP = float("general.sampling.top_p"), topP < 1 { config["top_p"] = topP }
+        if let minP = float("general.sampling.min_p"), minP > 0 { config["min_p"] = minP }
+        if let eos { config["eos_token_id"] = eos }
+        if let pad { config["pad_token_id"] = pad }
+        return try JSONSerialization.data(withJSONObject: config,
+                                          options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 
     static func synthesize(metadata md: [String: GGUF.Value], path: String) throws -> Sidecars {
@@ -164,6 +193,7 @@ enum GGUFTokenizer {
         let opts: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes]
         return Sidecars(tokenizerJSON: try JSONSerialization.data(withJSONObject: tokenizer, options: opts),
                         tokenizerConfigJSON: try JSONSerialization.data(withJSONObject: config, options: opts),
-                        chatTemplate: template)
+                        chatTemplate: template,
+                        generationConfigJSON: try generationConfig(metadata: md, eos: eos, pad: pad))
     }
 }

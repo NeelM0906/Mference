@@ -114,7 +114,7 @@ struct Inkling2Shape {
 
     func fixture() -> GGUFFixture {
         let a = "inkling2_loop."
-        var md: [(String, GGUFFixture.Value)] = [
+        let md: [(String, GGUFFixture.Value)] = [
             ("general.architecture", .string("inkling2_loop")),
             (a + "block_count", .u32(UInt32(layers))),
             (a + "context_length", .u32(1_048_576)),
@@ -161,6 +161,10 @@ struct Inkling2Shape {
             ("tokenizer.ggml.add_bos_token", .bool(false)),
             ("tokenizer.chat_template", .string("{{ messages[0]['content'] }}")),
             (a + "loop.varying", .bool(false)),
+            ("general.sampling.temp", .f32(1.0)),
+            ("general.sampling.top_k", .u32(0)),
+            ("general.sampling.top_p", .f32(1.0)),
+            ("general.sampling.min_p", .f32(0.0)),
         ]
         _ = md.count
         let h = UInt64(hidden), w = UInt64(width), e = UInt64(experts)
@@ -393,6 +397,13 @@ struct Inkling2Shape {
         #expect(config["eos_token"] as? String == "<|end|>" && config["pad_token"] as? String == "<|pad|>")
         #expect(config["add_bos_token"] as? Bool == false && config["bos_token"] is NSNull)
         #expect(sidecars.chatTemplate == "{{ messages[0]['content'] }}")
+        // The vendor's generation_config.json: sampling on at temperature 1,
+        // no top-k / top-p / min-p, EOS and padding ids.
+        let generationData = try #require(sidecars.generationConfigJSON)
+        let generation = try #require(try JSONSerialization.jsonObject(with: generationData) as? [String: Any])
+        #expect(Set(generation.keys) == ["do_sample", "temperature", "eos_token_id", "pad_token_id"])
+        #expect(generation["do_sample"] as? Bool == true && generation["temperature"] as? Double == 1.0)
+        #expect(generation["eos_token_id"] as? Int == 4 && generation["pad_token_id"] as? Int == 5)
     }
 
     // MARK: - Local install end to end
@@ -435,7 +446,7 @@ struct Inkling2Shape {
         let source = try #require(manifest["source"] as? [String: Any])
         #expect(source["kind"] as? String == "gguf" && source["pinFingerprint"] as? String == pin.fingerprint)
         #expect(manifest["sourceSnapshotHash"] as? String == "sha256:" + pin.fingerprint)
-        for name in ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja"] {
+        for name in ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json"] {
             #expect(FileManager.default.fileExists(atPath: "\(output)/tokenizer/\(name)"))
         }
 
