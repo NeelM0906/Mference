@@ -128,7 +128,8 @@ import MferenceValidationSupport
             try Inkling2SyntheticPool.make(device: context.device, encoding: .nvfp4, shape: shape,
                                            seed: 0x2B20 + UInt64($0), quantized: true)
         }
-        let (directory, files) = try Self.writeLayers(layers, header: 16384)
+        // A header off the page boundary: the mapped pools start mid-page.
+        let (directory, files) = try Self.writeLayers(layers, header: 4100)
         defer { try? FileManager.default.removeItem(at: directory) }
         let specs = layers.enumerated().map { layer, pool in
             Inkling2ExpertLayerSpec(file: files[layer]!, encoding: .nvfp4, expertStride: pool.pool.expertStride,
@@ -194,5 +195,25 @@ import MferenceValidationSupport
         #expect(throws: Inkling2ExpertStore.StoreError.visitNotStarted(layer: 1)) {
             try store.endPrefillVisit(layer: 1, commandBuffer: context.queue.makeCommandBuffer()!)
         }
+
+        // A chunk that fails while encoding: its command buffer is dropped,
+        // the open visits are abandoned, and the next chunk runs normally.
+        let dropped = context.queue.makeCommandBuffer()!
+        _ = try store.beginPrefillVisit(layer: 1, commandBuffer: dropped)
+        _ = try store.beginPrefillVisit(layer: 2, commandBuffer: dropped)
+        try store.abandonOpenVisits()
+        let again = context.queue.makeCommandBuffer()!
+        let againOut = output()
+        let pool = try store.beginPrefillVisit(layer: 2, commandBuffer: again)
+        let encoder = again.makeComputeCommandEncoder()!
+        kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: pool, scratch: scratch,
+                              tokens: tokens, out: againOut, outStride: shape.d)
+        encoder.endEncoding()
+        try store.endPrefillVisit(layer: 2, commandBuffer: again)
+        again.commit()
+        again.waitUntilCompleted()
+        store.staging?.drain()
+        #expect(again.status == .completed && store.staging?.error == nil)
+        #expect(Inkling2MoETestSupport.read(againOut, as: Float.self, count: count) == expected[2])
     }
 }

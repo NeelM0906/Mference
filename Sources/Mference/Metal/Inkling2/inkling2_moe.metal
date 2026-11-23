@@ -12,8 +12,9 @@ using namespace metal;
 //
 // Pieces, each one or two dispatches, with no CPU readback between them:
 //   router        F32 logits, sigmoid, biased top-8, normalized weights x 8
-//   route plan    count, prefix, scatter: pairs grouped by expert and a list
-//                 of 64-row work blocks, plus indirect dispatch arguments
+//   route plan    count, prefix, scatter: pairs grouped by expert, a list of
+//                 64-row blocks and of 32-row tail blocks (an expert's last
+//                 1-32 rows), plus four indirect dispatch records
 //   gate-up       grouped GEMM, weights decoded a tile at a time into half
 //                 threadgroup tiles, float accumulators, the per-expert scale
 //                 and the SITU activation in the epilogue
@@ -641,7 +642,7 @@ kernel void inkling2_moe_input_quant(
     ushort tid  [[thread_index_in_threadgroup]],
     ushort sg   [[simdgroup_index_in_threadgroup]],
     ushort lane [[thread_index_in_simdgroup]]) {
-    #pragma clang fp contract(off)
+    #pragma clang fp contract(off) reassociate(off)
     threadgroup float values[4096];
     threadgroup float maxima[4];
     const float weight = q.weight_stride != 0u ? weights[ulong(row) * q.weight_stride] : 1.0f;
@@ -691,7 +692,8 @@ kernel void inkling2_moe_input_quant(
     // NVFP4 four-over-six (Ollama's port of the vendor's quantizer).
     const float normalizer = min(precise::divide(1536.0f, row_max), FLT_MAX);
     const float decoder = precise::divide(1.0f, normalizer);
-    const float outer = row_max * precise::divide(1.0f, 1536.0f);
+    const float outer = row_max * precise::divide(1.0f, 1536.0f);     // the error comparison's scale
+    const float restore = precise::divide(row_max, 1536.0f);           // the output's, as the reference
     for (uint b = tid; b < q.width / 16u; b += kI2Threads) {
         float block_max = 0.0f;
         for (uint i = 0; i < 16; ++i) block_max = max(block_max, fabs(values[b * 16u + i]));
@@ -708,7 +710,7 @@ kernel void inkling2_moe_input_quant(
         const bool four = error_b < error_a;
         const float inv = four ? inv_b : inv_a, scale = four ? scale_b : scale_a;
         for (uint i = 0; i < 16; ++i) {
-            out[b * 16u + i] = half(i2_round_e2m1(values[b * 16u + i] * inv) * scale * outer);
+            out[b * 16u + i] = half(i2_round_e2m1(values[b * 16u + i] * inv) * scale * restore);
         }
     }
 }

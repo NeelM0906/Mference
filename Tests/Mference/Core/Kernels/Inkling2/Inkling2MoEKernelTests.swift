@@ -289,8 +289,9 @@ import MferenceValidationSupport
     }
 
     /// The input-quantization flag end to end against the reference's switch,
-    /// with the same FP16 inputs and FP16-rounded activations. The quantizer
-    /// kernel itself is checked exactly below; here the activations come from
+    /// through both grouped-GEMM variants, with the same FP16 inputs and
+    /// FP16-rounded activations. The quantizer kernel itself is checked bit
+    /// for bit below; here the activations come from
     /// different summation orders and a fast `tanh`, and a coarse quantizer
     /// turns an ulp on a rounding boundary into a whole step (E2M1: up to a
     /// third of the block maximum; Q8_0: 1/127). So both modes keep the
@@ -298,10 +299,14 @@ import MferenceValidationSupport
     /// element error has the same bound for Q8_0 blocks and 0.1 for the
     /// vendor rule.
     @Test(arguments: [(Inkling2MoEEncoding.nvfp4, Inkling2MoEInputQuantization.q8_0Blocks),
-                      (.nvfp4, .vendorRequired), (.q8_0, .q8_0Blocks), (.q8_0, .vendorRequired)])
-    func inputQuantizationMatchesReference(_ c: (encoding: Inkling2MoEEncoding, mode: Inkling2MoEInputQuantization)) throws {
+                      (.nvfp4, .vendorRequired), (.q8_0, .q8_0Blocks), (.q8_0, .vendorRequired)],
+          Inkling2MoEGEMMVariant.allCases)
+    func inputQuantizationMatchesReference(_ c: (encoding: Inkling2MoEEncoding, mode: Inkling2MoEInputQuantization),
+                                           variant: Inkling2MoEGEMMVariant) throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
+        guard kernels.availableVariants.contains(variant) else { return }
+        kernels.variant = variant
         let shape = Self.small
         let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: c.encoding, shape: shape,
                                                        seed: 0x2A20, quantized: true)
@@ -348,25 +353,29 @@ import MferenceValidationSupport
         #expect(err < bound, "prefill rel err \(err)")
         let l1 = zip(got, flat).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / flat.reduce(Float(0)) { $0 + abs($1) }
         #expect(l1 < Tolerance.fp16Reduction, "prefill L1 rel err \(l1)")
-        let decodeErr = RelError.compute(actual: Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d),
-                                         reference: want[0])
+        let decoded = Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d)
+        let decodeErr = RelError.compute(actual: decoded, reference: want[0])
         #expect(decodeErr < bound, "decode rel err \(decodeErr)")
+        let decodeL1 = zip(decoded, want[0]).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / want[0].reduce(Float(0)) { $0 + abs($1) }
+        #expect(decodeL1 < Tolerance.fp16Reduction, "decode L1 rel err \(decodeL1)")
         // The pass changes the result: the unquantized output differs.
         let plain = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
         #expect(RelError.compute(actual: got, reference: plain.flatMap { $0 }) > 1e-4)
     }
 
-    /// The input-quantization kernel on its own: many rows, with and without
-    /// row weights (read at a 16-byte stride as from `I2Pair`), against the
-    /// reference quantizer on the same FP16 inputs.
+    /// The input-quantization kernel on its own, bit for bit against the
+    /// reference quantizer on the same FP16 inputs (rounded to FP16 as the
+    /// kernel stores them): many rows, with and without row weights (read at
+    /// a 16-byte stride as from `I2Pair`), at small and production widths.
     @Test(arguments: [(Inkling2MoEEncoding.nvfp4, Inkling2MoEInputQuantization.vendorRequired),
-                      (.nvfp4, .q8_0Blocks), (.q8_0, .vendorRequired)])
-    func inputQuantizationKernelMatchesReference(_ c: (encoding: Inkling2MoEEncoding, mode: Inkling2MoEInputQuantization)) throws {
+                      (.nvfp4, .q8_0Blocks), (.q8_0, .vendorRequired)], [128, 1152, 2304])
+    func inputQuantizationKernelMatchesReference(_ c: (encoding: Inkling2MoEEncoding, mode: Inkling2MoEInputQuantization),
+                                                 width: Int) throws {
         let context = try MetalContext()
         let kernels = try Inkling2MoEKernels(context: context)
-        let rows = 160, width = 128
+        let rows = width == 128 ? 160 : 24
         let (source, values) = Inkling2MoETestSupport.halfBuffer(context.device, rows: rows, stride: width, d: width,
-                                                                 seed: 0x2A30, range: 3)
+                                                                 seed: 0x2A30 + UInt64(width), range: 3)
         var rng = SeedTree(0x2A31).key("row-weights")
         let weights = (0..<rows).map { _ in rng.uniform(0.2, 2) }
         var records = [Float](repeating: 0, count: rows * 4)
@@ -383,15 +392,49 @@ import MferenceValidationSupport
                                                 destination: destination, destinationStride: width, rows: rows, width: width,
                                                 rowWeights: weighted ? (weightBuffer, 8, 4) : nil)
             }
-            let got = Inkling2MoETestSupport.read(destination, as: Float16.self, count: rows * width).map(Float.init)
-            var worst: Float = 0, worstRow = -1
+            let got = Inkling2MoETestSupport.read(destination, as: Float16.self, count: rows * width).map(\.bitPattern)
+            var mismatches = 0, firstRow = -1
             for r in 0..<rows {
                 let input = weighted ? values[r].map { $0 * weights[r] } : values[r]
-                let want = Inkling2ExpertRef.quantizedInput(input, encoding: encoding, mode: mode).map { Float(Float16($0)) }
-                let err = RelError.compute(actual: Array(got[(r * width)..<((r + 1) * width)]), reference: want)
-                if err > worst { worst = err; worstRow = r }
+                let want = Inkling2ExpertRef.quantizedInput(input, encoding: encoding, mode: mode).map { Float16($0).bitPattern }
+                let row = Array(got[(r * width)..<((r + 1) * width)])
+                let bad = zip(row, want).filter { $0 != $1 }.count
+                if bad > 0 && firstRow < 0 { firstRow = r }
+                mismatches += bad
             }
-            #expect(worst < 2e-3, "weighted \(weighted): worst row \(worstRow) rel err \(worst)")
+            #expect(mismatches == 0, "weighted \(weighted): \(mismatches) values differ, first in row \(firstRow)")
+        }
+    }
+
+    /// The router with fewer experts than its 128 lanes (K4's toy has 16):
+    /// rows past the count are never chosen.
+    @Test func routerWithSixteenExpertsMatchesReference() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 128, f: 64, experts: 16, topK: 4)
+        let tokens = 45
+        var rng = SeedTree(0x2A44).key("router16")
+        let weight = (0..<(16 * shape.d)).map { _ in rng.uniform(-0.2, 0.2) }
+        let bias = (0..<16).map { _ in rng.uniform(-0.2, 0.2) }
+        let x = (0..<(tokens * shape.d)).map { _ in rng.uniform(-1, 1) }
+        func buffer(_ v: [Float]) -> MTLBuffer {
+            v.withUnsafeBytes { context.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)! }
+        }
+        let ids = context.device.makeBuffer(length: tokens * 16, options: .storageModeShared)!
+        let weights = context.device.makeBuffer(length: tokens * 16, options: .storageModeShared)!
+        _ = Inkling2MoETestSupport.run(context) {
+            kernels.encodeRouter($0, shape: shape, x: buffer(x), xStride: shape.d, weight: buffer(weight),
+                                 bias: buffer(bias), ids: ids, routeWeights: weights, tokens: tokens)
+        }
+        let gotIds = Inkling2MoETestSupport.read(ids, as: UInt32.self, count: tokens * 4)
+        let gotWeights = Inkling2MoETestSupport.read(weights, as: Float.self, count: tokens * 4)
+        for t in 0..<tokens {
+            let row = Array(x[(t * shape.d)..<((t + 1) * shape.d)])
+            let route = Inkling2RouterRef.route(logits: Inkling2RouterRef.logits(weight: weight, experts: 16, x: row),
+                                                selectionBias: bias, topK: 4)
+            #expect(gotIds[(t * 4)..<(t * 4 + 4)].map(Int.init) == route.ids, "token \(t)")
+            #expect(RelError.compute(actual: Array(gotWeights[(t * 4)..<(t * 4 + 4)]), reference: route.weights)
+                    < Tolerance.identity)
         }
     }
 

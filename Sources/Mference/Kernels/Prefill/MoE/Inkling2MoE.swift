@@ -44,7 +44,7 @@ enum Inkling2MoEGEMMVariant: String, CaseIterable, Sendable, Codable {
 }
 
 /// Shape of one routed-expert layer.
-struct Inkling2MoEShape: Equatable, Sendable {
+struct Inkling2MoEShape: Hashable, Sendable {
     var d: Int
     var f: Int
     var experts: Int
@@ -54,7 +54,7 @@ struct Inkling2MoEShape: Equatable, Sendable {
 
     /// The grouped kernels tile 64 gate/up and 128 down outputs and step K by
     /// 32; NVFP4 rows are whole 64-weight blocks; route planning runs one
-    /// thread per expert. The router is built for exactly 128 experts.
+    /// thread per expert. The router takes up to 128 experts.
     var isSupported: Bool {
         d > 0 && f > 0 && d % 128 == 0 && f % 64 == 0 && topK > 0 && topK <= 32
             && experts > 0 && experts <= 1024
@@ -347,18 +347,36 @@ final class Inkling2MoEKernels {
         self.encoded = encoded
     }
 
-    /// The grouped-GEMM kernels `encodeGroupedExperts` uses; set it from
-    /// `Inkling2MoECalibration`. An unavailable choice falls back to
-    /// `.simdgroup`.
-    var variant: Inkling2MoEGEMMVariant = .simdgroup
+    /// The grouped-GEMM kernels `encodeGroupedExperts` uses, per weight
+    /// encoding; `Inkling2MoECalibration` sets it. An unavailable choice falls
+    /// back to `.simdgroup`. The two variants sum in different orders, so
+    /// outputs differ between them at the FP32 rounding level.
+    private var variants: [Inkling2MoEEncoding: Inkling2MoEGEMMVariant] = [:]
+    private let variantLock = NSLock()
+
+    func variant(for encoding: Inkling2MoEEncoding) -> Inkling2MoEGEMMVariant {
+        variantLock.lock(); defer { variantLock.unlock() }
+        return variants[encoding] ?? .simdgroup
+    }
+
+    func setVariant(_ variant: Inkling2MoEGEMMVariant, for encoding: Inkling2MoEEncoding) {
+        variantLock.lock(); defer { variantLock.unlock() }
+        variants[encoding] = variant
+    }
+
+    /// Every encoding at once (tests and benchmarks).
+    var variant: Inkling2MoEGEMMVariant {
+        get { variant(for: .nvfp4) }
+        set { for encoding in Inkling2MoEEncoding.allCases { setVariant(newValue, for: encoding) } }
+    }
 
     /// Variants this GPU built for every encoding.
     var availableVariants: [Inkling2MoEGEMMVariant] {
         encoded.values.allSatisfy { $0.tensorOps != nil } ? [.simdgroup, .tensorOps] : [.simdgroup]
     }
 
-    private func grouped(_ kernels: Encoded) -> Grouped {
-        variant == .tensorOps ? (kernels.tensorOps ?? kernels.simdgroup) : kernels.simdgroup
+    private func grouped(_ kernels: Encoded, encoding: Inkling2MoEEncoding) -> Grouped {
+        variant(for: encoding) == .tensorOps ? (kernels.tensorOps ?? kernels.simdgroup) : kernels.simdgroup
     }
 
     private static func params(_ shape: Inkling2MoEShape, pool: Inkling2ExpertPool, hiddenStride: Int,
@@ -500,7 +518,7 @@ final class Inkling2MoEKernels {
         var p = Self.params(shape, pool: pool, hiddenStride: input.stride, workTailBase: scratch.fullBlockCapacity,
                             routeWeightInDownInput: vendor)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)
-        let gemm = grouped(kernels)
+        let gemm = grouped(kernels, encoding: pool.encoding)
 
         encoder.setComputePipelineState(gemm.gateUp)
         encoder.setBuffer(input.buffer, offset: input.offset, index: 0)
@@ -575,6 +593,10 @@ final class Inkling2MoEKernels {
     func encodeDecodeGateUp(_ encoder: MTLComputeCommandEncoder, shape: Inkling2MoEShape,
                             x: MTLBuffer, xOffset: Int = 0, ids: MTLBuffer, idsOffset: Int = 0,
                             pool: Inkling2ExpertPool, activation: MTLBuffer, activationOffset: Int = 0) {
+        precondition(pool.shape == shape, "pool and decode shapes differ")
+        precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0)
+        precondition(xOffset % 8 == 0 && activationOffset % 8 == 0 && idsOffset % 4 == 0,
+                     "the decode kernels read half4 and uint")
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
         var p = Self.params(shape, pool: pool, hiddenStride: shape.d)
         encoder.setComputePipelineState(kernels.decodeGateUp)
@@ -690,31 +712,38 @@ enum Inkling2ShaderLibrary {
     }
 }
 
-/// Picks the grouped-GEMM variant per GPU by timing a prefill visit of the
-/// model's own layer, instead of a hard-coded family or chip gate. The
-/// choice is kept for the process, keyed by GPU, shader source and chunk
-/// size, so later loads of the model skip the timing.
+/// Picks the grouped-GEMM variant per GPU and weight encoding by timing a
+/// prefill visit of the model's own layer, instead of a hard-coded family or
+/// chip gate. The tensor-ops path must beat the simdgroup path by
+/// `requiredMargin` to be chosen, so GPUs where the two time within noise
+/// keep the same (simdgroup) path from run to run; a variant that fails to
+/// run is skipped. The choice is kept for the process, keyed by GPU, shader
+/// source, encoding, shape and chunk size, so later loads skip the timing.
 enum Inkling2MoECalibration {
     struct Key: Hashable {
         let device: String
         let shaderHash: UInt64
         let encoding: Inkling2MoEEncoding
+        let shape: Inkling2MoEShape
         let tokens: Int
     }
 
     struct Result: Sendable {
         let variant: Inkling2MoEGEMMVariant
-        /// Best GPU seconds per visit, per variant timed.
+        /// Best GPU seconds per visit, per variant that ran.
         let seconds: [Inkling2MoEGEMMVariant: Double]
     }
+
+    /// Tensor-ops must be this much faster (fraction of the simdgroup time).
+    static let requiredMargin = 0.05
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var results: [Key: Result] = [:]
 
     /// Times `repeats` prefill visits of `tokens` rows (synthetic inputs,
     /// uniform routes over the pool's experts) with each variant the kernels
-    /// built, sets `kernels.variant` to the fastest and returns the timings.
-    /// Overwrites `scratch`'s route buffers.
+    /// built, sets the kernels' variant for the pool's encoding and returns
+    /// the timings. Overwrites `scratch`'s route buffers.
     @discardableResult
     static func calibrate(context: MetalContext, kernels: Inkling2MoEKernels, pool: Inkling2ExpertPool,
                           scratch: Inkling2MoEPrefillScratch, tokens requested: Int? = nil,
@@ -723,21 +752,22 @@ enum Inkling2MoECalibration {
         let tokens = min(requested ?? scratch.maxTokens, scratch.maxTokens)
         let key = Key(device: context.device.name,
                       shaderHash: Inkling2ShaderLibrary.sourceHash(module: Inkling2MoEKernels.module),
-                      encoding: pool.encoding, tokens: tokens)
+                      encoding: pool.encoding, shape: shape, tokens: tokens)
         lock.lock()
         let cached = results[key]
         lock.unlock()
         if let cached {
-            kernels.variant = cached.variant
+            kernels.setVariant(cached.variant, for: pool.encoding)
             return cached
         }
-        let variants = kernels.availableVariants
-        if variants.count == 1 {
-            let result = Result(variant: variants[0], seconds: [:])
+        func keep(_ result: Result) -> Result {
             lock.lock(); results[key] = result; lock.unlock()
-            kernels.variant = result.variant
+            kernels.setVariant(result.variant, for: pool.encoding)
             return result
         }
+        let variants = kernels.availableVariants
+        if variants.count == 1 { return keep(Result(variant: .simdgroup, seconds: [:])) }
+
         guard let hidden = context.device.makeBuffer(length: tokens * shape.d * 2, options: .storageModeShared),
               let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared) else {
             throw PrefillGroupedRoutedMoEError.allocationFailed("Inkling 2 calibration")
@@ -765,12 +795,14 @@ enum Inkling2MoECalibration {
                 weights[t * shape.topK + r] = 1
             }
         }
-        let previous = kernels.variant
+        let previous = kernels.variant(for: pool.encoding)
         var seconds: [Inkling2MoEGEMMVariant: Double] = [:]
+        func time(_ variants: [Inkling2MoEGEMMVariant]) throws {
         for variant in variants {
-            kernels.variant = variant
+            kernels.setVariant(variant, for: pool.encoding)
             var best = Double.infinity
-            for run in 0..<(repeats + 1) {
+            var failed = false
+            for run in 0..<(repeats + 1) where !failed {
                 guard let cb = context.queue.makeCommandBuffer(), let encoder = cb.makeComputeCommandEncoder() else {
                     throw PrefillGroupedRoutedMoEError.allocationFailed("Inkling 2 calibration encoder")
                 }
@@ -779,18 +811,29 @@ enum Inkling2MoECalibration {
                 encoder.endEncoding()
                 cb.commit()
                 cb.waitUntilCompleted()
-                guard cb.status == .completed else {
-                    kernels.variant = previous
-                    throw MetalError.commandBufferFailed("Inkling 2 calibration: \(String(describing: cb.error))")
+                if cb.status != .completed {
+                    // The simdgroup path is the fallback; a failure there is an error.
+                    if variant == .simdgroup {
+                        throw MetalError.commandBufferFailed("Inkling 2 calibration: \(String(describing: cb.error))")
+                    }
+                    failed = true
+                } else if run > 0 {
+                    best = min(best, cb.gpuEndTime - cb.gpuStartTime)   // run 0 warms up
                 }
-                if run > 0 { best = min(best, cb.gpuEndTime - cb.gpuStartTime) }   // run 0 warms up
             }
-            seconds[variant] = best
+            if !failed { seconds[variant] = best }
         }
-        let winner = seconds.min { $0.value < $1.value }!.key
-        let result = Result(variant: winner, seconds: seconds)
-        lock.lock(); results[key] = result; lock.unlock()
-        kernels.variant = winner
-        return result
+        }
+        do {
+            try time(variants)
+        } catch {
+            kernels.setVariant(previous, for: pool.encoding)
+            throw error
+        }
+        var winner = Inkling2MoEGEMMVariant.simdgroup
+        if let tensor = seconds[.tensorOps], let simd = seconds[.simdgroup], tensor < simd * (1 - requiredMargin) {
+            winner = .tensorOps
+        }
+        return keep(Result(variant: winner, seconds: seconds))
     }
 }

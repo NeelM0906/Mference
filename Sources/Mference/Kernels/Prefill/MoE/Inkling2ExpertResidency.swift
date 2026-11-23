@@ -68,7 +68,9 @@ struct Inkling2ExpertLayerFile: Sendable, Equatable {
 /// Slot ownership: a slab belongs to its ticket's visit from the `filled`
 /// signal until the `released` signal; the reader never writes it in between.
 final class Inkling2StagedExpertLayers: @unchecked Sendable {
-    struct Ticket {
+    /// A Metal buffer may be handed between threads; the reader writes the
+    /// slab only between the release of its previous ticket and `filled`.
+    struct Ticket: @unchecked Sendable {
         let sequence: UInt64
         let layer: Int
         let slab: MTLBuffer
@@ -138,10 +140,12 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         guard file.bytes <= slabBytes else {
             throw StagingError.layerTooLarge(layer: layer, bytes: file.bytes, slab: slabBytes)
         }
+        // The sequence and the queued fill are taken together, so fills run in
+        // sequence order even when callers race.
         lock.lock()
+        defer { lock.unlock() }
         nextSequence += 1
         let sequence = nextSequence
-        lock.unlock()
         let slab = slabs[Int((sequence - 1) % UInt64(slabs.count))]
         let ticket = Ticket(sequence: sequence, layer: layer, slab: slab)
         queue.async { [self] in fill(ticket, file: file) }
@@ -167,6 +171,23 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     /// Waits on the CPU until every queued fill has run (tests, teardown).
     func drain() { queue.sync {} }
 
+    /// Releases tickets whose command buffer will never run (an encode
+    /// error, a cancelled chunk), so later fills can reuse their slabs: each
+    /// is marked released once every earlier ticket is, which may wait on the
+    /// CPU for visits already committed. They must be the latest tickets
+    /// taken (nothing staged after them was committed). After any staging
+    /// error, discard this object instead.
+    func abandon(_ tickets: [Ticket]) throws {
+        for ticket in tickets.sorted(by: { $0.sequence < $1.sequence }) {
+            let earlier = ticket.sequence - 1
+            if earlier > 0, released.signaledValue < earlier,
+               !released.wait(untilSignaledValue: earlier, timeoutMS: releaseTimeoutMS) {
+                throw StagingError.timedOut(sequence: ticket.sequence)
+            }
+            if released.signaledValue < ticket.sequence { released.signaledValue = ticket.sequence }
+        }
+    }
+
     private func fill(_ ticket: Ticket, file: Inkling2ExpertLayerFile) {
         // Fills run in ticket order on one serial queue, so this is the only
         // writer of `filled` and its value only grows.
@@ -185,8 +206,10 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
             return
         } catch Inkling2ExpertStore.StoreError.readFailed(let path, let code) {
             record(.readFailed(path: path, errno: code))
+            return
         } catch {
             record(.readFailed(path: file.path, errno: EIO))
+            return
         }
         let seconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
         lock.lock()
@@ -311,8 +334,25 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         self.resident = resident
         self.mapped = mapped
         self.templates = templates
-        self.staging = stagedFiles.isEmpty ? nil
+        let staging = stagedFiles.isEmpty ? nil
             : try Inkling2StagedExpertLayers(device: device, files: stagedFiles, slabs: max(2, plan.stagingSlabs))
+        // Every staged layout fits a slab, so a visit's rebinding cannot fail
+        // after its ticket is taken.
+        if let staging {
+            for layer in stagedFiles.keys { _ = try templates[layer]!.rebound(to: staging.slabs[0]) }
+        }
+        self.staging = staging
+    }
+
+    /// For a command buffer that will never be committed: releases every
+    /// prefill visit begun and not yet ended, in order (see
+    /// `Inkling2StagedExpertLayers.abandon`).
+    func abandonOpenVisits() throws {
+        lock.lock()
+        let tickets = open.values.flatMap { $0 }
+        open.removeAll()
+        lock.unlock()
+        try staging?.abandon(tickets)
     }
 
     /// The pool a decode visit of `layer` reads: resident, or the mapped file.
