@@ -16,7 +16,26 @@
     "mean_abs_dlogprob_top1": 0.0,
     "min_top20_overlap": 1.0,
     "mean_kl_top20_approx": 0.0,
-    "max_kl_top20_approx": 0.0
+    "max_kl_top20_approx": 0.0,
+    "p95_abs_dlogprob_top1": 0.0,
+    "p95_kl_top20_approx": 0.0,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 46,
+      "agree": 46,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 41,
+      "agree": 41,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 33,
+      "agree": 33,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -54,7 +73,26 @@
     "mean_abs_dlogprob_top1": 0.0,
     "min_top20_overlap": 1.0,
     "mean_kl_top20_approx": 0.0,
-    "max_kl_top20_approx": 0.0
+    "max_kl_top20_approx": 0.0,
+    "p95_abs_dlogprob_top1": 0.0,
+    "p95_kl_top20_approx": 0.0,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 98,
+      "agree": 98,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 79,
+      "agree": 79,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 36,
+      "agree": 36,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -71,7 +109,26 @@
     "mean_abs_dlogprob_top1": 0.0,
     "min_top20_overlap": 1.0,
     "mean_kl_top20_approx": 0.0,
-    "max_kl_top20_approx": 0.0
+    "max_kl_top20_approx": 0.0,
+    "p95_abs_dlogprob_top1": 0.0,
+    "p95_kl_top20_approx": 0.0,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 64,
+      "agree": 64,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 62,
+      "agree": 62,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 49,
+      "agree": 49,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -407,6 +464,13 @@
    }
   }
  ],
+ "pooled_logprobs": {
+  "positions": 232,
+  "top1_agreement": 1.0,
+  "top1_at_margin_0.2": 1.0,
+  "top1_at_margin_0.5": 1.0,
+  "top1_at_margin_2.0": 1.0
+ },
  "summary": {
   "prompts": 11,
   "all_prompt_ids_equal": true,

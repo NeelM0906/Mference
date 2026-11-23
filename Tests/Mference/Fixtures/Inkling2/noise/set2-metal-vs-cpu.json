@@ -16,7 +16,26 @@
     "mean_abs_dlogprob_top1": 0.059821682368836754,
     "min_top20_overlap": 0.6,
     "mean_kl_top20_approx": 0.013046696051543766,
-    "max_kl_top20_approx": 0.3410082477144218
+    "max_kl_top20_approx": 0.3410082477144218,
+    "p95_abs_dlogprob_top1": 0.2654247283935547,
+    "p95_kl_top20_approx": 0.03311351125702541,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 73,
+      "agree": 71,
+      "rate": 0.9726027397260274
+     },
+     "0.5": {
+      "positions": 70,
+      "agree": 68,
+      "rate": 0.9714285714285714
+     },
+     "2.0": {
+      "positions": 48,
+      "agree": 48,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -33,7 +52,26 @@
     "mean_abs_dlogprob_top1": 0.16929654891674334,
     "min_top20_overlap": 0.05,
     "mean_kl_top20_approx": 0.1094284630921474,
-    "max_kl_top20_approx": 6.798106474828098
+    "max_kl_top20_approx": 6.798106474828098,
+    "p95_abs_dlogprob_top1": 0.6559112071990967,
+    "p95_kl_top20_approx": 0.32716029150751125,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 302,
+      "agree": 282,
+      "rate": 0.9337748344370861
+     },
+     "0.5": {
+      "positions": 286,
+      "agree": 274,
+      "rate": 0.958041958041958
+     },
+     "2.0": {
+      "positions": 235,
+      "agree": 231,
+      "rate": 0.9829787234042553
+     }
+    }
    }
   },
   {
@@ -50,7 +88,26 @@
     "mean_abs_dlogprob_top1": 0.04708402156829834,
     "min_top20_overlap": 0.85,
     "mean_kl_top20_approx": 0.007085470817083937,
-    "max_kl_top20_approx": 0.1992773675193606
+    "max_kl_top20_approx": 0.1992773675193606,
+    "p95_abs_dlogprob_top1": 0.18223190307617188,
+    "p95_kl_top20_approx": 0.020952011591007055,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 73,
+      "agree": 71,
+      "rate": 0.9726027397260274
+     },
+     "0.5": {
+      "positions": 60,
+      "agree": 59,
+      "rate": 0.9833333333333333
+     },
+     "2.0": {
+      "positions": 39,
+      "agree": 39,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -67,7 +124,26 @@
     "mean_abs_dlogprob_top1": 0.019794607162475587,
     "min_top20_overlap": 0.8,
     "mean_kl_top20_approx": 0.003169927016385532,
-    "max_kl_top20_approx": 0.07649935481572441
+    "max_kl_top20_approx": 0.07649935481572441,
+    "p95_abs_dlogprob_top1": 0.07873344421386719,
+    "p95_kl_top20_approx": 0.012845347612120923,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 78,
+      "agree": 78,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 76,
+      "agree": 76,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 53,
+      "agree": 53,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -84,7 +160,26 @@
     "mean_abs_dlogprob_top1": 0.0056475547895039595,
     "min_top20_overlap": 0.85,
     "mean_kl_top20_approx": 0.0006228645195964488,
-    "max_kl_top20_approx": 0.013075226859230633
+    "max_kl_top20_approx": 0.013075226859230633,
+    "p95_abs_dlogprob_top1": 0.032657623291015625,
+    "p95_kl_top20_approx": 0.00302685055906542,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 71,
+      "agree": 71,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 69,
+      "agree": 69,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 47,
+      "agree": 47,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -101,7 +196,26 @@
     "mean_abs_dlogprob_top1": 0.03186485660609914,
     "min_top20_overlap": 0.8,
     "mean_kl_top20_approx": 0.004437034432386396,
-    "max_kl_top20_approx": 0.12501191765834002
+    "max_kl_top20_approx": 0.12501191765834002,
+    "p95_abs_dlogprob_top1": 0.12287139892578125,
+    "p95_kl_top20_approx": 0.018640883314651906,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 64,
+      "agree": 64,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 63,
+      "agree": 63,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 40,
+      "agree": 40,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -118,7 +232,26 @@
     "mean_abs_dlogprob_top1": 0.016303300857543945,
     "min_top20_overlap": 0.9,
     "mean_kl_top20_approx": 0.001279968620556431,
-    "max_kl_top20_approx": 0.01404881490498919
+    "max_kl_top20_approx": 0.01404881490498919,
+    "p95_abs_dlogprob_top1": 0.07320213317871094,
+    "p95_kl_top20_approx": 0.007263174987887193,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 23,
+      "agree": 23,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 20,
+      "agree": 20,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 14,
+      "agree": 14,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -135,7 +268,26 @@
     "mean_abs_dlogprob_top1": 0.03893739601661419,
     "min_top20_overlap": 0.7,
     "mean_kl_top20_approx": 0.00642920898159276,
-    "max_kl_top20_approx": 0.11249959977828844
+    "max_kl_top20_approx": 0.11249959977828844,
+    "p95_abs_dlogprob_top1": 0.19247817993164062,
+    "p95_kl_top20_approx": 0.034307370462076714,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 54,
+      "agree": 53,
+      "rate": 0.9814814814814815
+     },
+     "0.5": {
+      "positions": 48,
+      "agree": 48,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 37,
+      "agree": 37,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -152,7 +304,26 @@
     "mean_abs_dlogprob_top1": 0.07944967746734619,
     "min_top20_overlap": 0.8,
     "mean_kl_top20_approx": 0.010759562251352543,
-    "max_kl_top20_approx": 0.09487350022230302
+    "max_kl_top20_approx": 0.09487350022230302,
+    "p95_abs_dlogprob_top1": 0.2142343521118164,
+    "p95_kl_top20_approx": 0.051305056486910264,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 19,
+      "agree": 19,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 18,
+      "agree": 18,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 13,
+      "agree": 13,
+      "rate": 1.0
+     }
+    }
    },
    "trace": {
     "visits": [
@@ -453,6 +624,13 @@
    }
   }
  ],
+ "pooled_logprobs": {
+  "positions": 796,
+  "top1_agreement": 0.9472361809045227,
+  "top1_at_margin_0.2": 0.9669749009247027,
+  "top1_at_margin_0.5": 0.9788732394366197,
+  "top1_at_margin_2.0": 0.9923954372623575
+ },
  "summary": {
   "prompts": 9,
   "all_prompt_ids_equal": true,

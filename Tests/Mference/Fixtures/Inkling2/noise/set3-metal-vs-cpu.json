@@ -16,7 +16,26 @@
     "mean_abs_dlogprob_top1": 0.1559682822227478,
     "min_top20_overlap": 0.0,
     "mean_kl_top20_approx": 0.09363424093195528,
-    "max_kl_top20_approx": 8.678821162217357
+    "max_kl_top20_approx": 8.678821162217357,
+    "p95_abs_dlogprob_top1": 0.5238265991210938,
+    "p95_kl_top20_approx": 0.26749335233289023,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 286,
+      "agree": 271,
+      "rate": 0.9475524475524476
+     },
+     "0.5": {
+      "positions": 272,
+      "agree": 262,
+      "rate": 0.9632352941176471
+     },
+     "2.0": {
+      "positions": 229,
+      "agree": 226,
+      "rate": 0.9868995633187773
+     }
+    }
    },
    "trace": {
     "visits": [
@@ -317,6 +336,13 @@
    }
   }
  ],
+ "pooled_logprobs": {
+  "positions": 300,
+  "top1_agreement": 0.9233333333333333,
+  "top1_at_margin_0.2": 0.9475524475524476,
+  "top1_at_margin_0.5": 0.9632352941176471,
+  "top1_at_margin_2.0": 0.9868995633187773
+ },
  "summary": {
   "prompts": 1,
   "all_prompt_ids_equal": true,

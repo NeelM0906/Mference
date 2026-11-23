@@ -16,6 +16,7 @@ Nothing here is part of any product target, and nothing downloads anything.
 | `golden_stage.sh` | One weight-loading golden stage (Metal, Metal again, CPU-only: for `--ngl 0` ink-golden opens no GPU device and turns op offload and CPU weight repacking off, so the weights stay mapped). |
 | `baseline_stage.sh` | One baseline timing stage (llama-bench at 512, 4,096 and 16,384 tokens; llama-completion on real text for time to first token). Waits until at most one other swift build or test job runs. |
 | `run_held_stages.sh` | All the weight-loading stages in order, each as its own machine-lock hold. |
+| `noise_table.py` | The per-prompt and pooled noise tables (and per-trace rows) of the G6 proposal from `compare_goldens.py --json` outputs. |
 | `compare_goldens.py` | Agreement between two `generate` outputs: token identity, top-1 agreement, log-probability deltas, approximate KL over the top 20, hidden-state error and routed-expert agreement per layer visit. |
 | `ignore_merges_words.py` | The 337 vocabulary entries plain BPE merges split, from the GGUF header (tokens, merges) without touching tensor data. |
 | `inputs/` | The frozen inputs: tokenizer texts, chat cases, generation prompt sets 1-3 (`generate_prompts*.json`; a prompt may set `logprobs_last` to record only its last N positions). |

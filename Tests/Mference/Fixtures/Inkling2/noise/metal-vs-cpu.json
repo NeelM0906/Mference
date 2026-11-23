@@ -16,7 +16,26 @@
     "mean_abs_dlogprob_top1": 0.008232520176814152,
     "min_top20_overlap": 0.7,
     "mean_kl_top20_approx": 0.0007383111154941076,
-    "max_kl_top20_approx": 0.011601208301274226
+    "max_kl_top20_approx": 0.011601208301274226,
+    "p95_abs_dlogprob_top1": 0.047122955322265625,
+    "p95_kl_top20_approx": 0.003954024405865189,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 46,
+      "agree": 46,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 41,
+      "agree": 41,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 33,
+      "agree": 33,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -54,7 +73,26 @@
     "mean_abs_dlogprob_top1": 0.015981356302897137,
     "min_top20_overlap": 0.9,
     "mean_kl_top20_approx": 0.00136958076305626,
-    "max_kl_top20_approx": 0.011764608140553221
+    "max_kl_top20_approx": 0.011764608140553221,
+    "p95_abs_dlogprob_top1": 0.05219459533691406,
+    "p95_kl_top20_approx": 0.00471738532082463,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 74,
+      "agree": 74,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 59,
+      "agree": 59,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 22,
+      "agree": 22,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -71,7 +109,26 @@
     "mean_abs_dlogprob_top1": 0.03214848041534424,
     "min_top20_overlap": 0.8,
     "mean_kl_top20_approx": 0.0057708401271820454,
-    "max_kl_top20_approx": 0.12501191765834002
+    "max_kl_top20_approx": 0.12501191765834002,
+    "p95_abs_dlogprob_top1": 0.10562896728515625,
+    "p95_kl_top20_approx": 0.02535619953499488,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 56,
+      "agree": 56,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 54,
+      "agree": 54,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 42,
+      "agree": 42,
+      "rate": 1.0
+     }
+    }
    }
   },
   {
@@ -407,6 +464,13 @@
    }
   }
  ],
+ "pooled_logprobs": {
+  "positions": 196,
+  "top1_agreement": 0.9642857142857143,
+  "top1_at_margin_0.2": 1.0,
+  "top1_at_margin_0.5": 1.0,
+  "top1_at_margin_2.0": 1.0
+ },
  "summary": {
   "prompts": 11,
   "all_prompt_ids_equal": true,

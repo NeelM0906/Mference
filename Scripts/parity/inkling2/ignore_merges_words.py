@@ -47,8 +47,10 @@ def read_header(path):
             et = u32(); n = u64()
             if et == 8:
                 v = [s() for _ in range(n)]
-            else:
+            elif et in sizes:
                 rd(sizes[et] * n); v = None
+            else:
+                raise SystemExit(f"unsupported GGUF array element type {et} in {k}")
         else:
             rd(sizes[t]); v = None
         if k in ("tokenizer.ggml.tokens", "tokenizer.ggml.merges"):
@@ -87,7 +89,7 @@ def main():
                 except (KeyError, UnicodeDecodeError):
                     text = None
                 odd.append({"id": i, "token": tok, "text": text, "bpe": parts})
-    json.dump(odd, open(sys.argv[2], "w"), ensure_ascii=False, indent=1)
+    json.dump(odd, open(sys.argv[2], "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print("entries not rebuilt by merges:", len(odd), "decodable:", sum(1 for o in odd if o["text"] is not None))
 
 

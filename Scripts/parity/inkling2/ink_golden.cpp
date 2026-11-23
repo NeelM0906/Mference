@@ -484,7 +484,8 @@ static int cmd_generate(int argc, char ** argv) {
             tr["hidden_shape"] = njson::array({(int) visits.size(), n_prompt, N_EMBD});
             tr["hidden_tensor"] = "l_out-<slot> (after the layer's MoE residual add)";
             tr["result_norm_file"] = "result_norm.f32";
-            // only the positions that produced logits (all with logprobs, else the last one)
+            // only the positions that produced logits: every position with logprobs,
+            // the last N + 1 with logprobs_last N, else the last one
             tr["result_norm_shape"] = njson::array({(int) (g_trace.result_norm.size() / N_EMBD), N_EMBD});
             tr["visits"] = tv;
             write_file(pdir + "/trace.json", dump_out(tr));

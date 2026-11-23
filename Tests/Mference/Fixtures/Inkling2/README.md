@@ -64,7 +64,8 @@ all 20 rows). With `generate/` that makes 11 log-prob prompts and 2 traces.
 
 ## `cpu/`: the CPU-only traces (G6a reference)
 
-`trace01/` and `trace02/`: `golden.json` and `trace.json` from the same
+`trace01/` and `trace02/`: `golden.json` and `trace.json` (and, for
+`trace02`, the `logprobs.json` its golden.json names) from the same
 prompts run with `-ngl 0`, no GPU device, no op offload and no CPU weight
 repacking, so every op runs on the CPU backend with the reference's Q8_0
 rounding of the inputs to NVFP4 and Q8_0 products. `trace.json` holds, per
@@ -80,4 +81,5 @@ as is a third trace of the 300-token tool prompt (2.5 MB of JSON).
 (bit-identical), and Metal vs CPU-only for each set (`metal-vs-cpu.json`,
 `set2-...`, `set3-...` for the tool-prompt trace). The backend split grows
 with context and on structured text (tool JSON); the G6 tolerances are set
-per prompt from these numbers.
+per prompt from these numbers. `table-logprobs.md` and `table-traces.md` are
+those numbers as tables (`noise_table.py`); p95 is nearest-rank.

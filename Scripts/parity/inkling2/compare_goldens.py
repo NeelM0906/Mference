@@ -13,11 +13,14 @@ Per prompt:
 - greedy continuation: length of the common prefix of the generated ids, and
   whether the two runs are identical;
 - log-probabilities, at every position where both runs saw the same context
-  (all prompt positions, and generated positions up to and including the first
-  divergence): top-1 agreement, |delta| of the log-probability each run gives
-  to run A's top-1 token, top-20 id overlap, and an approximate KL(A||B) over
-  the union of the two top-20 lists (a token missing from one list gets that
-  list's 20th log-probability, an upper bound on its true value);
+  (all recorded prompt positions, and generated positions up to and including
+  the first divergence): top-1 agreement (overall and where run A's top-1
+  leads its top-2 by >= 0.2, 0.5, 2.0 nats), |delta| of the log-probability
+  each run gives to run A's top-1 token (mean, nearest-rank p95, p99, max),
+  top-20 id overlap, and an approximate KL(A||B) over the union of the two
+  top-20 lists (a token missing from one list gets that list's 20th
+  log-probability, an upper bound on its true value; mean, nearest-rank p95,
+  max); pooled over prompts, top-1 agreement overall and by margin;
 - trace: per layer visit, the relative L2 error of the hidden states
   (||a - b|| / ||a|| over all positions) and the share of (token, visit) whose
   eight routed expert ids agree as a set.
@@ -40,10 +43,20 @@ def f32(path):
     return struct.unpack("<%df" % (len(b) // 4), b)
 
 
+MARGINS = (0.2, 0.5, 2.0)
+
+
+def p95(values):
+    """Nearest-rank 95th percentile: the ceil(0.95 n)-th smallest value."""
+    s = sorted(values)
+    return s[max(0, math.ceil(0.95 * len(s)) - 1)] if s else None
+
+
 def lp_metrics(la, lb, aligned_upto):
     rows_a = {r["pos"]: r for r in la}
     rows_b = {r["pos"]: r for r in lb}
     n = agree = 0
+    by_margin = {m: [0, 0] for m in MARGINS}  # margin of run A's top-1 over its top-2: [positions, top-1 agreements]
     dl = []
     overlap = []
     kls = []
@@ -56,6 +69,11 @@ def lp_metrics(la, lb, aligned_upto):
         top1a, top1b = a["top"][0][0], b["top"][0][0]
         n += 1
         agree += top1a == top1b
+        margin = a["top"][0][1] - a["top"][1][1]
+        for m in MARGINS:
+            if margin >= m:
+                by_margin[m][0] += 1
+                by_margin[m][1] += top1a == top1b
         floor_a, floor_b = a["top"][-1][1], b["top"][-1][1]
         dl.append(abs(ta[top1a] - tb.get(top1a, floor_b)))
         overlap.append(len(set(ta) & set(tb)) / len(ta))
@@ -75,6 +93,10 @@ def lp_metrics(la, lb, aligned_upto):
         "min_top20_overlap": min(overlap) if overlap else None,
         "mean_kl_top20_approx": sum(kls) / len(kls) if kls else None,
         "max_kl_top20_approx": max(kls) if kls else None,
+        "p95_abs_dlogprob_top1": p95(dl),
+        "p95_kl_top20_approx": p95(kls),
+        "top1_at_margin": {str(m): {"positions": c[0], "agree": c[1], "rate": (c[1] / c[0] if c[0] else None)}
+                           for m, c in by_margin.items()},
     }
 
 
@@ -145,6 +167,17 @@ def main():
             r["trace"] = t
         result["prompts"].append(r)
     lps = [p["logprobs"] for p in result["prompts"] if p.get("logprobs")]
+    pooled_n = sum(l["positions"] for l in lps)
+    pooled = {
+        "positions": pooled_n,
+        "top1_agreement": (sum(l["top1_agreement"] * l["positions"] for l in lps) / pooled_n) if pooled_n else None,
+    }
+    for m in MARGINS:
+        k = str(m)
+        pn = sum(l["top1_at_margin"][k]["positions"] for l in lps)
+        pa = sum(l["top1_at_margin"][k]["agree"] for l in lps)
+        pooled[f"top1_at_margin_{k}"] = pa / pn if pn else None
+    result["pooled_logprobs"] = pooled
     result["summary"] = {
         "prompts": len(result["prompts"]),
         "all_prompt_ids_equal": all(p.get("prompt_ids_equal") for p in result["prompts"]),
