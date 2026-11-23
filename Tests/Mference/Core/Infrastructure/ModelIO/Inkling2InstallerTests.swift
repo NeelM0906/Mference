@@ -512,6 +512,15 @@ struct Inkling2Shape {
         #expect(try model.inkling2ExpertGateUpScale(layer: 0).length == 8)
         #expect(throws: ModelError.self) { _ = try model.inkling2ExpertGateUpScale(layer: 1) }
         #expect(try model.inkling2LoopGateDown(layer: 1, .ffn).shape.0 == 4)
+        // K3's kernels: every resident tensor (a layer's stacked attention
+        // segments included) in ONE shared buffer, at a 256-byte-aligned
+        // offset, so Q8_0 blocks start at even offsets, BF16 rows at
+        // multiples of 8 and F32 tensors at multiples of 16.
+        let views = try Inkling2ResidentContract.expectedTensors(config: shape.archConfig).map {
+            try model.resident(name: $0.name)
+        }
+        #expect(!views.isEmpty && views.allSatisfy { $0.buffer === views[0].buffer })
+        #expect(views.allSatisfy { $0.offset % 256 == 0 })
         // Expert 1 of layer 1 (Q8_0): its down rows are the GGUF's.
         let expert = try model.routedExpert(layer: 1, expert: 1)
         let down = layout.layers[1].down
