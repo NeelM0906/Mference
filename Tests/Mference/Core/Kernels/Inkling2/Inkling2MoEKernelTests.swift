@@ -490,4 +490,33 @@ import MferenceValidationSupport
                                                           scratch: scratch)
         #expect(second.variant == first.variant && other.variant == first.variant)
     }
+
+    /// The pipelined loop (default) and the plain loop compute the same
+    /// thing in the same order: bit-identical outputs, both encodings, with
+    /// full and tail blocks.
+    @Test(arguments: [Inkling2MoEEncoding.nvfp4, .q8_0])
+    func pipelinedLoopMatchesPlainLoop(encoding: Inkling2MoEEncoding) throws {
+        let context = try MetalContext()
+        let pipelined = try Inkling2MoEKernels(context: context, pipelined: true)
+        let plain = try Inkling2MoEKernels(context: context, pipelined: false)
+        let shape = Self.small
+        let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: encoding, shape: shape,
+                                                       seed: 0x2A50, quantized: true)
+        let tokens = 200
+        let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2A51)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2A52)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+        Inkling2MoETestSupport.write(routes.ids, to: scratch.ids)
+        Inkling2MoETestSupport.write(routes.weights, to: scratch.routeWeights)
+        var outputs: [[Float]] = []
+        for kernels in [pipelined, plain] {
+            let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared)!
+            _ = Inkling2MoETestSupport.run(context) { encoder in
+                kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: synthetic.pool,
+                                      scratch: scratch, tokens: tokens, out: out, outStride: shape.d)
+            }
+            outputs.append(Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d))
+        }
+        #expect(outputs[0] == outputs[1])
+    }
 }

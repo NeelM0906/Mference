@@ -133,9 +133,17 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         return failure
     }
 
+    /// The last sequence handed out (0 before any).
+    var lastSequence: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return nextSequence
+    }
+
     /// Queues the next staged visit of `layer` and starts its read as soon
-    /// as its slab is free. Call in visit order.
-    func stage(layer: Int) throws -> Ticket {
+    /// as its slab is free and, with `fence`, once `fence.event` reaches
+    /// `fence.value` (other GPU readers of the slabs, such as decode caches,
+    /// must be done). Call in visit order.
+    func stage(layer: Int, after fence: (event: MTLSharedEvent, value: UInt64)? = nil) throws -> Ticket {
         guard let file = files[layer] else { preconditionFailure("layer \(layer) is not staged") }
         guard file.bytes <= slabBytes else {
             throw StagingError.layerTooLarge(layer: layer, bytes: file.bytes, slab: slabBytes)
@@ -148,7 +156,8 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         let sequence = nextSequence
         let slab = slabs[Int((sequence - 1) % UInt64(slabs.count))]
         let ticket = Ticket(sequence: sequence, layer: layer, slab: slab)
-        queue.async { [self] in fill(ticket, file: file) }
+        nonisolated(unsafe) let wait = fence
+        queue.async { [self] in fill(ticket, file: file, after: wait) }
         return ticket
     }
 
@@ -188,10 +197,16 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         }
     }
 
-    private func fill(_ ticket: Ticket, file: Inkling2ExpertLayerFile) {
+    private func fill(_ ticket: Ticket, file: Inkling2ExpertLayerFile,
+                      after fence: (event: MTLSharedEvent, value: UInt64)?) {
         // Fills run in ticket order on one serial queue, so this is the only
         // writer of `filled` and its value only grows.
         defer { filled.signaledValue = ticket.sequence }
+        if let fence, fence.event.signaledValue < fence.value,
+           !fence.event.wait(untilSignaledValue: fence.value, timeoutMS: releaseTimeoutMS) {
+            record(.timedOut(sequence: ticket.sequence))
+            return
+        }
         let previous = ticket.sequence > UInt64(slabs.count) ? ticket.sequence - UInt64(slabs.count) : 0
         if previous > 0, released.signaledValue < previous,
            !released.wait(untilSignaledValue: previous, timeoutMS: releaseTimeoutMS) {
@@ -237,9 +252,13 @@ struct Inkling2ExpertLayerSpec {
 /// to `encodeDecode` in place of the router's ids; the route weights are
 /// unchanged.
 struct Inkling2DecodeBinding {
+    let layer: Int
     let pool: Inkling2ExpertPool
     let ids: MTLBuffer
+    /// Ranks served from slots already holding their expert (a rank repeating
+    /// an expert loaded for an earlier rank of the same visit counts as a hit).
     let hits: Int
+    /// Experts read from the layer file for this visit.
     let misses: Int
 }
 
@@ -257,9 +276,17 @@ struct Inkling2DecodeBinding {
 ///   The slots live in the staging slabs, which decode leaves idle; a
 ///   prefill visit of a staged layer empties every cache.
 ///
-/// Staged layer files are never mapped and bound: Metal makes a bound
-/// mapping resident in full, which would page in and pin every staged layer
-/// (8.9 GB on the Mini) at a decode step (K4's probe, 2026-11-23).
+/// Slot ownership: a decode visit's slots belong to its command buffer from
+/// `prepareDecodeVisit` until `endDecodeVisit`'s signal; the store waits for
+/// that signal before refilling a slot of the layer, and a prefill fill of
+/// the slabs waits for every decode visit ended so far. A decode visit waits
+/// for every prefill visit's GPU reads of the slabs before it refills them.
+/// Use the store from one thread (the runner's).
+///
+/// Staged layer files are mapped read-only for CPU readers (references,
+/// checks) but never bound on the GPU: Metal makes a bound mapping resident
+/// in full, which would page in and pin every staged layer (8.9 GB on the
+/// Mini) at a decode step (K4's probe, 2026-11-23).
 final class Inkling2ExpertStore: @unchecked Sendable {
     enum StoreError: Error, Equatable {
         case openFailed(path: String, errno: Int32)
@@ -268,6 +295,16 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         case visitNotStarted(layer: Int)
         case cacheTooSmall(layer: Int, slots: Int)
         case notStaged(layer: Int)
+        case timedOut(String)
+        case mapFailed(path: String, errno: Int32)
+    }
+
+    /// Owns one read-only `mmap` region; captured by the buffer's deallocator.
+    private final class Mapping: @unchecked Sendable {
+        let base: UnsafeMutableRawPointer
+        let length: Int
+        init(base: UnsafeMutableRawPointer, length: Int) { self.base = base; self.length = length }
+        deinit { munmap(base, length) }
     }
 
     /// One staged layer's decode cache: `slots` experts at the layer's stride
@@ -290,6 +327,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         var expertIn: [Int]
         var lastUse: [UInt64]
         var clock: UInt64 = 0
+        /// `decodeDone` value of the last ended decode visit of this layer.
+        var lastRead: UInt64 = 0
 
         init(layer: Int, spec: Inkling2ExpertLayerSpec, shape: Inkling2MoEShape, slab: MTLBuffer, offset: Int,
              slots: Int, device: MTLDevice) throws {
@@ -313,7 +352,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             var slotShape = shape
             slotShape.experts = slots
             self.pool = try Inkling2ExpertPool(buffer: slab, offset: offset, encoding: spec.encoding, shape: slotShape,
-                                               expertStride: spec.expertStride, gateUpScales: gateUp, downScales: down)
+                                               expertStride: spec.expertStride, gateUpScales: gateUp, downScales: down,
+                                               isSlotPool: true)
             self.expertIn = [Int](repeating: -1, count: slots)
             self.lastUse = [UInt64](repeating: 0, count: slots)
         }
@@ -332,13 +372,22 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     let plan: Inkling2ExpertResidencyPlan
     let shape: Inkling2MoEShape
     private let resident: [Int: Inkling2ExpertPool]
+    private let mapped: [Int: Inkling2ExpertPool]
     private let templates: [Int: Inkling2ExpertPool]
     private let caches: [Int: DecodeCache]
+    /// The staged ring, for reading its state (`error`, `bytesRead`). Stage
+    /// only through `beginPrefillVisit`: a direct `stage` would bypass the
+    /// decode-cache bookkeeping and the slot-ownership fence.
     let staging: Inkling2StagedExpertLayers?
     private var open: [Int: [Inkling2StagedExpertLayers.Ticket]] = [:]
     /// Set by a staged prefill visit (it overwrites the slabs the caches use).
     private var cachesStale = false
+    /// Signalled by each ended decode visit's command buffer with its count.
+    private let decodeDone: MTLSharedEvent
+    private var decodeIssued: UInt64 = 0
     private let lock = NSLock()
+    /// How long the CPU waits for the GPU before reporting `timedOut`.
+    var waitTimeoutMS: UInt64 = 120_000
 
     init(device: MTLDevice, shape: Inkling2MoEShape, layers: [Inkling2ExpertLayerSpec],
          plan: Inkling2ExpertResidencyPlan) throws {
@@ -362,6 +411,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         }
 
         var resident: [Int: Inkling2ExpertPool] = [:]
+        var mapped: [Int: Inkling2ExpertPool] = [:]
         var templates: [Int: Inkling2ExpertPool] = [:]
         var stagedFiles: [Int: Inkling2ExpertLayerFile] = [:]
         var stagedLayers: [Int] = []
@@ -381,6 +431,25 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             case .staged:
                 stagedFiles[layer] = spec.file
                 stagedLayers.append(layer)
+                // A read-only mapping for CPU readers (address space only
+                // until something touches it).
+                let fd = Darwin.open(spec.file.path, O_RDONLY)
+                guard fd >= 0 else { throw StoreError.openFailed(path: spec.file.path, errno: errno) }
+                defer { close(fd) }
+                let aligned = spec.file.offset / UInt64(pageSize) * UInt64(pageSize)
+                let shift = Int(spec.file.offset - aligned)
+                let length = (shift + spec.file.bytes + pageSize - 1) / pageSize * pageSize
+                guard let base = mmap(nil, length, PROT_READ, MAP_SHARED, fd, off_t(aligned)), base != MAP_FAILED else {
+                    throw StoreError.mapFailed(path: spec.file.path, errno: errno)
+                }
+                let mapping = Mapping(base: base, length: length)
+                nonisolated(unsafe) let start = base
+                guard let buffer = device.makeBuffer(bytesNoCopy: start, length: length, options: .storageModeShared,
+                                                     deallocator: { _, _ in _ = mapping }) else {
+                    throw StoreError.allocationFailed("mapped layer \(layer)")
+                }
+                buffer.label = "inkling2.experts.layer\(layer).mapped.cpu-only"
+                mapped[layer] = try pool(spec, buffer: buffer, offset: shift)
             }
         }
         let staging = stagedFiles.isEmpty ? nil
@@ -404,13 +473,26 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                                                 offset: (index % perSlab) * region, slots: slots, device: device)
             }
         }
+        guard let decodeDone = device.makeSharedEvent() else { throw StoreError.allocationFailed("decode event") }
+        self.decodeDone = decodeDone
         self.resident = resident
+        self.mapped = mapped
         self.templates = templates
         self.caches = caches
         self.staging = staging
     }
 
-    func isStaged(layer: Int) -> Bool { resident[layer] == nil }
+    func isStaged(layer: Int) -> Bool {
+        precondition(plan.placements.indices.contains(layer), "layer \(layer) out of range")
+        return plan.placements[layer] == .staged
+    }
+
+    /// The staging reader's first error; after one, discard the store.
+    var stagingError: Inkling2StagedExpertLayers.StagingError? { staging?.error }
+    /// Bytes the staging reader has read (diagnostics).
+    var stagingBytesRead: Int { staging?.bytesRead ?? 0 }
+    /// Waits on the CPU until every queued staging read has run.
+    func drainStaging() { staging?.drain() }
 
     /// Decode slots per staged layer (diagnostics, tests).
     func decodeSlots(layer: Int) -> Int? { caches[layer]?.slots }
@@ -419,6 +501,14 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// the GPU, no readback). Staged layers go through `prepareDecodeVisit`.
     func residentPool(layer: Int) -> Inkling2ExpertPool? { resident[layer] }
 
+    /// Every layer's experts for CPU readers: a resident layer's buffer, or
+    /// a staged layer's file mapped read-only. Never bind a staged layer's
+    /// pool on the GPU (Metal would page in and pin the whole file); decode
+    /// staged layers through `prepareDecodeVisit`.
+    func decodePool(layer: Int) -> Inkling2ExpertPool {
+        resident[layer] ?? mapped[layer]!
+    }
+
     /// Starts a prefill visit of `layer` in `commandBuffer`, before its MoE
     /// encoder: a staged layer takes the next slab ticket (its read starts
     /// now, one layer ahead of the GPU) and the command buffer waits for it.
@@ -426,9 +516,13 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     func beginPrefillVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool {
         if let pool = resident[layer] { return pool }
         guard let staging, let template = templates[layer] else { preconditionFailure("layer \(layer)") }
-        let ticket = try staging.stage(layer: layer)
+        lock.lock()
+        defer { lock.unlock() }
+        // The fill must not overwrite decode slots a queued command still reads.
+        let ticket = try staging.stage(layer: layer, after: (decodeDone, decodeIssued))
         staging.encodeWait(ticket, commandBuffer: commandBuffer)
-        lock.lock(); open[layer, default: []].append(ticket); cachesStale = true; lock.unlock()
+        open[layer, default: []].append(ticket)
+        cachesStale = true
         return try template.rebound(to: ticket.slab)
     }
 
@@ -449,35 +543,55 @@ final class Inkling2ExpertStore: @unchecked Sendable {
 
     /// For a command buffer that will never be committed: releases every
     /// prefill visit begun and not yet ended, in order (see
-    /// `Inkling2StagedExpertLayers.abandon`).
+    /// `Inkling2StagedExpertLayers.abandon`), and marks every decode visit
+    /// ended so far as done. Call it only after every committed command
+    /// buffer has completed.
     func abandonOpenVisits() throws {
         lock.lock()
         let tickets = open.values.flatMap { $0 }
         open.removeAll()
+        if decodeDone.signaledValue < decodeIssued { decodeDone.signaledValue = decodeIssued }
         lock.unlock()
         try staging?.abandon(tickets)
+    }
+
+    /// Ends a decode visit: after the encoder that reads `binding.pool`, in
+    /// the same command buffer. Its slots are released when the command
+    /// buffer reaches this point.
+    func endDecodeVisit(_ binding: Inkling2DecodeBinding, commandBuffer: MTLCommandBuffer) {
+        lock.lock()
+        decodeIssued += 1
+        caches[binding.layer]?.lastRead = decodeIssued
+        let value = decodeIssued
+        lock.unlock()
+        commandBuffer.encodeSignalEvent(decodeDone, value: value)
     }
 
     /// A decode visit of a staged layer, on the CPU after the runner has read
     /// back the visit's routed `expertIDs` (`topK` of them): loads the misses
     /// into the layer's cache slots (least recently used first, never a slot
     /// the visit itself needs), refreshes the slot scales and writes the
-    /// slot ids. Every command buffer that read this layer's slots before
-    /// must have completed (the readback that produced `expertIDs` waits for
-    /// all earlier work), and no prefill may be in flight.
+    /// slot ids. Before refilling, it waits for the GPU to finish the prefill
+    /// visits that wrote the slabs and the last decode visit of this layer
+    /// (`endDecodeVisit`). Encode the visit with the binding, then call
+    /// `endDecodeVisit` in the same command buffer.
     func prepareDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         guard let cache = caches[layer] else { throw StoreError.notStaged(layer: layer) }
         precondition(expertIDs.count == shape.topK && expertIDs.allSatisfy { $0 >= 0 && $0 < shape.experts })
         lock.lock()
-        if cachesStale {
-            // A prefill wrote the slabs: wait for its last fill, then forget.
-            lock.unlock()
-            staging?.drain()
-            lock.lock()
+        defer { lock.unlock() }
+        if cachesStale, let staging {
+            // Prefill wrote the slabs: wait for its last read into them and
+            // for the GPU to finish reading them, then forget every cache.
+            staging.drain()
+            let last = staging.lastSequence
+            if last > 0, staging.released.signaledValue < last,
+               !staging.released.wait(untilSignaledValue: last, timeoutMS: waitTimeoutMS) {
+                throw StoreError.timedOut("prefill reads of the staging slabs")
+            }
             for c in caches.values { c.clear() }
             cachesStale = false
         }
-        lock.unlock()
 
         cache.clock += 1
         var slotFor = [Int](repeating: -1, count: expertIDs.count)
@@ -490,10 +604,11 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             }
         }
         let needed = Set(slotFor.filter { $0 >= 0 })
-        var loads: [(slot: Int, expert: Int)] = []
+        var loads: [(slot: Int, expert: Int, previous: Int, previousUse: UInt64)] = []
         for (rank, expert) in expertIDs.enumerated() where slotFor[rank] < 0 {
-            if let slot = cache.slotOf[expert] {           // a repeated id in this visit
+            if let slot = cache.slotOf[expert] {           // loaded for an earlier rank of this visit
                 slotFor[rank] = slot
+                hits += 1
                 continue
             }
             var victim = -1
@@ -501,15 +616,27 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                 if victim < 0 || cache.lastUse[slot] < cache.lastUse[victim] { victim = slot }
             }
             precondition(victim >= 0, "fewer slots than ranks")
+            loads.append((victim, expert, cache.expertIn[victim], cache.lastUse[victim]))
             if cache.expertIn[victim] >= 0 { cache.slotOf[cache.expertIn[victim]] = nil }
             cache.expertIn[victim] = expert
             cache.slotOf[expert] = victim
             cache.lastUse[victim] = cache.clock
             slotFor[rank] = victim
-            loads.append((victim, expert))
         }
         if !loads.isEmpty {
-            try Self.readExperts(cache: cache, loads: loads)
+            // The previous decode visit of this layer must be done reading.
+            if decodeDone.signaledValue < cache.lastRead,
+               !decodeDone.wait(untilSignaledValue: cache.lastRead, timeoutMS: waitTimeoutMS) {
+                rollBack(cache, loads)
+                throw StoreError.timedOut("decode reads of layer \(layer)'s slots")
+            }
+            do {
+                try Self.readExperts(cache: cache, loads: loads.map { ($0.slot, $0.expert) })
+            } catch {
+                // The slots may hold partial bytes: mark them empty.
+                rollBack(cache, loads, keepPrevious: false)
+                throw error
+            }
             let gateUp = cache.gateUpScales.contents().bindMemory(to: Float.self, capacity: cache.slots)
             let down = cache.downScales.contents().bindMemory(to: Float.self, capacity: cache.slots)
             for load in loads {
@@ -519,12 +646,30 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         }
         let ids = cache.ids.contents().bindMemory(to: UInt32.self, capacity: shape.topK)
         for (rank, slot) in slotFor.enumerated() { ids[rank] = UInt32(slot) }
-        return Inkling2DecodeBinding(pool: cache.pool, ids: cache.ids, hits: hits, misses: loads.count)
+        return Inkling2DecodeBinding(layer: layer, pool: cache.pool, ids: cache.ids, hits: hits, misses: loads.count)
+    }
+
+    /// Undoes a visit's slot assignments: back to the evicted experts while
+    /// the slots are untouched, or empty once a read may have written them.
+    private func rollBack(_ cache: DecodeCache,
+                          _ loads: [(slot: Int, expert: Int, previous: Int, previousUse: UInt64)],
+                          keepPrevious: Bool = true) {
+        for load in loads.reversed() {
+            cache.slotOf[load.expert] = nil
+            if keepPrevious && load.previous >= 0 {
+                cache.expertIn[load.slot] = load.previous
+                cache.slotOf[load.previous] = load.slot
+                cache.lastUse[load.slot] = load.previousUse
+            } else {
+                cache.expertIn[load.slot] = -1
+                cache.lastUse[load.slot] = 0
+            }
+        }
     }
 
     /// Reads each loaded expert's blob from the layer file into its slot, in
     /// parallel, through the file cache.
-    private static func readExperts(cache: DecodeCache, loads: [(slot: Int, expert: Int)]) throws {
+    private static func readExperts(cache: DecodeCache, loads: [(Int, Int)]) throws {
         let fd = Darwin.open(cache.file.path, O_RDONLY)
         guard fd >= 0 else { throw StoreError.openFailed(path: cache.file.path, errno: errno) }
         defer { close(fd) }
@@ -534,8 +679,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         let stride = cache.stride, bytes = cache.blobBytes, fileOffset = cache.file.offset
         let work = loads
         DispatchQueue.concurrentPerform(iterations: work.count) { i in
-            let target = base + work[i].slot * stride
-            let source = off_t(fileOffset) + off_t(work[i].expert * stride)
+            let target = base + work[i].0 * stride
+            let source = off_t(fileOffset) + off_t(work[i].1 * stride)
             var done = 0
             while done < bytes {
                 let n = pread(fd, target + done, bytes - done, source + off_t(done))

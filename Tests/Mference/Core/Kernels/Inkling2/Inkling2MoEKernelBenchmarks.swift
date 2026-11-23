@@ -257,6 +257,42 @@ import MferenceValidationSupport
         print(String(format: "[inkling2-moe-kbench] staging %.2f GB in %.3f s (%.1f GB/s, first reads included)",
                      Double(staged.bytesRead) / 1e9, staged.secondsReading,
                      Double(staged.bytesRead) / 1e9 / staged.secondsReading))
+
+        // Decode-cache misses at full size: both files as staged layers of a
+        // store (each cache then holds the whole layer, so every visit of
+        // fresh experts is 8 misses), warm file cache.
+        let specs = [
+            Inkling2ExpertLayerSpec(file: files[0]!, encoding: .nvfp4, expertStride: 4_489_216, gateUpScales: nil, downScales: nil),
+            Inkling2ExpertLayerSpec(file: files[1]!, encoding: .q8_0, expertStride: 8_470_528, gateUpScales: nil, downScales: nil),
+        ]
+        let plan = Inkling2ExpertResidencyPlan(placements: [.staged, .staged], stagingSlabs: 2, residentBytes: 0, stagingBytes: 0)
+        let store = try Inkling2ExpertStore(device: context.device, shape: Self.shape, layers: specs, plan: plan)
+        // The runner prefills before it decodes, so the slabs are touched;
+        // here a first pass touches them, then a staged prefill visit empties
+        // the caches, and the second pass is timed.
+        for pass in 0..<2 {
+        if pass == 1 {
+            let cb = context.queue.makeCommandBuffer()!
+            _ = try store.beginPrefillVisit(layer: 0, commandBuffer: cb)
+            try store.endPrefillVisit(layer: 0, commandBuffer: cb)
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+        for (layer, label) in [(0, "nvfp4"), (1, "q8_0")] {
+            var times: [Double] = []
+            for visit in 0..<(Self.shape.experts / 8) {
+                let ids = (0..<8).map { visit * 8 + $0 }
+                let start = DispatchTime.now().uptimeNanoseconds
+                let binding = try store.prepareDecodeVisit(layer: layer, expertIDs: ids)
+                times.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+                #expect(binding.misses == 8)
+            }
+            times.sort()
+            print(String(format: "[inkling2-moe-kbench] decode cache %@ (%@): 8 misses per visit, median %.2f ms, best %.2f ms, worst %.2f ms",
+                         label, pass == 0 ? "first touch of the slabs" : "slabs touched", times[times.count / 2],
+                         times[0], times[times.count - 1]))
+        }
+        }
     }
 
     /// Decode reading a layer file mapped and wrapped whole
