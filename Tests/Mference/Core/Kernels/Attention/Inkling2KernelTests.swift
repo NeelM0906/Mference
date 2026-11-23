@@ -28,9 +28,9 @@ enum Inkling2TestSupport {
     }
     static func halfRounded(_ values: [Float]) -> [Float] { values.map { Float(Float16($0)) } }
 
-    static func run(_ context: MetalContext, _ body: (MTLCommandBuffer) -> Void) {
+    static func run(_ context: MetalContext, _ body: (MTLCommandBuffer) throws -> Void) rethrows {
         let cb = context.queue.makeCommandBuffer()!
-        body(cb)
+        try body(cb)
         cb.commit()
         cb.waitUntilCompleted()
         #expect(cb.status == .completed, "command buffer: \(String(describing: cb.error))")
@@ -43,7 +43,8 @@ enum Inkling2TestSupport {
     /// and columns outside every segment untouched.
     @Test(arguments: [(37, 96, Inkling2Projection.Path.tiled), (64, 2304, .tiled),
                       (1, 2304, .rows), (2, 96, .rows), (3, 96, .rows), (8, 2304, .rows), (5, 2304, .tiled),
-                      (37, 2304, .tensorOps), (64, 128, .tensorOps)])
+                      (37, 2304, .tensorOps), (64, 128, .tensorOps),
+                      (37, 96, .tiled64), (130, 2304, .tiled64)])
     func stackedProjectionMatchesReference(tokens: Int, inputs: Int, path: Inkling2Projection.Path) throws {
         let ctx = try MetalContext()
         let library = try Inkling2KernelLibrary(context: ctx)

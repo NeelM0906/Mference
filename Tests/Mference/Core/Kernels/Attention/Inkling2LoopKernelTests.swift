@@ -24,8 +24,8 @@ import MferenceValidationSupport
         }
         let queries = S.random(queryCount * width, &rng, -0.1, 0.1)
         let out = ctx.device.makeBuffer(length: rows * queryCount * width * 4, options: .storageModeShared)!
-        S.run(ctx) { cb in
-            mix.encode(commandBuffer: cb, states: inputs, queries: .init(S.buffer(ctx.device, floats: queries)),
+        try S.run(ctx) { cb in
+            try mix.encode(commandBuffer: cb, states: inputs, queries: .init(S.buffer(ctx.device, floats: queries)),
                        queryCount: queryCount, output: .init(out), outputStride: queryCount * width, rows: rows)
         }
         let reference = Inkling2LoopRef.depthMix(states: dense, queries: queries, queryCount: queryCount,
@@ -33,15 +33,14 @@ import MferenceValidationSupport
         #expect(RelError.compute(actual: S.readFloats(out, count: rows * queryCount * width), reference: reference) < 2e-5)
     }
 
-    /// Two controllers share one down projection (F32 segments); each then
-    /// combines with its own forget and gain.
-    @Test(arguments: [(5, Inkling2Projection.Path.rows), (40, .tiled), (40, .tensorOps)])
-    func messageGatePipelineMatchesReference(rows: Int, path: Inkling2Projection.Path) throws {
+    /// Two controllers share one down product; their forget and gain products
+    /// run as one FP32 dispatch each; each combines with its own x and m.
+    @Test(arguments: [5, 40, 130])
+    func messageGatePipelineMatchesReference(rows: Int) throws {
         let ctx = try MetalContext()
         let library = try Inkling2KernelLibrary(context: ctx)
         let gate = try Inkling2MessageGate(library: library)
         let projection = try Inkling2Projection(library: library)
-        if path == .tensorOps && !projection.supportsTensorOps { return }
         var rng = SeedTree(0x6b00 + UInt64(rows)).key("ink2-gate")
         let width = 2304, rank = 64
         let controllers = 2
@@ -53,8 +52,9 @@ import MferenceValidationSupport
             forgets.append(S.random(width * rank, &rng, -0.2, 0.2))
             gains.append(S.random(width * rank, &rng, -0.2, 0.2))
         }
-        let h = ctx.device.makeBuffer(length: controllers * rows * 2 * width * 2, options: .storageModeShared)!
+        let h = ctx.device.makeBuffer(length: controllers * rows * 2 * width * 4, options: .storageModeShared)!
         let z = ctx.device.makeBuffer(length: rows * controllers * rank * 4, options: .storageModeShared)!
+        let fg = ctx.device.makeBuffer(length: rows * 2 * width * 4, options: .storageModeShared)!
         let downBuffer = S.buffer(ctx.device, floats: downs.flatMap { $0 })
         let xBuffers = xs.map { S.buffer(ctx.device, floats: $0) }
         let mBuffers = ms.map { S.buffer(ctx.device, floats: $0) }
@@ -63,28 +63,35 @@ import MferenceValidationSupport
             for c in 0..<controllers {
                 gate.encodeInputs(commandBuffer: cb, x: .init(xBuffers[c]), xStride: width,
                                   message: .init(mBuffers[c]), messageStride: width,
-                                  output: .init(h, offset: c * rows * 2 * width * 2), outputStride: 2 * width, rows: rows)
+                                  output: .init(h, offset: c * rows * 2 * width * 4), outputStride: 2 * width, rows: rows)
             }
-            let segments = (0..<controllers).map { c in
-                Inkling2ProjectionSegment(weightOffset: c * rank * 2 * width * 4, inputOffset: c * rows * 2 * width,
-                                          inputStride: 2 * width, rows: rank, outColumn: c * rank, format: .f32)
-            }
-            projection.encode(commandBuffer: cb, weights: downBuffer, input: h, output: z, tokens: rows,
-                              inputs: 2 * width, outStride: controllers * rank, segments: segments, path: path)
-            for c in 0..<controllers {
-                gate.encodeCombine(commandBuffer: cb, x: .init(xBuffers[c]), xStride: width,
-                                   message: .init(mBuffers[c]), messageStride: width,
-                                   z: .init(z), zStride: controllers * rank, zColumn: c * rank,
-                                   forget: .init(S.buffer(ctx.device, floats: forgets[c])),
-                                   gain: .init(S.buffer(ctx.device, floats: gains[c])),
-                                   output: .init(outs[c]), outputStride: width, rows: rows)
-            }
+            projection.encodeFloat(commandBuffer: cb, weights: downBuffer, input: h, output: z, tokens: rows,
+                                   inputs: 2 * width, outStride: controllers * rank,
+                                   segments: (0..<controllers).map { c in
+                                       Inkling2ProjectionSegment(weightOffset: c * rank * 2 * width * 4,
+                                                                 inputOffset: c * rows * 2 * width, inputStride: 2 * width,
+                                                                 rows: rank, outColumn: c * rank, format: .f32)
+                                   })
         }
         for c in 0..<controllers {
+            let fgWeights = S.buffer(ctx.device, floats: forgets[c] + gains[c])
+            let out = outs[c]
+            S.run(ctx) { cb in
+                projection.encodeFloat(commandBuffer: cb, weights: fgWeights, input: z, output: fg, tokens: rows, inputs: rank,
+                                       outStride: 2 * width,
+                                       segments: [.init(weightOffset: 0, inputOffset: c * rank, inputStride: controllers * rank,
+                                                        rows: width, outColumn: 0, format: .f32),
+                                                  .init(weightOffset: width * rank * 4, inputOffset: c * rank,
+                                                        inputStride: controllers * rank, rows: width, outColumn: width,
+                                                        format: .f32)])
+                gate.encodeCombine(commandBuffer: cb, x: .init(xBuffers[c]), xStride: width,
+                                   message: .init(mBuffers[c]), messageStride: width,
+                                   gates: .init(fg), gatesStride: 2 * width, forgetColumn: 0, gainColumn: width,
+                                   output: .init(out), outputStride: width, rows: rows)
+            }
             let reference = Inkling2LoopRef.messageGate(x: xs[c], message: ms[c], down: downs[c], forget: forgets[c],
                                                         gain: gains[c], rows: rows, hidden: width, rank: rank)
-            // The down product reads FP16 normalised inputs and half-rounded weights.
-            #expect(RelError.compute(actual: S.readFloats(outs[c], count: rows * width), reference: reference) < 3e-3)
+            #expect(RelError.compute(actual: S.readFloats(out, count: rows * width), reference: reference) < 1e-4)
         }
     }
 }

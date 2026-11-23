@@ -11,10 +11,26 @@ public final class Inkling2DepthMix {
     public static let maxStates = 6
     public static let maxQueries = 4
 
-    private let pipeline: MTLComputePipelineState
+    private let library: Inkling2KernelLibrary
 
+    /// Builds the specialisations the model uses: layer and MoE inputs (1 to 6
+    /// states, 1 query; global layers' attention inputs 3 queries) and message
+    /// retrieval (2 states, 4 queries). Others build on first use.
     public init(library: Inkling2KernelLibrary) throws {
-        pipeline = try library.pipeline("inkling2_depth_mix")
+        self.library = library
+        for states in 1...Self.maxStates {
+            _ = try pipeline(states: states, queries: 1)
+            _ = try pipeline(states: states, queries: 3)
+        }
+        _ = try pipeline(states: 2, queries: 4)
+    }
+
+    /// The kernel specialised for a state and query count (cached).
+    func pipeline(states: Int, queries: Int) throws -> MTLComputePipelineState {
+        try library.pipeline("inkling2_depth_mix", constants: [
+            .init(index: 200, value: .uint32(UInt32(states))),
+            .init(index: 201, value: .uint32(UInt32(queries))),
+        ])
     }
 
     /// `states`: up to 6 FP32 `[rows][stride]` inputs; `queries`: FP32
@@ -26,7 +42,7 @@ public final class Inkling2DepthMix {
                        queries: Inkling2BufferRef, queryCount: Int,
                        output: Inkling2BufferRef, outputStride: Int,
                        rows: Int, width: Int = Inkling2AttentionShape.hidden,
-                       eps: Float = Inkling2AttentionShape.rmsEps) {
+                       eps: Float = Inkling2AttentionShape.rmsEps) throws {
         precondition(rows > 0 && (1...Self.maxStates).contains(states.count))
         precondition((1...Self.maxQueries).contains(queryCount) && outputStride >= queryCount * width)
         var strides = [UInt32](repeating: 0, count: 6)
@@ -35,6 +51,7 @@ public final class Inkling2DepthMix {
                                        stateCount: UInt32(states.count), queryCount: UInt32(queryCount),
                                        stateStride: (strides[0], strides[1], strides[2], strides[3], strides[4], strides[5]),
                                        outStride: UInt32(outputStride), eps: eps)
+        let pipeline = try self.pipeline(states: states.count, queries: queryCount)
         let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2MixParams>.stride, index: 0)
@@ -51,13 +68,16 @@ public final class Inkling2DepthMix {
 }
 
 /// The loop's message gate, `(1 - tanh(F z)) x + tanh(G z) m` with
-/// `z = W_down [rms(x); rms(m)]`, in three steps per controller (query, key,
-/// value or MoE input):
-/// 1. `encodeInputs`: `h = half([rms(x); rms(m)])`, FP16 `[rows][2 * width]`;
-/// 2. `Inkling2Projection` with the controller's `loop_*_ctrl_down` as an
-///    `.f32` segment (`inputs` 4608, 64 rows) into `z`; the three attention
-///    controllers of a visit fit one projection dispatch;
-/// 3. `encodeCombine`: forget and gain products in FP32 from `z` and the mix.
+/// `z = W_down [rms(x); rms(m)]`, all in FP32 as the vendor computes it, in
+/// four dispatches per visit's controllers (query, key, value; the MoE input
+/// controller the same way):
+/// 1. `encodeInputs`: `h = [rms(x); rms(m)]`, FP32 `[rows][2 * width]`, per controller;
+/// 2. `Inkling2Projection.encodeFloat` with each controller's `loop_*_ctrl_down`
+///    (`.f32`, 4608 inputs, 64 rows) into `z`; the three attention controllers
+///    share one dispatch;
+/// 3. `Inkling2Projection.encodeFloat` with `loop_*_ctrl_forget` and
+///    `loop_*_ctrl_gain` (`.f32`, 64 inputs, 2304 rows each) on `z` into `fg`;
+/// 4. `encodeCombine`: the elementwise mix.
 public final class Inkling2MessageGate {
     private let inputs: MTLComputePipelineState
     private let combine: MTLComputePipelineState
@@ -87,29 +107,27 @@ public final class Inkling2MessageGate {
         encoder.endEncoding()
     }
 
-    /// `forget`, `gain`: FP32 `[width][rank]` (GGUF `loop_*_ctrl_forget`,
-    /// `loop_*_ctrl_gain`). `output` may alias `x`.
+    /// `gates`: FP32 `[rows][gatesStride]` holding `F z` at `forgetColumn` and
+    /// `G z` at `gainColumn`. `output` may alias `x`.
     public func encodeCombine(commandBuffer: MTLCommandBuffer,
                               x: Inkling2BufferRef, xStride: Int,
                               message: Inkling2BufferRef, messageStride: Int,
-                              z: Inkling2BufferRef, zStride: Int, zColumn: Int,
-                              forget: Inkling2BufferRef, gain: Inkling2BufferRef,
+                              gates: Inkling2BufferRef, gatesStride: Int, forgetColumn: Int, gainColumn: Int,
                               output: Inkling2BufferRef, outputStride: Int,
-                              rows: Int, width: Int = Inkling2AttentionShape.hidden, rank: Int = 64) {
-        precondition(rows > 0 && rank % 4 == 0 && rank <= 128)
-        precondition(forget.offset % 16 == 0 && gain.offset % 16 == 0)
-        var params = Inkling2GateCombineParams(rows: UInt32(rows), width: UInt32(width), rank: UInt32(rank),
+                              rows: Int, width: Int = Inkling2AttentionShape.hidden) {
+        precondition(rows > 0)
+        var params = Inkling2GateCombineParams(rows: UInt32(rows), width: UInt32(width),
                                                xStride: UInt32(xStride), mStride: UInt32(messageStride),
-                                               zStride: UInt32(zStride), zColumn: UInt32(zColumn),
-                                               outStride: UInt32(outputStride))
+                                               fgStride: UInt32(gatesStride), forgetColumn: UInt32(forgetColumn),
+                                               gainColumn: UInt32(gainColumn), outStride: UInt32(outputStride))
         let encoder = commandBuffer.makeComputeCommandEncoder()!
         encoder.setComputePipelineState(combine)
         encoder.setBytes(&params, length: MemoryLayout<Inkling2GateCombineParams>.stride, index: 0)
-        for (index, ref) in [x, message, z, forget, gain, output].enumerated() {
+        for (index, ref) in [x, message, gates, output].enumerated() {
             encoder.setBuffer(ref.buffer, offset: ref.offset, index: index + 1)
         }
-        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
-                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.dispatchThreads(MTLSize(width: width, height: rows, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
     }
 }
@@ -138,10 +156,10 @@ struct Inkling2GateInputParams {
 struct Inkling2GateCombineParams {
     var rows: UInt32
     var width: UInt32
-    var rank: UInt32
     var xStride: UInt32
     var mStride: UInt32
-    var zStride: UInt32
-    var zColumn: UInt32
+    var fgStride: UInt32
+    var forgetColumn: UInt32
+    var gainColumn: UInt32
     var outStride: UInt32
 }

@@ -165,9 +165,13 @@ void inkling2_q8_stacked_mm(
 
         threadgroup const half* lsma = sa + 4 * 64 * (sgitg % 2);
         threadgroup const half* lsmb = sb + 2 * 64 * (sgitg / 2);
+        INK2_UNROLL
         for (short ik = 0; ik < 4; ++ik) {
+            INK2_UNROLL
             for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false); }
+            INK2_UNROLL
             for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false); }
+            INK2_UNROLL
             for (short i = 0; i < 8; ++i) {
                 simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
             }
@@ -199,6 +203,270 @@ void inkling2_q8_stacked_mm(
     }
 }
 
+// Same product with 64 x 64 tiles: each simdgroup owns 32 rows x 32 tokens
+// (16 accumulators), halving the fragment loads per multiply. Grid: x =
+// ceil(tokens / 64), y = 64-row tiles as for the 32-token kernel.
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void inkling2_q8_stacked_mm64(
+    constant Inkling2ProjParams& p [[buffer(0)]],
+    device const uchar* weights    [[buffer(1)]],
+    device const half*  input      [[buffer(2)]],
+    device float*       output     [[buffer(3)]],
+    uint3  tgpig [[threadgroup_position_in_grid]],
+    ushort tiitg [[thread_index_in_threadgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float shmem[4096];                 // 16 KB: A (4 KB) + B (4 KB); edge store (16 KB)
+    threadgroup half* sa = (threadgroup half*)shmem;
+    threadgroup half* sb = sa + 64 * 32;
+
+    const uint tile = tgpig.y;
+    uint si = 0;
+    for (uint i = 1; i < p.segmentCount; ++i) {
+        if (tile >= p.segments[i].tileStart) { si = i; }
+    }
+    const Inkling2ProjSegment seg = p.segments[si];
+    const uint r0 = (tile - seg.tileStart) * 64u;
+    const uint t0 = tgpig.x * 64u;
+    if (r0 >= seg.rows || t0 >= p.tokens) { return; }
+    const short nr0 = short(min(64u, seg.rows - r0));
+    const short nr1 = short(min(64u, p.tokens - t0));
+
+    // A: thread -> (row tiitg/2, 16 values of the block's half tiitg%2).
+    const short ar  = short(tiitg / 2);
+    const short il0 = short(tiitg % 2);
+    const short lr0 = min(ar, short(nr0 - 1));
+    // B: thread -> (token tiitg/2, 16 values at 16*(tiitg%2)).
+    const short br  = short(tiitg / 2);
+    const short lr1 = min(br, short(nr1 - 1));
+    const short iy  = short(16 * (tiitg % 2));
+
+    const uint blocks = p.inputs / 32u;
+    const uint format = seg.format;
+    const uint rowBytes = format == 2u ? p.inputs * 4u : format == 1u ? p.inputs * 2u : blocks * 34u;
+    device const uchar* arow = weights + seg.weightOffset + ulong(r0 + uint(lr0)) * rowBytes;
+    device const half* y = input + seg.inputOffset + ulong(t0 + uint(lr1)) * seg.inputStride + uint(iy);
+
+    simdgroup_half8x8 ma[4];
+    simdgroup_half8x8 mb[4];
+    simdgroup_float8x8 mc[16];
+    INK2_UNROLL
+    for (short i = 0; i < 16; ++i) { mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
+
+    const short asy = ar / 8, alx = ar % 8;
+    const short bsx = short(2 * (tiitg % 2)), bsy = br / 8, bly = br % 8;
+
+    for (uint kb = 0; kb < blocks; ++kb) {
+        half w[16];
+        if (format == 2u) {
+            device const float4* src = (device const float4*)(arow + (kb * 32u + 16u * uint(il0)) * 4u);
+            for (short i = 0; i < 4; ++i) {
+                const half4 v = half4(src[i]);
+                w[4 * i] = v.x; w[4 * i + 1] = v.y; w[4 * i + 2] = v.z; w[4 * i + 3] = v.w;
+            }
+        } else if (format == 1u) {
+            device const bfloat4* src = (device const bfloat4*)(arow + (kb * 32u + 16u * uint(il0)) * 2u);
+            for (short i = 0; i < 4; ++i) {
+                const half4 v = half4(float4(src[i]));
+                w[4 * i] = v.x; w[4 * i + 1] = v.y; w[4 * i + 2] = v.z; w[4 * i + 3] = v.w;
+            }
+        } else {
+            device const uchar* blk = arow + kb * 34u;
+            const half d = *((device const half*)blk);
+            device const ushort* qs = (device const ushort*)(blk + 2u + 16u * uint(il0));
+            for (short i = 0; i < 8; ++i) {
+                const char2 c = as_type<char2>(qs[i]);
+                w[2 * i]     = d * half(c.x);
+                w[2 * i + 1] = d * half(c.y);
+            }
+        }
+        const half4 y0 = *((device const half4*)y);
+        const half4 y1 = *((device const half4*)(y + 4));
+        const half4 y2 = *((device const half4*)(y + 8));
+        const half4 y3 = *((device const half4*)(y + 12));
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short i = 0; i < 16; ++i) {
+            const short ib = 8 * (2 * il0 + i / 8) + asy;     // [k block][row block]
+            sa[64 * ib + 8 * (i % 8) + alx] = w[i];          // block stored [k][row]
+        }
+        {
+            const short ib0 = 8 * bsx + bsy, ib1 = 8 * (bsx + 1) + bsy;   // [k block][token block]
+            threadgroup half4* d0 = (threadgroup half4*)(sb + 64 * ib0 + 8 * bly);
+            threadgroup half4* d1 = (threadgroup half4*)(sb + 64 * ib1 + 8 * bly);
+            d0[0] = y0; d0[1] = y1;
+            d1[0] = y2; d1[1] = y3;
+        }
+        y += 32;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half* lsma = sa + 4 * 64 * (sgitg % 2);
+        threadgroup const half* lsmb = sb + 4 * 64 * (sgitg / 2);
+        INK2_UNROLL
+        for (short ik = 0; ik < 4; ++ik) {
+            INK2_UNROLL
+            for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false); }
+            INK2_UNROLL
+            for (short i = 0; i < 4; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false); }
+            INK2_UNROLL
+            for (short i = 0; i < 16; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 8 * 64;
+        }
+    }
+
+    const ulong column = ulong(seg.outColumn) + r0 + 32u * (sgitg & 1);
+    if (nr0 == 64 && nr1 == 64) {
+        device float* C = output + ulong(t0 + 32u * (sgitg >> 1)) * p.outStride + column;
+        INK2_UNROLL
+        for (short i = 0; i < 16; ++i) {
+            simdgroup_store(mc[i], C + 8 * (i % 4) + ulong(8 * (i / 4)) * p.outStride, p.outStride, 0, false);
+        }
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float* tmp = shmem;                       // [64 tokens][64 rows]
+        threadgroup float* base = tmp + (32 * (sgitg >> 1)) * 64 + 32 * (sgitg & 1);
+        INK2_UNROLL
+        for (short i = 0; i < 16; ++i) {
+            simdgroup_store(mc[i], base + 8 * (i % 4) + 8 * 64 * (i / 4), 64, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = tiitg; e < 64u * 64u; e += 128u) {
+            const uint tok = e / 64u, row = e % 64u;
+            if (tok < uint(nr1) && row < uint(nr0)) {
+                output[ulong(t0 + tok) * p.outStride + seg.outColumn + r0 + row] = tmp[e];
+            }
+        }
+    }
+}
+
+// FP32 product with 64 x 64 tiles: F32 weight rows, FP32 inputs, FP32
+// fragments. For the loop gates' small products (the vendor keeps them in
+// FP32). Same segment table as the stacked product (segments must be F32);
+// inputOffset and inputStride count floats.
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void inkling2_f32_mm64(
+    constant Inkling2ProjParams& p [[buffer(0)]],
+    device const uchar* weights    [[buffer(1)]],
+    device const float* input      [[buffer(2)]],
+    device float*       output     [[buffer(3)]],
+    uint3  tgpig [[threadgroup_position_in_grid]],
+    ushort tiitg [[thread_index_in_threadgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float shmem[4096];                 // 16 KB: A (8 KB) + B (8 KB); edge store (16 KB)
+    threadgroup float* sa = shmem;
+    threadgroup float* sb = sa + 64 * 32;
+
+    const uint tile = tgpig.y;
+    uint si = 0;
+    for (uint i = 1; i < p.segmentCount; ++i) {
+        if (tile >= p.segments[i].tileStart) { si = i; }
+    }
+    const Inkling2ProjSegment seg = p.segments[si];
+    const uint r0 = (tile - seg.tileStart) * 64u;
+    const uint t0 = tgpig.x * 64u;
+    if (r0 >= seg.rows || t0 >= p.tokens) { return; }
+    const short nr0 = short(min(64u, seg.rows - r0));
+    const short nr1 = short(min(64u, p.tokens - t0));
+
+    // A: thread -> (row tiitg/2, 16 values of the block's half tiitg%2).
+    const short ar  = short(tiitg / 2);
+    const short il0 = short(tiitg % 2);
+    const short lr0 = min(ar, short(nr0 - 1));
+    // B: thread -> (token tiitg/2, 16 values at 16*(tiitg%2)).
+    const short br  = short(tiitg / 2);
+    const short lr1 = min(br, short(nr1 - 1));
+    const short iy  = short(16 * (tiitg % 2));
+
+    const uint blocks = p.inputs / 32u;
+    const uint rowBytes = p.inputs * 4u;    // F32 rows only
+    device const uchar* arow = weights + seg.weightOffset + ulong(r0 + uint(lr0)) * rowBytes;
+    device const float* y = input + seg.inputOffset + ulong(t0 + uint(lr1)) * seg.inputStride + uint(iy);
+
+    simdgroup_float8x8 ma[4];
+    simdgroup_float8x8 mb[4];
+    simdgroup_float8x8 mc[16];
+    INK2_UNROLL
+    for (short i = 0; i < 16; ++i) { mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
+
+    const short asy = ar / 8, alx = ar % 8;
+    const short bsx = short(2 * (tiitg % 2)), bsy = br / 8, bly = br % 8;
+
+    for (uint kb = 0; kb < blocks; ++kb) {
+        float w[16];
+        {
+            device const float4* src = (device const float4*)(arow + (kb * 32u + 16u * uint(il0)) * 4u);
+            INK2_UNROLL
+            for (short i = 0; i < 4; ++i) {
+                const float4 v = src[i];
+                w[4 * i] = v.x; w[4 * i + 1] = v.y; w[4 * i + 2] = v.z; w[4 * i + 3] = v.w;
+            }
+        }
+        const float4 y0 = *((device const float4*)y);
+        const float4 y1 = *((device const float4*)(y + 4));
+        const float4 y2 = *((device const float4*)(y + 8));
+        const float4 y3 = *((device const float4*)(y + 12));
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short i = 0; i < 16; ++i) {
+            const short ib = 8 * (2 * il0 + i / 8) + asy;     // [k block][row block]
+            sa[64 * ib + 8 * (i % 8) + alx] = w[i];          // block stored [k][row]
+        }
+        {
+            const short ib0 = 8 * bsx + bsy, ib1 = 8 * (bsx + 1) + bsy;   // [k block][token block]
+            threadgroup float4* d0 = (threadgroup float4*)(sb + 64 * ib0 + 8 * bly);
+            threadgroup float4* d1 = (threadgroup float4*)(sb + 64 * ib1 + 8 * bly);
+            d0[0] = y0; d0[1] = y1;
+            d1[0] = y2; d1[1] = y3;
+        }
+        y += 32;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const float* lsma = sa + 4 * 64 * (sgitg % 2);
+        threadgroup const float* lsmb = sb + 4 * 64 * (sgitg / 2);
+        INK2_UNROLL
+        for (short ik = 0; ik < 4; ++ik) {
+            INK2_UNROLL
+            for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false); }
+            INK2_UNROLL
+            for (short i = 0; i < 4; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false); }
+            INK2_UNROLL
+            for (short i = 0; i < 16; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 8 * 64;
+        }
+    }
+
+    const ulong column = ulong(seg.outColumn) + r0 + 32u * (sgitg & 1);
+    if (nr0 == 64 && nr1 == 64) {
+        device float* C = output + ulong(t0 + 32u * (sgitg >> 1)) * p.outStride + column;
+        INK2_UNROLL
+        for (short i = 0; i < 16; ++i) {
+            simdgroup_store(mc[i], C + 8 * (i % 4) + ulong(8 * (i / 4)) * p.outStride, p.outStride, 0, false);
+        }
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float* tmp = shmem;                       // [64 tokens][64 rows]
+        threadgroup float* base = tmp + (32 * (sgitg >> 1)) * 64 + 32 * (sgitg & 1);
+        INK2_UNROLL
+        for (short i = 0; i < 16; ++i) {
+            simdgroup_store(mc[i], base + 8 * (i % 4) + 8 * 64 * (i / 4), 64, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = tiitg; e < 64u * 64u; e += 128u) {
+            const uint tok = e / 64u, row = e % 64u;
+            if (tok < uint(nr1) && row < uint(nr0)) {
+                output[ulong(t0 + tok) * p.outStride + seg.outColumn + r0 + row] = tmp[e];
+            }
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Small-batch Q8_0 projection (decode and tiny chunks): each simdgroup owns
 // two weight rows over the whole K; lane l reads eight quants of block
@@ -208,6 +476,70 @@ void inkling2_q8_stacked_mm(
 // product with tileStart counting row pairs. Grid: x = ceil(pairs / 4)
 // threadgroups of 4 simdgroups.
 // ----------------------------------------------------------------------------
+
+// Weight decode of one lane's eight values of block b, per format.
+template <uint FMT>
+static inline float ink2_mv_weights(device const uchar* row, uint b, uint part, thread float4& wa, thread float4& wb) {
+    if (FMT == 2u) {
+        device const float4* src = (device const float4*)(row + (b * 32u + 8u * part) * 4u);
+        wa = src[0];
+        wb = src[1];
+        return 1.0f;
+    } else if (FMT == 1u) {
+        device const bfloat4* src = (device const bfloat4*)(row + (b * 32u + 8u * part) * 2u);
+        wa = float4(src[0]);
+        wb = float4(src[1]);
+        return 1.0f;
+    } else {
+        device const uchar* blk = row + b * 34u;
+        device const ushort* qs = (device const ushort*)(blk + 2u + 8u * part);
+        const char2 c0 = as_type<char2>(qs[0]), c1 = as_type<char2>(qs[1]);
+        const char2 c2 = as_type<char2>(qs[2]), c3 = as_type<char2>(qs[3]);
+        wa = float4(c0.x, c0.y, c1.x, c1.y);
+        wb = float4(c2.x, c2.y, c3.x, c3.y);
+        return float(*((device const half*)blk));
+    }
+}
+
+template <short NT, uint FMT>
+static inline void ink2_mv_rows(constant Inkling2ProjParams& p, Inkling2ProjSegment seg, uint r, bool second,
+                                device const uchar* weights, device const half* input, device float* output,
+                                ushort lane) {
+    const uint blocks = p.inputs / 32u;
+    const uint rowBytes = FMT == 2u ? p.inputs * 4u : FMT == 1u ? p.inputs * 2u : blocks * 34u;
+    device const uchar* row0 = weights + seg.weightOffset + ulong(r) * rowBytes;
+    device const uchar* row1 = second ? row0 + rowBytes : row0;
+    const uint tokens = min(p.tokens, uint(NT));
+    float acc0[NT], acc1[NT];
+    INK2_UNROLL
+    for (short t = 0; t < NT; ++t) { acc0[t] = 0.0f; acc1[t] = 0.0f; }
+    const uint part = lane % 4u;
+    device const half* xbase = input + seg.inputOffset + 8u * part;
+    for (uint b = lane / 4u; b < blocks; b += 8u) {
+        float4 wa0, wb0, wa1, wb1;
+        const float d0 = ink2_mv_weights<FMT>(row0, b, part, wa0, wb0);
+        const float d1 = ink2_mv_weights<FMT>(row1, b, part, wa1, wb1);
+        INK2_UNROLL
+        for (short t = 0; t < NT; ++t) {
+            if (uint(t) < tokens) {
+                device const half4* x = (device const half4*)(xbase + ulong(t) * seg.inputStride + b * 32u);
+                const float4 xa = float4(x[0]), xb = float4(x[1]);
+                acc0[t] = fma(d0, dot(wa0, xa) + dot(wb0, xb), acc0[t]);
+                acc1[t] = fma(d1, dot(wa1, xa) + dot(wb1, xb), acc1[t]);
+            }
+        }
+    }
+    INK2_UNROLL
+    for (short t = 0; t < NT; ++t) {
+        const float s0 = simd_sum(acc0[t]);
+        const float s1 = simd_sum(acc1[t]);
+        if (lane == 0 && uint(t) < tokens) {
+            device float* o = output + ulong(t) * p.outStride + seg.outColumn + r;
+            o[0] = s0;
+            if (second) { o[1] = s1; }
+        }
+    }
+}
 
 template <short NT>
 [[kernel]] void inkling2_q8_stacked_mv(
@@ -228,66 +560,11 @@ template <short NT>
     const uint r = (pair - seg.tileStart) * 2u;
     if (r >= seg.rows) { return; }
     const bool second = r + 1u < seg.rows;
-    const uint blocks = p.inputs / 32u;
-    const uint format = seg.format;
-    const uint rowBytes = format == 2u ? p.inputs * 4u : format == 1u ? p.inputs * 2u : blocks * 34u;
-    device const uchar* row0 = weights + seg.weightOffset + ulong(r) * rowBytes;
-    device const uchar* row1 = second ? row0 + rowBytes : row0;
-    const uint tokens = min(p.tokens, uint(NT));
-
-    float acc0[NT], acc1[NT];
-    for (short t = 0; t < NT; ++t) { acc0[t] = 0.0f; acc1[t] = 0.0f; }
-    const uint part = lane % 4u;
-    device const half* xbase = input + seg.inputOffset + 8u * part;
-    for (uint b = lane / 4u; b < blocks; b += 8u) {
-        float4 xa[NT], xb[NT];
-        for (short t = 0; t < NT; ++t) {
-            if (uint(t) < tokens) {
-                device const half4* x = (device const half4*)(xbase + ulong(t) * seg.inputStride + b * 32u);
-                xa[t] = float4(x[0]);
-                xb[t] = float4(x[1]);
-            } else {
-                xa[t] = float4(0.0f);
-                xb[t] = float4(0.0f);
-            }
-        }
-        for (short which = 0; which < 2; ++which) {
-            device const uchar* rowp = which == 0 ? row0 : row1;
-            float d;
-            float4 wa, wb;
-            if (format == 2u) {
-                device const float4* src = (device const float4*)(rowp + (b * 32u + 8u * part) * 4u);
-                d = 1.0f;
-                wa = src[0];
-                wb = src[1];
-            } else if (format == 1u) {
-                device const bfloat4* src = (device const bfloat4*)(rowp + (b * 32u + 8u * part) * 2u);
-                d = 1.0f;
-                wa = float4(src[0]);
-                wb = float4(src[1]);
-            } else {
-                device const uchar* blk = rowp + b * 34u;
-                d = float(*((device const half*)blk));
-                device const ushort* qs = (device const ushort*)(blk + 2u + 8u * part);
-                const char2 c0 = as_type<char2>(qs[0]), c1 = as_type<char2>(qs[1]);
-                const char2 c2 = as_type<char2>(qs[2]), c3 = as_type<char2>(qs[3]);
-                wa = float4(c0.x, c0.y, c1.x, c1.y);
-                wb = float4(c2.x, c2.y, c3.x, c3.y);
-            }
-            for (short t = 0; t < NT; ++t) {
-                const float v = d * (dot(wa, xa[t]) + dot(wb, xb[t]));
-                if (which == 0) { acc0[t] += v; } else { acc1[t] += v; }
-            }
-        }
-    }
-    for (short t = 0; t < NT; ++t) {
-        const float s0 = simd_sum(acc0[t]);
-        const float s1 = simd_sum(acc1[t]);
-        if (lane == 0 && uint(t) < tokens) {
-            device float* o = output + ulong(t) * p.outStride + seg.outColumn + r;
-            o[0] = s0;
-            if (second) { o[1] = s1; }
-        }
+    // The format is uniform per simdgroup; each case runs its own specialised loop.
+    switch (seg.format) {
+    case 2u: ink2_mv_rows<NT, 2u>(p, seg, r, second, weights, input, output, lane); break;
+    case 1u: ink2_mv_rows<NT, 1u>(p, seg, r, second, weights, input, output, lane); break;
+    default: ink2_mv_rows<NT, 0u>(p, seg, r, second, weights, input, output, lane); break;
     }
 }
 
@@ -946,12 +1223,19 @@ void inkling2_attention_decode_merge(
 struct Inkling2MixParams {
     uint  rows;
     uint  width;          // 2304
-    uint  stateCount;     // 1 ... 6
-    uint  queryCount;     // 1 ... 4
+    uint  stateCount;     // 1 ... 6 (equals the function constant)
+    uint  queryCount;     // 1 ... 4 (equals the function constant)
     uint  stateStride[6]; // floats between rows of each state
     uint  outStride;      // floats between output rows
     float eps;
 };
+
+// State and query counts are function constants, so every loop over them
+// unrolls and the per-thread sums stay in registers.
+constant uint FC_MIX_STATES  [[function_constant(200)]];
+constant uint FC_MIX_QUERIES [[function_constant(201)]];
+constant uint kMixStates  = is_function_constant_defined(FC_MIX_STATES) ? FC_MIX_STATES : 1u;
+constant uint kMixQueries = is_function_constant_defined(FC_MIX_QUERIES) ? FC_MIX_QUERIES : 1u;
 
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_depth_mix(
@@ -969,55 +1253,92 @@ void inkling2_depth_mix(
     ushort lane  [[thread_index_in_simdgroup]],
     ushort sgitg [[simdgroup_index_in_threadgroup]])
 {
-    // partial sums: [sg][6 sumsq + 24 dots]
-    threadgroup float partial[8][30];
-    threadgroup float weights[4][6];
-    threadgroup float inv[6];
-    device const float* states[6] = {s0, s1, s2, s3, s4, s5};
-    const uint N = p.stateCount, Q = p.queryCount;
-    float acc[30];
-    for (short i = 0; i < 30; ++i) { acc[i] = 0.0f; }
+    constexpr uint NS = 6, NQ = 4, NA = NS + NQ * NS;
+    threadgroup float partial[8][NA];
+    threadgroup float weights[NQ][NS];
+    threadgroup float inv[NS];
+    device const float* rowp[NS] = {
+        s0 + ulong(row) * p.stateStride[0], s1 + ulong(row) * p.stateStride[1], s2 + ulong(row) * p.stateStride[2],
+        s3 + ulong(row) * p.stateStride[3], s4 + ulong(row) * p.stateStride[4], s5 + ulong(row) * p.stateStride[5]};
+    float acc[NA];
+    INK2_UNROLL
+    for (uint i = 0; i < NA; ++i) { acc[i] = 0.0f; }
     for (uint i = tid; i < p.width; i += 256u) {
-        float qv[4];
-        for (uint j = 0; j < 4u; ++j) { qv[j] = j < Q ? queries[j * p.width + i] : 0.0f; }
-        for (uint n = 0; n < 6u; ++n) {
-            if (n >= N) { break; }
-            const float v = states[n][ulong(row) * p.stateStride[n] + i];
-            acc[n] = fma(v, v, acc[n]);
-            for (uint j = 0; j < 4u; ++j) { acc[6u + j * 6u + n] = fma(qv[j], v, acc[6u + j * 6u + n]); }
+        float sv[NS];
+        INK2_UNROLL
+        for (uint n = 0; n < NS; ++n) {
+            sv[n] = 0.0f;
+            if (n < kMixStates) { sv[n] = rowp[n][i]; acc[n] = fma(sv[n], sv[n], acc[n]); }
+        }
+        INK2_UNROLL
+        for (uint j = 0; j < NQ; ++j) {
+            if (j < kMixQueries) {
+                const float q = queries[j * p.width + i];
+                INK2_UNROLL
+                for (uint n = 0; n < NS; ++n) {
+                    if (n < kMixStates) { acc[NS + j * NS + n] = fma(q, sv[n], acc[NS + j * NS + n]); }
+                }
+            }
         }
     }
-    for (short i = 0; i < 30; ++i) {
-        const float total = simd_sum(acc[i]);
-        if (lane == 0) { partial[sgitg][i] = total; }
+    INK2_UNROLL
+    for (uint i = 0; i < NA; ++i) {
+        const bool used = i < NS ? i < kMixStates : ((i - NS) / NS < kMixQueries && (i - NS) % NS < kMixStates);
+        if (used) {
+            const float total = simd_sum(acc[i]);
+            if (lane == 0) { partial[sgitg][i] = total; }
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
-        float sums[30];
-        for (short i = 0; i < 30; ++i) {
+        float sums[NA];
+        INK2_UNROLL
+        for (uint i = 0; i < NA; ++i) {
+            const bool used = i < NS ? i < kMixStates : ((i - NS) / NS < kMixQueries && (i - NS) % NS < kMixStates);
             float t = 0.0f;
-            for (short s = 0; s < 8; ++s) { t += partial[s][i]; }
+            if (used) { for (short s = 0; s < 8; ++s) { t += partial[s][i]; } }
             sums[i] = t;
         }
         const float scale = rsqrt(float(p.width));
-        for (uint n = 0; n < N; ++n) { inv[n] = rsqrt(sums[n] / float(p.width) + p.eps); }
-        for (uint j = 0; j < Q; ++j) {
+        INK2_UNROLL
+        for (uint n = 0; n < NS; ++n) { if (n < kMixStates) { inv[n] = rsqrt(sums[n] / float(p.width) + p.eps); } }
+        INK2_UNROLL
+        for (uint j = 0; j < NQ; ++j) {
+            if (j >= kMixQueries) { continue; }
+            float sc[NS];
             float m = -INFINITY;
-            float sc[6];
-            for (uint n = 0; n < N; ++n) { sc[n] = sums[6u + j * 6u + n] * inv[n] * scale; m = max(m, sc[n]); }
+            INK2_UNROLL
+            for (uint n = 0; n < NS; ++n) {
+                sc[n] = 0.0f;
+                if (n < kMixStates) { sc[n] = sums[NS + j * NS + n] * inv[n] * scale; m = max(m, sc[n]); }
+            }
             float total = 0.0f;
-            for (uint n = 0; n < N; ++n) { sc[n] = exp(sc[n] - m); total += sc[n]; }
-            for (uint n = 0; n < N; ++n) { weights[j][n] = sc[n] / total; }
+            INK2_UNROLL
+            for (uint n = 0; n < NS; ++n) { if (n < kMixStates) { sc[n] = exp(sc[n] - m); total += sc[n]; } }
+            INK2_UNROLL
+            for (uint n = 0; n < NS; ++n) { if (n < kMixStates) { weights[j][n] = sc[n] / total; } }
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    float w[NQ][NS];
+    INK2_UNROLL
+    for (uint j = 0; j < NQ; ++j) {
+        INK2_UNROLL
+        for (uint n = 0; n < NS; ++n) { w[j][n] = (j < kMixQueries && n < kMixStates) ? weights[j][n] * inv[n] : 0.0f; }
+    }
+    device float* orow = out + ulong(row) * p.outStride;
     for (uint i = tid; i < p.width; i += 256u) {
-        float v[6];
-        for (uint n = 0; n < 6u; ++n) { v[n] = n < N ? states[n][ulong(row) * p.stateStride[n] + i] * inv[n] : 0.0f; }
-        for (uint j = 0; j < Q; ++j) {
-            float o = 0.0f;
-            for (uint n = 0; n < N; ++n) { o = fma(weights[j][n], v[n], o); }
-            out[ulong(row) * p.outStride + j * p.width + i] = o;
+        float sv[NS];
+        INK2_UNROLL
+        for (uint n = 0; n < NS; ++n) { sv[n] = n < kMixStates ? rowp[n][i] : 0.0f; }
+        INK2_UNROLL
+        for (uint j = 0; j < NQ; ++j) {
+            if (j < kMixQueries) {
+                float o = 0.0f;
+                INK2_UNROLL
+                for (uint n = 0; n < NS; ++n) { if (n < kMixStates) { o = fma(w[j][n], sv[n], o); } }
+                orow[j * p.width + i] = o;
+            }
         }
     }
 }
@@ -1035,16 +1356,17 @@ struct Inkling2GateInputParams {
     uint  width;           // 2304
     uint  xStride;
     uint  mStride;
-    uint  outStride;       // halves between rows of h (>= 2 * width)
+    uint  outStride;       // floats between rows of h (>= 2 * width)
     float eps;
 };
 
+// h[t] = [rms(x); rms(m)] in FP32, the input of the controller's down product.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void inkling2_gate_inputs(
     constant Inkling2GateInputParams& p [[buffer(0)]],
     device const float* x  [[buffer(1)]],
     device const float* m  [[buffer(2)]],
-    device half*        h  [[buffer(3)]],
+    device float*       h  [[buffer(3)]],
     uint   row   [[threadgroup_position_in_grid]],
     ushort tid   [[thread_index_in_threadgroup]],
     ushort lane  [[thread_index_in_simdgroup]],
@@ -1062,55 +1384,40 @@ void inkling2_gate_inputs(
     float tx = 0.0f, tm = 0.0f;
     for (short s = 0; s < 8; ++s) { tx += partial[s][0]; tm += partial[s][1]; }
     const float ix = rsqrt(tx / float(p.width) + p.eps), im = rsqrt(tm / float(p.width) + p.eps);
-    device half* hr = h + ulong(row) * p.outStride;
+    device float* hr = h + ulong(row) * p.outStride;
     for (uint i = tid; i < p.width; i += 256u) {
-        hr[i] = half(xr[i] * ix);
-        hr[p.width + i] = half(mr[i] * im);
+        hr[i] = xr[i] * ix;
+        hr[p.width + i] = mr[i] * im;
     }
 }
 
 struct Inkling2GateCombineParams {
     uint rows;
-    uint width;        // 2304
-    uint rank;         // 64
+    uint width;
     uint xStride;
     uint mStride;
-    uint zStride;      // floats between rows of the down projection output
-    uint zColumn;      // this controller's 64 columns
+    uint fgStride;     // floats between rows of the forget/gain product
+    uint forgetColumn;
+    uint gainColumn;
     uint outStride;
 };
 
-// f = W_forget z, g = W_gain z in FP32 (the vendor keeps both in FP32),
-// out = (1 - tanh f) x + tanh g m. One threadgroup of 256 per token row;
-// `out` may alias `x`.
-[[kernel, max_total_threads_per_threadgroup(256)]]
-void inkling2_gate_combine(
+// out = (1 - tanh f) x + tanh g m (tanh clamped: fast-math tanh misbehaves
+// for large arguments on some GPUs). `out` may alias `x`.
+kernel void inkling2_gate_combine(
     constant Inkling2GateCombineParams& p [[buffer(0)]],
-    device const float* x      [[buffer(1)]],
-    device const float* m      [[buffer(2)]],
-    device const float* z      [[buffer(3)]],
-    device const float* forget [[buffer(4)]],
-    device const float* gain   [[buffer(5)]],
-    device float*       out    [[buffer(6)]],
-    uint   row [[threadgroup_position_in_grid]],
-    ushort tid [[thread_index_in_threadgroup]])
+    device const float* x  [[buffer(1)]],
+    device const float* m  [[buffer(2)]],
+    device const float* fg [[buffer(3)]],
+    device float*       out [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
 {
-    threadgroup float zs[128];
-    for (uint r = tid; r < p.rank; r += 256u) { zs[r] = z[ulong(row) * p.zStride + p.zColumn + r]; }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = tid; i < p.width; i += 256u) {
-        device const float4* fr = (device const float4*)(forget + ulong(i) * p.rank);
-        device const float4* gr = (device const float4*)(gain + ulong(i) * p.rank);
-        threadgroup const float4* z4 = (threadgroup const float4*)zs;
-        float f = 0.0f, g = 0.0f;
-        for (uint r = 0; r < p.rank / 4u; ++r) {
-            f += dot(fr[r], z4[r]);
-            g += dot(gr[r], z4[r]);
-        }
-        const float xv = x[ulong(row) * p.xStride + i], mv = m[ulong(row) * p.mStride + i];
-        const float tf = tanh(clamp(f, -20.0f, 20.0f)), tg = tanh(clamp(g, -20.0f, 20.0f));
-        out[ulong(row) * p.outStride + i] = xv - tf * xv + tg * mv;
-    }
+    const uint i = gid.x, t = gid.y;
+    if (i >= p.width || t >= p.rows) { return; }
+    const float xv = x[ulong(t) * p.xStride + i], mv = m[ulong(t) * p.mStride + i];
+    const float f = tanh(clamp(fg[ulong(t) * p.fgStride + p.forgetColumn + i], -20.0f, 20.0f));
+    const float g = tanh(clamp(fg[ulong(t) * p.fgStride + p.gainColumn + i], -20.0f, 20.0f));
+    out[ulong(t) * p.outStride + i] = xv - f * xv + g * mv;
 }
 
 // ============================================================================
