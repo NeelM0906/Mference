@@ -39,12 +39,15 @@ public struct MemoryFit: Sendable, Hashable {
     }
 
     /// The share of the install that stays resident, and the headroom for
-    /// KV cache and runtime. Qwen 3.6 streams its routed experts from the
-    /// SSD, so most of its install is not resident.
+    /// KV cache and runtime. Qwen 3.6 and Inkling 2 Mini stream their routed
+    /// experts from the SSD, so most of their install is not resident
+    /// (Inkling 2 Mini: about 1.8 GB of 17.65 GB, plus KV for 48 visits and
+    /// the expert slot cache).
     static func profile(_ model: AppModel) -> (residentShare: Double, headroom: UInt64) {
         switch model {
         case .quick: (1.0, 1_536 << 20)
         case .deep: (1.0, 2_560 << 20)
+        case .inkling2Mini: (0.11, 3_072 << 20)
         case .qwen36: (0.3, 2_048 << 20)
         case .minicpm5: (1.0, 1_024 << 20)
         case .maple: (1.0, 1_536 << 20)

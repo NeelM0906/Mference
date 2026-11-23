@@ -141,6 +141,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         switch model {
         case .quick: "Qwen3.5 4B"
         case .deep: "Qwen3.8 27B"
+        case .inkling2Mini: "Mini"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
         case .maple, .apple: ""
@@ -151,6 +152,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         switch model {
         case .quick: "Unsloth UD-Q4_K_XL"
         case .deep: "ISTA GSQ-RCO IQ3_S with MTP"
+        case .inkling2Mini: "Mference install of Unsloth UD-Q4_K_XL, experts stream from the SSD"
         case .qwen36: "Mference install, experts stream from the SSD"
         case .minicpm5: "Mference install, 4-bit"
         case .maple: "Mference install, 2-bit"

@@ -73,10 +73,23 @@ public actor EngineService: EngineServicing {
         self.physicalMemory = physicalMemory
     }
 
-    /// Deep needs more than 16 GB of memory (L4); the reason when `model`
-    /// may not run on a Mac with `physicalMemory`, else nil.
+    /// Deep needs more than 16 GB of memory (L4), and a model with an engine
+    /// memory floor needs that much (`EngineProductSlot.minimumPhysicalMemory`:
+    /// Inkling 2 Mini, 32 GB); the reason when `model` may not run on a Mac
+    /// with `physicalMemory`, else nil.
     public static func memoryGateReason(_ model: AppModel, physicalMemory: UInt64) -> String? {
-        model == .deep && physicalMemory <= 16 << 30 ? "Needs a Mac with more than 16 GB of memory." : nil
+        if model == .deep && physicalMemory <= 16 << 30 { return "Needs a Mac with more than 16 GB of memory." }
+        return EngineProductSlot(modelID: model.modelID)?.memoryFloorReason(physicalMemory: physicalMemory)
+    }
+
+    /// What a picker row says when `model` is not installed and the catalog
+    /// gives no reason: native installs come from `MferenceRepack`, so the
+    /// row says how to make one where the app cannot download it.
+    static func notInstalledReason(_ model: AppModel) -> String {
+        switch model {
+        case .inkling2Mini: "Not installed. Install it with MferenceRepack --model inkling2mini."
+        default: "Not installed on this Mac."
+        }
     }
 
     // MARK: Catalog
@@ -113,7 +126,7 @@ public actor EngineService: EngineServicing {
                         physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> [ModelOption] {
         AppModel.engineModels.map { model in
             guard let descriptor = catalog.descriptor(for: model.modelID) else {
-                let reason = catalog.unavailableReason(for: model.modelID) ?? "Not installed on this Mac."
+                let reason = catalog.unavailableReason(for: model.modelID) ?? notInstalledReason(model)
                 return ModelOption(model: model, availability: .notInstalled(reason: reason))
             }
             if let reason = memoryGateReason(model, physicalMemory: physicalMemory) {
