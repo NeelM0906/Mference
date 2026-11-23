@@ -311,6 +311,9 @@ enum OriginalRepoPlanner {
             // fails loudly at load (`tensorNotFound`) rather than quietly
             // installing something a runner cannot address.
             return sourceName
+        case .inkling2Loop:
+            // GGUF source only; names stay the GGUF's own.
+            return sourceName
         }
     }
 
@@ -362,6 +365,9 @@ enum OriginalRepoPlanner {
             // No original-repo entry exists for these, so no conversion has
             // been compared and no fold can be justified. A family arriving
             // here must check its own norm convention first.
+            return false
+        case .inkling2Loop:
+            // GGUF source only: every byte is copied unchanged.
             return false
         }
     }

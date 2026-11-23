@@ -271,6 +271,10 @@ enum RepackPlanner {
             // The MLX control (pre-quantized path) uses the plain llama
             // spelling; the BF16 source is planned by OriginalRepoPlanner.
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
+        case .inkling2Loop:
+            // Installed from a GGUF by `Inkling2GGUFPlanner`; a safetensors
+            // repo of this family is not a supported source.
+            return false
         }
     }
 
@@ -284,6 +288,8 @@ enum RepackPlanner {
         case .maple:           routedContainer = ".mlp.switch_mlp."
         // Dense llama: every `.mlp.*_proj` is the layer's own FFN, resident.
         case .minicpm5:        return nil
+        // GGUF source only (`Inkling2GGUFPlanner`).
+        case .inkling2Loop:    return nil
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -1015,6 +1021,8 @@ enum RepackPlanner {
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "lm_head.weight"             { return (4, 0, 0, n) }
+            case .inkling2Loop:
+                break
             }
             if let li = layerIndex(in: n) {
                 let slot: Int
@@ -1023,6 +1031,7 @@ enum RepackPlanner {
                 case .qwen38:          slot = qwen38SlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
                 case .minicpm5:        slot = miniCPM5SlotRank(in: n)
+                case .inkling2Loop:    slot = 0
                 }
                 return (1, li, slot, n)
             }

@@ -43,6 +43,7 @@ documented as what has been exercised, not as what is permitted.
 | Q38 | Qwen 3.8 27B | `qwen38` | `ArchConfig.qwen38_27B` |
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
 | MC5 | MiniCPM5-2B | `minicpm5` | `ArchConfig.miniCPM5_2B` |
+| IK2 | Inkling 2 Mini (Unsloth UD-Q4_K_XL GGUF) | `inkling2Loop` | `ArchConfig.inkling2Mini` |
 
 Retired (values only, no baseline): G4 Gemma 4 26B-A4B (`gemma4`, also any
 manifest without `arch.family`), DSV4 DeepSeek-V4-Flash (`deepseekV4Flash`),
@@ -59,7 +60,10 @@ runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
 machinery is reached.
 
-That table is **empty today**.
+That table holds one family today: `inkling2Loop` (IK2), refused by the axis
+names in `ManifestReader.inkling2RequiredAxes` until `Inkling2ForwardRunner`
+lands. IK2 is not the retired INK (`inklingSmall`, still refused): it is a
+different checkpoint and layer graph that reuses some of INK's axes.
 
 FNU has no column of its own in the field tables below: every value equals
 FNX's except `family` and the two storage-shaped PLE fields,
@@ -87,17 +91,17 @@ model carries both a sliding pair (`numKVHeads`, `headDim`) and a full pair
 mirrors the full values into the sliding slots, where they are never used
 to size storage.
 
-| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX | MC5 | G53 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `hiddenSize` | `Int` | Residual width. | 2816 | 2048 | 5120 | 4096 | 4096 | 2048 | 2560 | 2048 | 4096 |
-| `intermediateSize` | `Int` | Shared-expert FFN width. Mirrored as `ffnIntermediate` in the manifest. | 2112 | 512 | 17408 | 2048 | 2048 | 512 | 640 | 6144 | 2048 |
-| `moeIntermediateSize` | `Int` | Per-expert FFN width. | 704 | 512 | 0 | 2048 | 2048 | 512 | 640 | 0 | 2048 |
-| `numLayers` | `Int` | Layer count; also the length of `fullAttentionLayerMask`. | 30 | 40 | 64 | 43 | 42 | 24 | 48 | 42 | 45 |
-| `numHeads` | `Int` | Query heads. | 16 | 16 | 24 | 64 | 32 | 16 | 24 | 16 | 64 |
-| `numKVHeads` | `Int` | KV heads on sliding-window layers. | 8 | 2 | 4 | 1 | 8 | 4 | 2 | 2 | 1 |
-| `numFullKVHeads` | `Int` | KV heads on full-attention layers. | 2 | 2 | 4 | 1 | 8 | 4 | 2 | 2 | 1 |
-| `headDim` | `Int` | Head width on sliding-window layers. | 256 | 256 | 256 | 512 | 128 | 128 | 256 | 128 | 256 |
-| `fullHeadDim` | `Int` | Head width on full-attention layers. | 512 | 256 | 256 | 512 | 128 | 128 | 256 | 128 | 256 |
+| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX | MC5 | G53 | IK2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `hiddenSize` | `Int` | Residual width. | 2816 | 2048 | 5120 | 4096 | 4096 | 2048 | 2560 | 2048 | 4096 | 2304 |
+| `intermediateSize` | `Int` | Shared-expert FFN width. Mirrored as `ffnIntermediate` in the manifest. | 2112 | 512 | 17408 | 2048 | 2048 | 512 | 640 | 6144 | 2048 | 1152 |
+| `moeIntermediateSize` | `Int` | Per-expert FFN width. | 704 | 512 | 0 | 2048 | 2048 | 512 | 640 | 0 | 2048 | 1152 |
+| `numLayers` | `Int` | Layer count; also the length of `fullAttentionLayerMask`. | 30 | 40 | 64 | 43 | 42 | 24 | 48 | 42 | 45 | 24 |
+| `numHeads` | `Int` | Query heads. | 16 | 16 | 24 | 64 | 32 | 16 | 24 | 16 | 64 | 24 |
+| `numKVHeads` | `Int` | KV heads on sliding-window layers. | 8 | 2 | 4 | 1 | 8 | 4 | 2 | 2 | 1 | 8 |
+| `numFullKVHeads` | `Int` | KV heads on full-attention layers. | 2 | 2 | 4 | 1 | 8 | 4 | 2 | 2 | 1 | 8 |
+| `headDim` | `Int` | Head width on sliding-window layers. | 256 | 256 | 256 | 512 | 128 | 128 | 256 | 128 | 256 | 128 |
+| `fullHeadDim` | `Int` | Head width on full-attention layers. | 512 | 256 | 256 | 512 | 128 | 128 | 256 | 128 | 256 | 128 |
 
 DSV4's `numKVHeads` and `numFullKVHeads` are 1 because its attention is
 shared-KV MQA: one 512-dim KV head read as both K and V. G53's are 1 for the
@@ -118,34 +122,34 @@ DSV4 and G53 carry `hyperConnections.mult` streams the same way.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `fullAttentionLayerMask` | `[UInt8]` | Per-layer attention kind. 0 = sliding-window, 1 = full, 2 = gated-DeltaNet linear, 3 = compressed sparse attention (CSA), 4 = heavily compressed attention (HCA), 7 = Kimi Delta Attention (G53's linear attention), 8 = NoPE latent sparse attention (G53). Values 3 and 4 additionally include the sliding-window branch, because DeepSeek V4 concatenates compressed entries onto the window KV. | `1` on layers 5, 11, …, 29; `0` elsewhere (5 of 30 full). | Q36/Q38: `2` everywhere, `1` on every 4th layer. DSV4: `0` on layers 0–1, then `3` on even and `4` on odd layers. INK: `1` on layers 5, 11, …, 41; `0` elsewhere. MPL: `1` on every 4th layer, `0` elsewhere. FNX: same 3:1 shape as Q36/Q38 over 48 layers (36 linear, 12 full). MC5: `1` on all 42 layers. G53: `7` everywhere, `8` on layers 3, 7, …, 43 (34 KDA, 11 sparse). |
-| `slidingWindow` | `Int` | Sliding-window width. | 1024 | Q36/Q38/FNX/MC5/G53 `0` (no sliding layers). DSV4 `128`. INK `512`. MPL `512`. |
-| `attentionKEqV` | `Bool` | Full-attention K and V share the `k_proj` weight, so one dequant and GEMV produces the raw projection for both. The K and V cache slots stay separate regardless — they diverge at the norms and RoPE. | `true` | Q36, Q38, INK, MPL, FNX, MC5 `false`. DSV4 and G53 `true` in the strongest sense: K and V are the same cache entry (G53: the `kv_a` latent). |
-| `attnOutputGate` | `Bool` | Full-attention `q_proj` emits `2 * numHeads * fullHeadDim` rows as per-head [query ; gate] halves, and the attention output is multiplied by sigmoid(gate) before `o_proj`. | `false` | Q36, Q38, FNX `true` (FNX's `output_gate_type` is `sigmoid`). G53 `false`: its KDA output gate is the low-rank `g_b(g_a(x))` inside `o_norm`, part of the `kimiDeltaAttention` axis, not this one. |
-| `attentionScale` | `Double` | Softmax scale for full attention. | 1.0 | Q36/Q38/FNX 0.0625 (256^-0.5). DSV4 0.044194173824159216 (512^-0.5). MPL and MC5 1/sqrt(128). INK 1/128 — it RMS-normalizes q and k per head, so the scale is 1/d, not 1/sqrt(d). G53 0.0625 (256^-0.5, the `qkNopeHeadDim` query width — the latent dot product is taken after `embed_q` folds q into the 512-wide latent). |
-| `attentionSinks` | `Bool` | Add one learned logit per query head to the attention softmax denominator only. The sink has no value contribution. | `false` | FLT `true`, backed by `self_attn.softmax_offset`. |
+| `fullAttentionLayerMask` | `[UInt8]` | Per-layer attention kind. 0 = sliding-window, 1 = full, 2 = gated-DeltaNet linear, 3 = compressed sparse attention (CSA), 4 = heavily compressed attention (HCA), 7 = Kimi Delta Attention (G53's linear attention), 8 = NoPE latent sparse attention (G53). Values 3 and 4 additionally include the sliding-window branch, because DeepSeek V4 concatenates compressed entries onto the window KV. | `1` on layers 5, 11, …, 29; `0` elsewhere (5 of 30 full). | Q36/Q38: `2` everywhere, `1` on every 4th layer. DSV4: `0` on layers 0–1, then `3` on even and `4` on odd layers. INK: `1` on layers 5, 11, …, 41; `0` elsewhere. MPL: `1` on every 4th layer, `0` elsewhere. FNX: same 3:1 shape as Q36/Q38 over 48 layers (36 linear, 12 full). MC5: `1` on all 42 layers. G53: `7` everywhere, `8` on layers 3, 7, …, 43 (34 KDA, 11 sparse). IK2: `1` on layers 5, 11, 17, 23; `0` (a 1,024-token window) on the other 20. The mask is per stored layer; each of the 48 visits uses its stored layer's kind. |
+| `slidingWindow` | `Int` | Sliding-window width. | 1024 | Q36/Q38/FNX/MC5/G53 `0` (no sliding layers). DSV4 `128`. INK `512`. MPL `512`. IK2 `1024`, as G4. |
+| `attentionKEqV` | `Bool` | Full-attention K and V share the `k_proj` weight, so one dequant and GEMV produces the raw projection for both. The K and V cache slots stay separate regardless — they diverge at the norms and RoPE. | `true` | Q36, Q38, INK, MPL, FNX, MC5, IK2 `false`. DSV4 and G53 `true` in the strongest sense: K and V are the same cache entry (G53: the `kv_a` latent). |
+| `attnOutputGate` | `Bool` | Full-attention `q_proj` emits `2 * numHeads * fullHeadDim` rows as per-head [query ; gate] halves, and the attention output is multiplied by sigmoid(gate) before `o_proj`. | `false` | Q36, Q38, FNX `true` (FNX's `output_gate_type` is `sigmoid`). G53 `false`: its KDA output gate is the low-rank `g_b(g_a(x))` inside `o_norm`, part of the `kimiDeltaAttention` axis, not this one. IK2 `false`: its output gate is `sigmoid(attn_gate(x))` from a separate projection of the layer input, part of the family's tensor contract, not a doubled `q_proj`. |
+| `attentionScale` | `Double` | Softmax scale for full attention. | 1.0 | Q36/Q38/FNX 0.0625 (256^-0.5). DSV4 0.044194173824159216 (512^-0.5). MPL and MC5 1/sqrt(128). INK 1/128 — it RMS-normalizes q and k per head, so the scale is 1/d, not 1/sqrt(d). G53 0.0625 (256^-0.5, the `qkNopeHeadDim` query width — the latent dot product is taken after `embed_q` folds q into the 512-wide latent). IK2 0.08838834764831845 (128^-0.5) on both layer kinds; global layers also scale q and the relative states by `1 + logScalingAlpha · log(max(1, (pos + 1) / logScalingFloor))`. |
+| `attentionSinks` | `Bool` | Add one learned logit per query head to the attention softmax denominator only. The sink has no value contribution. | `false` | FLT `true`, backed by `self_attn.softmax_offset`. IK2 `true` on every layer kind, with the logit computed per token (`inkling2.attentionSinkProjected`). |
 | `noRopeLayerMask` | `[UInt8]` | Per-layer NoPE switch. A nonzero entry disables rotary position encoding on that layer; empty means the family's normal RoPE policy applies everywhere. | `[]` | FLT mirrors `fullAttentionLayerMask`, so all 14 full-attention layers are NoPE while the 35 sliding layers rotate. |
 
 ### Per-head query/key norms
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `qkNorm` | `Bool` | Full-attention layers carry per-head RMSNorm gains on the query and key projections (`self_attn.q_norm.weight` / `k_norm.weight`), applied before RoPE. `false` is plain-llama attention: the projections go straight to RoPE, and the fused QKV epilogues — which require the gain tensors — are bypassed for the standalone RoPE kernels. | `true` | MC5 `false`. G53 `false`: its sparse layers norm the low-rank query latent (`q_a_layernorm`) and the KV latent (`kv_a_layernorm`), not the per-head projections, and its KDA layers have no q/k norm (they l2-normalize q and k instead). Every other family `true`; their manifests predate the axis and omit it, which validates as the default. |
+| `qkNorm` | `Bool` | Full-attention layers carry per-head RMSNorm gains on the query and key projections (`self_attn.q_norm.weight` / `k_norm.weight`), applied before RoPE. `false` is plain-llama attention: the projections go straight to RoPE, and the fused QKV epilogues — which require the gain tensors — are bypassed for the standalone RoPE kernels. | `true` | MC5 `false`. IK2 `false`: it scales each query head by `attn_q_clip` and L2-clips queries and keys (`inkling2.qkClipThreshold`) instead. G53 `false`: its sparse layers norm the low-rank query latent (`q_a_layernorm`) and the KV latent (`kv_a_layernorm`), not the per-head projections, and its KDA layers have no q/k norm (they l2-normalize q and k instead). Every other family `true`; their manifests predate the axis and omit it, which validates as the default. |
 
 ### Rotary position
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `ropeTheta` | `Double` | RoPE base on sliding-window layers. | 10000.0 | Q36/Q38/FNX 1.0e7. DSV4 10000.0 (the `main` rope; CSA/HCA layers use `compressRopeTheta`). INK 0.0 — no RoPE at all. MPL 10000.0. MC5 5.0e6 (mirrored: it has no sliding layers). G53 0.0 — no RoPE anywhere in the text stack (`qk_rope_head_dim` 0, `mla_use_nope`). |
-| `fullRopeTheta` | `Double` | RoPE base on full-attention layers. | 1000000.0 | Q36/Q38/FNX 1.0e7. DSV4 10000.0. INK 0.0. MPL 0.0 — its global layer is NoPE. MC5 5.0e6. G53 0.0. |
-| `partialRotaryFactor` | `Double` | Fraction of each head's channels that rotate; the rotary width is `headDim * partialRotaryFactor`. | 0.25 | Q36/Q38/FNX 0.25. DSV4 0.125 (64 of 512). INK 0.0. MPL 0.5. MC5 1.0 — the whole 128-wide head rotates (`rotate_half` over `head_dim`). G53 0.0. |
-| `ropeNeoxSubdim` | `Bool` | Partial-RoPE convention. `false` (Gemma): pairs (i, `headDim`/2 + i) for i below the rotated-pair count, frequency divisor `headDim`. `true` (Qwen / NeoX sub-dim): rotation confined to the first `rotaryDim` elements, pairing (i, `rotaryDim`/2 + i), frequency divisor `rotaryDim`. | `false` | Q36, Q38, MPL, FNX, MC5 `true`. DSV4 `false`, but with its own interleaved-trailing convention — neither Gemma's proportional nor Qwen's sub-dim layout; the family's kernels implement it. G53 `false` and moot: nothing rotates. |
+| `ropeTheta` | `Double` | RoPE base on sliding-window layers. | 10000.0 | Q36/Q38/FNX 1.0e7. DSV4 10000.0 (the `main` rope; CSA/HCA layers use `compressRopeTheta`). INK 0.0 — no RoPE at all. MPL 10000.0. MC5 5.0e6 (mirrored: it has no sliding layers). G53 0.0 — no RoPE anywhere in the text stack (`qk_rope_head_dim` 0, `mla_use_nope`). IK2 0.0 — the relative bias carries positions. |
+| `fullRopeTheta` | `Double` | RoPE base on full-attention layers. | 1000000.0 | Q36/Q38/FNX 1.0e7. DSV4 10000.0. INK 0.0. MPL 0.0 — its global layer is NoPE. MC5 5.0e6. G53 0.0. IK2 0.0. |
+| `partialRotaryFactor` | `Double` | Fraction of each head's channels that rotate; the rotary width is `headDim * partialRotaryFactor`. | 0.25 | Q36/Q38/FNX 0.25. DSV4 0.125 (64 of 512). INK 0.0. MPL 0.5. MC5 1.0 — the whole 128-wide head rotates (`rotate_half` over `head_dim`). G53 0.0. IK2 0.0. |
+| `ropeNeoxSubdim` | `Bool` | Partial-RoPE convention. `false` (Gemma): pairs (i, `headDim`/2 + i) for i below the rotated-pair count, frequency divisor `headDim`. `true` (Qwen / NeoX sub-dim): rotation confined to the first `rotaryDim` elements, pairing (i, `rotaryDim`/2 + i), frequency divisor `rotaryDim`. | `false` | Q36, Q38, MPL, FNX, MC5 `true`. DSV4 `false`, but with its own interleaved-trailing convention — neither Gemma's proportional nor Qwen's sub-dim layout; the family's kernels implement it. G53 `false` and moot: nothing rotates. IK2 `false`, moot for the same reason. |
 
 ### Short convolution
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `sconvKernelSize` | `Int` | Depthwise short-convolution width applied to the block inputs and to the K/V streams. 0 disables the short-conv path entirely. | 0 | INK 4. |
+| `sconvKernelSize` | `Int` | Depthwise short-convolution width applied to the block inputs and to the K/V streams. 0 disables the short-conv path entirely. | 0 | INK 4. IK2 4: causal convolutions on K and V (dynamic, with per-token taps, on global layers), after attention and after the MoE, each `(conv(x) + x) / sqrt(k + 1)` (`sqrt(2k + 1)` when dynamic). Every layer visit keeps its own four convolution states. |
 
 ### `linearAttention` — `LinearAttentionConfig`
 
@@ -208,7 +212,12 @@ layers and their compressors rope at `compressRopeTheta`.
 ### `relativePosition` — `RelativePositionConfig`
 
 Learned relative-attention position encoding, used by architectures that
-carry no RoPE at all. `.none` for every family except Inkling-Small.
+carry no RoPE at all. `.none` for every family except Inkling-Small and
+Inkling 2. IK2 clips each per-head relative state to an L2 norm of
+`inkling2.relClipThreshold` after its per-head scale, and its `extent` and
+`slidingWindow` are equal, so both layer kinds ship the same table shape:
+`attn_rel_bias` is GGUF `ne` `[16, 1024]`, row-major `[1024, 16]` (one
+16-wide profile row per backward distance).
 
 Inkling projects the residual to `projDim` (`attn.wr_du`, width
 `numHeads * dRel`) and reshapes it to a per-head `dRel` relative-state
@@ -216,25 +225,25 @@ vector, which mixes a bank of bias-vs-distance profiles
 (`attn.rel_logits_proj.proj`, shape `[dRel, extent]`) into one bias per
 backward distance. The bias is zero outside `0 ..< extent`.
 
-| Field | Type | Selects | INK |
-| --- | --- | --- | --- |
-| `dRel` | `Int` | Per-head relative-state width. | 16 |
-| `extent` | `Int` | Bias width on full-attention layers. Sliding layers use `slidingWindow` instead, so the two layer kinds ship differently shaped `proj` tensors — `[16, 512]` local, `[16, 1024]` global. | 1024 |
-| `projDim` | `Int` | Output width of `attn.wr_du`, i.e. `numHeads * dRel`. | 512 |
-| `logScalingFloor` | `Int` | Position floor below which the log-scaling correction is inactive. Applies to full-attention layers only. | 128000 |
-| `logScalingAlpha` | `Double` | Strength of that correction. | 0.1 |
+| Field | Type | Selects | INK | IK2 |
+| --- | --- | --- | --- | --- |
+| `dRel` | `Int` | Per-head relative-state width. | 16 | 16 |
+| `extent` | `Int` | Bias width on full-attention layers. Sliding layers use `slidingWindow` instead, so the two layer kinds ship differently shaped `proj` tensors — `[16, 512]` local, `[16, 1024]` global. | 1024 | 1024 |
+| `projDim` | `Int` | Output width of `attn.wr_du`, i.e. `numHeads * dRel`. | 512 | 384 |
+| `logScalingFloor` | `Int` | Position floor below which the log-scaling correction is inactive. Applies to full-attention layers only. | 128000 | 8192 |
+| `logScalingAlpha` | `Double` | Strength of that correction. | 0.1 | 0.10000000149011612 (f32 0.1, widened) |
 
 ## MoE and routing
 
 ### Expert inventory
 
-| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX | MC5 | G53 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `numExperts` | `Int` | Routed experts per MoE layer. | 128 | 256 | 0 | 256 | 256 | 256 | 512 | 0 | 288 |
-| `topKExperts` | `Int` | Routed experts selected per token. | 8 | 8 | 0 | 6 | 6 | 8 | 10 | 0 | 8 |
-| `numSharedExperts` | `Int` | Shared experts active on every token. | 1 | 1 | 0 | 1 | 2 | 0 | 1 | 0 | 1 |
-| `numDenseLayers` | `Int` | Leading layers that use a plain dense FFN instead of the MoE block. | 0 | 0 | 64 | 0 | 2 | 0 | 0 | 42 | 3 |
-| `denseIntermediateSize` | `Int` | FFN width of those dense layers; 0 when `numDenseLayers` is 0. | 0 | 0 | 17408 | 0 | 16384 | 0 | 0 | 6144 | 12288 |
+| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX | MC5 | G53 | IK2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `numExperts` | `Int` | Routed experts per MoE layer. | 128 | 256 | 0 | 256 | 256 | 256 | 512 | 0 | 288 | 128 |
+| `topKExperts` | `Int` | Routed experts selected per token. | 8 | 8 | 0 | 6 | 6 | 8 | 10 | 0 | 8 | 8 |
+| `numSharedExperts` | `Int` | Shared experts active on every token. | 1 | 1 | 0 | 1 | 2 | 0 | 1 | 0 | 1 | 0 |
+| `numDenseLayers` | `Int` | Leading layers that use a plain dense FFN instead of the MoE block. | 0 | 0 | 64 | 0 | 2 | 0 | 0 | 42 | 3 | 0 |
+| `denseIntermediateSize` | `Int` | FFN width of those dense layers; 0 when `numDenseLayers` is 0. | 0 | 0 | 17408 | 0 | 16384 | 0 | 0 | 6144 | 12288 | 0 |
 
 Qwen 3.8 and MiniCPM5 have no routed experts at all: `numExperts` 0 with
 `numDenseLayers == numLayers` makes every layer one resident SwiGLU MLP,
@@ -244,11 +253,11 @@ and the expert streamer never opens a pool.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `routerScaled` | `Bool` | Router carries `router.scale` (an input multiplier) and `per_expert_scale` tensors. `false` means a plain quantized linear router with renormalized top-k softmax weights and no auxiliary scale tensors. | `true` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 `false`. |
-| `routerScoringFunc` | `String` | Score activation applied to the router logits before top-k selection. | `"softmax"` | DSV4 `"sqrtsoftplus"`. INK and G53 `"sigmoid"` (G53's router logits are computed in fp32 from a BF16 gate, `moe_router_dtype`). |
-| `routedScalingFactor` | `Double` | Multiplier applied to the renormalized top-k routing weights. | 1.0 | DSV4 1.5. INK 8.0 (`route_scale`). G53 2.5. |
-| `routerNormAfterTopK` | `Bool` | Renormalize the top-k router weights after selection rather than before. | `false` | INK, MPL, G53 `true` (G53: `norm_topk_prob`). |
-| `routerGateBias` | `Bool` | Learned additive bias on the router logits, used for selection only. | `false` | INK, G53 `true` (G53: `e_score_correction_bias`, added to the sigmoid scores for selection; the weights are the unbiased scores). |
+| `routerScaled` | `Bool` | Router carries `router.scale` (an input multiplier) and `per_expert_scale` tensors. `false` means a plain quantized linear router with renormalized top-k softmax weights and no auxiliary scale tensors. | `true` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53, IK2 `false`. |
+| `routerScoringFunc` | `String` | Score activation applied to the router logits before top-k selection. | `"softmax"` | DSV4 `"sqrtsoftplus"`. INK and G53 `"sigmoid"` (G53's router logits are computed in fp32 from a BF16 gate, `moe_router_dtype`). IK2 `"sigmoid"`, logits in fp32 from an F32 router. |
+| `routedScalingFactor` | `Double` | Multiplier applied to the renormalized top-k routing weights. | 1.0 | DSV4 1.5. INK 8.0 (`route_scale`). G53 2.5. IK2 8.0 (`expert_weights_scale`). |
+| `routerNormAfterTopK` | `Bool` | Renormalize the top-k router weights after selection rather than before. | `false` | INK, MPL, G53, IK2 `true` (G53: `norm_topk_prob`; IK2: the eight chosen unbiased scores sum to 1, then times 8). |
+| `routerGateBias` | `Bool` | Learned additive bias on the router logits, used for selection only. | `false` | INK, G53, IK2 `true` (G53: `e_score_correction_bias`, added to the sigmoid scores for selection; the weights are the unbiased scores. IK2 the same, as `blk.N.exp_probs_b.bias`). |
 | `routerGlobalScale` | `Bool` | Per-layer learned scalar multiplying the router weights. | `false` | INK `true`. |
 | `numHashRoutedLayers` | `Int` | Leading MoE layers whose expert selection is a frozen token-id lookup (`tid2eid`) instead of a learned argmax. | 0 | DSV4 3. |
 | `sharedExpertGated` | `Bool` | Shared-expert output is gated by sigmoid(`shared_expert_gate(x)`). | `false` | Q36, FNX `true`. |
@@ -258,18 +267,18 @@ and the expert streamer never opens a pool.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `hiddenActivation` | `String` | FFN activation. | `"gelu_pytorch_tanh"` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 `"silu"`. |
+| `hiddenActivation` | `String` | FFN activation. | `"gelu_pytorch_tanh"` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 `"silu"`. IK2 `"situ"`: `c·tanh(g/c) · sigmoid(g) · c'·tanh(u/c')` with `c` and `c'` the `inkling2` expert soft caps (4 and 25). |
 | `swigluLimit` | `Double` | Clamp for the expert gate (max) and up (±) pre-activations. 0 disables the clamp. | 0.0 | DSV4 10.0. MPL 7.0. G53 10.0, on the dense layers, the shared expert and the routed experts alike. |
 
 ## Normalization, residual, and scaling
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `ffnSandwichNorms` | `Bool` | Gemma's dual-branch FFN sandwich: pre- and post-feedforward norms plus a per-layer residual scalar. `false` is a plain pre-norm residual block. | `true` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 `false`. FNX has no per-sublayer pre-norm at all: its hyper-connection sites carry the norm (see `flashNext`). |
-| `embeddingScaledBySqrtHidden` | `Bool` | Embedding lookup is multiplied by sqrt(`hiddenSize`). | `true` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 `false`. |
-| `embedNormEnabled` | `Bool` | RMS norm applied to the token embeddings before the first layer. | `false` | INK `true`. |
+| `ffnSandwichNorms` | `Bool` | Gemma's dual-branch FFN sandwich: pre- and post-feedforward norms plus a per-layer residual scalar. `false` is a plain pre-norm residual block. | `true` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53, IK2 `false`. FNX has no per-sublayer pre-norm at all: its hyper-connection sites carry the norm (see `flashNext`). IK2 is pre-norm but has no single residual: see `inkling2.attnResBlockSize`. |
+| `embeddingScaledBySqrtHidden` | `Bool` | Embedding lookup is multiplied by sqrt(`hiddenSize`). | `true` | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53, IK2 `false`. |
+| `embedNormEnabled` | `Bool` | RMS norm applied to the token embeddings before the first layer. | `false` | INK, IK2 `true` (IK2: `token_embd_norm.weight`). |
 | `logitsWidthMultiplier` | `Double` | muP output scaling divided into the logits. 1.0 disables. | 1.0 | INK 16.0. |
-| `finalLogitSoftcap` | `Double` | Soft cap applied to the final logits. 0 disables. | 30.0 | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 0.0. |
+| `finalLogitSoftcap` | `Double` | Soft cap applied to the final logits. 0 disables. | 30.0 | Q36, Q38, DSV4, INK, MPL, FNX, MC5, G53 0.0. IK2 30.0, as G4. |
 
 ### `hyperConnections` — `HyperConnectionConfig`
 
@@ -416,13 +425,78 @@ fp32; the final collapse is the stream mean.
 | `kdaGateLowerBound` | `Double` | Log-space floor of the KDA decay: `lowerBound * sigmoid(...)`, so every channel decays by at least `exp(lowerBound)` per step. | -5.0 |
 | `rmsNormEps` | `Double` | RMSNorm epsilon threaded to every norm the runner encodes (the runtime's kernels default to 1e-6). | 1.0e-5 |
 
+### `inkling2` — `Inkling2Config`
+
+Inkling 2's own axes. `.none` (every field zero, `false` or empty) for every
+other family. Values are IK2's, read from Unsloth's UD-Q4_K_XL GGUF of
+`thinkingmachines/Inkling-2-Mini` @ `b85c3cf` (llama.cpp `inkling2_loop`
+keys in parentheses). The `Double` fields are the f32 values the GGUF
+carries, widened exactly, because that is all an install from the GGUF can
+record; the runner computes in f32, where the two agree.
+
+**Looped core.** Stored layers `0 ..< loopCoreStart` (the prelude) run once,
+the core `loopCoreStart ..< loopCoreEnd` runs `loopNumPasses` times with
+shared weights, and the rest (the coda) runs once: IK2's 24 stored layers make
+48 layer visits per token. Every pass restarts from the prelude's output.
+Passes after the first also read a message from the previous pass: per core
+layer, four learned queries (`loop_msg_query`, rows query, key, value, ffn)
+attend over the previous pass's two core block sums, and four rank-
+`loopGateRank` gates mix each message into its input as
+`(1 - tanh(forget(z))) · x + tanh(gain(z)) · m`, `z = down([norm(x); norm(m)])`.
+Each visit keeps its own KV and convolution state.
+`Inkling2Config.layerVisits(numLayers:)` gives the visits in execution order
+with their stored layer, pass and cache slot (the reference numbering: pass 0
+uses the stored index, later passes `numLayers + (pass - 1) · coreLayers +
+(layer - loopCoreStart)`). A pass's messages need the previous pass's whole
+output, so passes cannot interleave layer by layer.
+
+**Block attention residuals.** There is no single running residual. The state
+is the completed sums of blocks of `attnResBlockSize` layers (the token
+embedding first) plus the current block's partial sum; each attention input
+(one query on sliding layers, three — q, k, v — on global layers), each MoE
+input and the final output read that stack through a learned query
+(`attn_res_query`, `ffn_res_query`, `output_res_query`) with a softmax at
+scale `hiddenSize^-0.5` over RMS-normalized entries.
+
+**Attention.** Queries are scaled per head (`attn_q_clip`) and keys pass the
+short convolution; both are L2-clipped to `qkClipThreshold`. Values pass the
+convolution and a weightless RMSNorm. The relative bias is
+`relativePosition`; the sink is `attentionSinks` with a per-token logit
+(`attentionSinkProjected`); the output is gated by `sigmoid(attn_gate(x))`.
+
+**Experts.** `[gate; up] = W13 · x` (the GGUF's fused `ffn_gate_up_exps`,
+gate rows first), activation `hiddenActivation` `"situ"` with the two soft
+caps, then `W2` (`ffn_down_exps`). The block format is per layer
+(`routedExpertFormats`); an NVFP4 projection's output is also multiplied by
+its expert's F32 factor (`ffn_gate_up_exps.scale`, `ffn_down_exps.scale`).
+
+| Field | Type | Selects | IK2 |
+| --- | --- | --- | --- |
+| `loopCoreStart` | `Int` | First stored layer of the looped core, inclusive (`loop.start`). | 6 |
+| `loopCoreEnd` | `Int` | One past the last core layer (`loop.end`). | 18 |
+| `loopNumPasses` | `Int` | Passes over the core per token (`loop.count`). 0 means no loop. | 3 |
+| `loopGateRank` | `Int` | Rank of each message gate (`loop.gate_rank`): `down` `[rank, 2 · hidden]`, `gain` and `forget` `[hidden, rank]`. | 64 |
+| `attnResBlockSize` | `Int` | Layers per attention-residual block (`attn_res.block_size`); the loop bounds are multiples of it. | 6 |
+| `qkClipThreshold` | `Double` | L2 clip on each query and key head vector (`attention.qk_clip`). | 22.627416610717773 (f32 sqrt(512)) |
+| `relClipThreshold` | `Double` | L2 clip on each per-head relative-state vector (`attention.relative_clip`). | 8.0 |
+| `attentionSinkProjected` | `Bool` | The sink logit is `attn_sink_proj(x)`, one per head per token, on every layer kind, rather than a learned constant. | `true` |
+| `expertGateSoftcap` | `Double` | Soft cap `c` on the expert gate pre-activation (`activation.situ_beta`). | 4.0 |
+| `expertUpSoftcap` | `Double` | Soft cap `c'` on the expert up pre-activation (`activation.situ_linear_beta`). | 25.0 |
+| `routedExpertFormats` | `[String]` | GGML block format of each stored layer's routed experts, fused gate-up and down alike. Empty means one format for all layers, set by `manifest.quant.routedExpert`. | `"NVFP4"` on layers 0–19, `"Q8_0"` on 20–23 |
+
+The rest of the file's formats are per tensor, not axes: the runtime
+dispatches on each resident tensor's index dtype (`GGMLBlockFormat`: Q8_0 for
+attention, embedding and head; F32 for the norms, router, convolutions,
+clips, residual queries and loop gates; BF16 for `attn_sink_proj` and the
+dynamic-convolution projections in the shipped file).
+
 ## Vocabulary and head
 
-| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX | MC5 | G53 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `vocabSize` | `Int` | Embedding and `lm_head` rows. | 262144 | 248320 | 248320 | 129280 | 201024 | 151936 | 248320 | 130560 | 154880 |
-| `unpaddedVocabSize` | `Int` | Real vocabulary size when the embedding matrix is padded for alignment. Logits beyond this are padding and must be dropped before sampling, or the model can emit ids the tokenizer cannot decode. 0 means no padding — `vocabSize` is the real vocabulary. | 0 | 0 | 0 | 0 | 200058 | 0 | 0 | 0 | 0 |
-| `tieWordEmbeddings` | `Bool` | `lm_head` reuses the embedding matrix. | `true` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
+| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX | MC5 | G53 | IK2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `vocabSize` | `Int` | Embedding and `lm_head` rows. | 262144 | 248320 | 248320 | 129280 | 201024 | 151936 | 248320 | 130560 | 154880 | 201024 |
+| `unpaddedVocabSize` | `Int` | Real vocabulary size when the embedding matrix is padded for alignment. Logits beyond this are padding and must be dropped before sampling, or the model can emit ids the tokenizer cannot decode. 0 means no padding — `vocabSize` is the real vocabulary. | 0 | 0 | 0 | 0 | 200058 | 0 | 0 | 0 | 0 | 200058 |
+| `tieWordEmbeddings` | `Bool` | `lm_head` reuses the embedding matrix. | `true` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
 
 ## How to add an axis
 

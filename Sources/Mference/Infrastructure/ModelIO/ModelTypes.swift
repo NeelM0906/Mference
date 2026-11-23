@@ -15,6 +15,12 @@ public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     /// `model.` trunk prefix and a top-level `lm_head.weight`; no q/k norms,
     /// no output gate, no experts.
     case minicpm5 = "minicpm5"
+    /// Thinking Machines Inkling 2 Mini (`inkling2_loop`): 24 stored MoE
+    /// layers whose core (layers 6 to 17) runs three times per token, installed
+    /// byte for byte from Unsloth's UD-Q4_K_XL GGUF under its GGUF tensor
+    /// names. Distinct from the retired `inklingSmall`, which stays refused.
+    /// Gated in `ManifestReader.familiesWithoutRunner` until its runner lands.
+    case inkling2Loop = "inkling2Loop"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -387,6 +393,148 @@ public struct Glm53Config: Sendable, Equatable {
     }
 }
 
+/// Inkling 2's own axes: the looped core, the block attention residuals, the
+/// clipped attention with a projected sink, the soft-capped expert activation
+/// and the per-layer routed-expert block formats. `.none` (every field zero,
+/// `false` or empty) for every other family.
+///
+/// **Loop.** Stored layers `0 ..< loopCoreStart` (the prelude) run once, the
+/// core `loopCoreStart ..< loopCoreEnd` runs `loopNumPasses` times with shared
+/// weights, and `loopCoreEnd ..< numLayers` (the coda) runs once. Every pass
+/// restarts from the prelude's output; passes after the first also read a
+/// message from the previous pass through four rank-`loopGateRank` gates per
+/// core layer (query, key, value and MoE inputs). Each layer visit keeps its
+/// own KV and convolution state; see `layerVisits(numLayers:)` for the visit
+/// order and the cache-slot numbering.
+///
+/// **Block attention residuals.** There is no single running residual: each
+/// layer reads the completed sums of earlier blocks of `attnResBlockSize`
+/// layers, and the current block's partial sum, through learned queries.
+///
+/// The `Double` fields are the f32 values the GGUF carries, widened exactly
+/// (`Double(Float(x))`), because that is what an install from the GGUF can
+/// record; the runner computes in f32, where the two agree.
+public struct Inkling2Config: Sendable, Equatable {
+    /// First stored layer of the looped core, inclusive (`loop.start`).
+    public let loopCoreStart: Int
+    /// One past the last stored layer of the looped core (`loop.end`).
+    public let loopCoreEnd: Int
+    /// Passes over the core per token (`loop.count`). Inkling 2 Mini is fixed
+    /// at 3, so its 24 stored layers make 48 layer visits.
+    public let loopNumPasses: Int
+    /// Rank of each of the four message gates of a core layer
+    /// (`loop.gate_rank`): `down` is `[gateRank, 2 * hidden]`, `gain` and
+    /// `forget` are `[hidden, gateRank]`.
+    public let loopGateRank: Int
+    /// Layers per block of the block attention residual
+    /// (`attn_res.block_size`). A layer at a multiple of it starts a new block;
+    /// the loop bounds are multiples of it.
+    public let attnResBlockSize: Int
+    /// L2 clip on each query and key head vector, after the per-head learned
+    /// scale (`attention.qk_clip`): a longer vector is scaled down to this norm.
+    public let qkClipThreshold: Double
+    /// L2 clip on each per-head relative-state vector
+    /// (`attention.relative_clip`), after its per-head scale.
+    public let relClipThreshold: Double
+    /// The attention sink logit (`ArchConfig.attentionSinks`) is computed per
+    /// token from the layer input by `attn_sink_proj` (`[numHeads, hidden]`),
+    /// on every layer kind, rather than being a learned constant.
+    public let attentionSinkProjected: Bool
+    /// Soft cap on the expert gate pre-activation (`activation.situ_beta`):
+    /// the activation is `c·tanh(g/c) · sigmoid(g) · c'·tanh(u/c')`.
+    public let expertGateSoftcap: Double
+    /// Soft cap `c'` on the expert up pre-activation
+    /// (`activation.situ_linear_beta`).
+    public let expertUpSoftcap: Double
+    /// One entry per stored layer: the GGML block format of that layer's
+    /// routed experts (`"NVFP4"` or `"Q8_0"`), shared by its fused gate-up and
+    /// its down projection. Empty means one format for every layer, set by
+    /// `manifest.quant.routedExpert`.
+    public let routedExpertFormats: [String]
+
+    public init(loopCoreStart: Int, loopCoreEnd: Int, loopNumPasses: Int,
+                loopGateRank: Int, attnResBlockSize: Int,
+                qkClipThreshold: Double, relClipThreshold: Double,
+                attentionSinkProjected: Bool,
+                expertGateSoftcap: Double, expertUpSoftcap: Double,
+                routedExpertFormats: [String]) {
+        self.loopCoreStart = loopCoreStart
+        self.loopCoreEnd = loopCoreEnd
+        self.loopNumPasses = loopNumPasses
+        self.loopGateRank = loopGateRank
+        self.attnResBlockSize = attnResBlockSize
+        self.qkClipThreshold = qkClipThreshold
+        self.relClipThreshold = relClipThreshold
+        self.attentionSinkProjected = attentionSinkProjected
+        self.expertGateSoftcap = expertGateSoftcap
+        self.expertUpSoftcap = expertUpSoftcap
+        self.routedExpertFormats = routedExpertFormats
+    }
+
+    public static let none = Inkling2Config(
+        loopCoreStart: 0, loopCoreEnd: 0, loopNumPasses: 0, loopGateRank: 0,
+        attnResBlockSize: 0, qkClipThreshold: 0, relClipThreshold: 0,
+        attentionSinkProjected: false, expertGateSoftcap: 0, expertUpSoftcap: 0,
+        routedExpertFormats: [])
+
+    /// Stored layers in the looped core.
+    public var loopCoreLayerCount: Int { max(0, loopCoreEnd - loopCoreStart) }
+
+    /// True for a stored layer that runs more than once per token.
+    public func layerIsLooped(_ layer: Int) -> Bool {
+        loopNumPasses > 1 && layer >= loopCoreStart && layer < loopCoreEnd
+    }
+
+    /// Whether the loop bounds describe a loop over `numLayers` stored layers.
+    private func loops(numLayers: Int) -> Bool {
+        loopNumPasses > 1 && loopCoreStart >= 0 && loopCoreLayerCount > 0 && loopCoreEnd <= numLayers
+    }
+
+    /// Layer visits per token: `numLayers + (passes - 1) * coreLayers`.
+    public func layerVisitCount(numLayers: Int) -> Int {
+        guard loops(numLayers: numLayers) else { return numLayers }
+        return numLayers + (loopNumPasses - 1) * loopCoreLayerCount
+    }
+
+    /// One execution of a stored layer.
+    public struct LayerVisit: Sendable, Equatable {
+        /// Position in execution order, `0 ..< layerVisitCount`.
+        public let order: Int
+        /// The stored layer whose weights run.
+        public let layer: Int
+        /// 0 for the prelude, the coda and the first core pass; `p` for core
+        /// pass `p + 1`. Messages exist only for `pass > 0`.
+        public let pass: Int
+        /// The KV / convolution state slot, the reference numbering
+        /// (transformers and llama.cpp alike): the stored layer index for pass
+        /// 0, then `numLayers + (pass - 1) * coreLayers + (layer - coreStart)`.
+        public let cacheSlot: Int
+    }
+
+    /// Every layer visit of one token in execution order: prelude, core pass
+    /// 1, ..., core pass `loopNumPasses`, coda. Without a loop (or with bounds
+    /// outside `0 ..< numLayers`) it is the stored layers in order.
+    public func layerVisits(numLayers: Int) -> [LayerVisit] {
+        guard loops(numLayers: numLayers) else {
+            return (0..<numLayers).map { LayerVisit(order: $0, layer: $0, pass: 0, cacheSlot: $0) }
+        }
+        var visits: [LayerVisit] = []
+        visits.reserveCapacity(layerVisitCount(numLayers: numLayers))
+        func add(_ layer: Int, _ pass: Int) {
+            let slot = pass == 0
+                ? layer
+                : numLayers + (pass - 1) * loopCoreLayerCount + (layer - loopCoreStart)
+            visits.append(LayerVisit(order: visits.count, layer: layer, pass: pass, cacheSlot: slot))
+        }
+        for layer in 0..<loopCoreStart { add(layer, 0) }
+        for pass in 0..<loopNumPasses {
+            for layer in loopCoreStart..<loopCoreEnd { add(layer, pass) }
+        }
+        for layer in loopCoreEnd..<numLayers { add(layer, 0) }
+        return visits
+    }
+}
+
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
@@ -511,6 +659,10 @@ public struct ArchConfig: Sendable, Equatable {
     /// Full attention adds one learned logit per query head to the softmax
     /// denominator only.
     public let attentionSinks: Bool
+    /// Inkling 2's looped core, block attention residuals, clipped and
+    /// projected-sink attention, soft-capped expert activation and per-layer
+    /// expert formats. `.none` for every other family.
+    public let inkling2: Inkling2Config
 
     public init(
         hiddenSize: Int,
@@ -565,7 +717,8 @@ public struct ArchConfig: Sendable, Equatable {
         qkNorm: Bool = true,
         glm53: Glm53Config = .none,
         noRopeLayerMask: [UInt8] = [],
-        attentionSinks: Bool = false
+        attentionSinks: Bool = false,
+        inkling2: Inkling2Config = .none
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -620,6 +773,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.glm53 = glm53
         self.noRopeLayerMask = noRopeLayerMask
         self.attentionSinks = attentionSinks
+        self.inkling2 = inkling2
     }
 
     /// Canonical Qwen3.6-35B-A3B baseline: a 40-layer hybrid of 30
@@ -821,18 +975,97 @@ public struct ArchConfig: Sendable, Equatable {
         qkNorm: false
     )
 
+    /// Canonical Inkling 2 Mini baseline (`inkling2_loop`), as Unsloth's
+    /// UD-Q4_K_XL GGUF of `thinkingmachines/Inkling-2-Mini` @ `b85c3cf`
+    /// carries it: 24 stored MoE layers of 128 routed experts (top-8, width
+    /// 1152) with no shared expert; four global layers (5, 11, 17, 23) and
+    /// twenty 1,024-token sliding layers; no RoPE, a learned relative bias
+    /// (`relativePosition`) and a projected sink instead; the core layers 6 to
+    /// 17 run three times (`inkling2`). Sigmoid router with a selection bias,
+    /// top-8 renormalized and scaled by 8. The 201,024-row embedding and
+    /// output head are padded past the 200,058-token vocabulary.
+    ///
+    /// The sliding and full pairs of KV heads and head widths are equal; the
+    /// relative-bias extent is 1,024 on both layer kinds, the same as the
+    /// window. `rms_norm_eps` (1e-6, f32 in the GGUF) is not an axis: the
+    /// kernels default to that epsilon, so an installer must refuse a file
+    /// with any other value.
+    public static let inkling2Mini = ArchConfig(
+        hiddenSize: 2304,
+        intermediateSize: 1152,
+        moeIntermediateSize: 1152,
+        numHeads: 24,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 201_024,
+        slidingWindow: 1024,
+        finalLogitSoftcap: 30.0,
+        ropeTheta: 0.0,
+        fullRopeTheta: 0.0,
+        partialRotaryFactor: 0.0,
+        numLayers: 24,
+        numExperts: 128,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.inkling2LayerMask(),
+        hiddenActivation: "situ",
+        family: .inkling2Loop,
+        attnOutputGate: false,
+        attentionScale: 0.08838834764831845,   // pow(128, -0.5) == head_dim ** -0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        routerScoringFunc: "sigmoid",
+        routedScalingFactor: 8.0,
+        relativePosition: RelativePositionConfig(
+            dRel: 16, extent: 1024, projDim: 384,
+            logScalingFloor: 8192,
+            logScalingAlpha: Double(Float(0.1))),
+        sconvKernelSize: 4,
+        numSharedExperts: 0,
+        embedNormEnabled: true,
+        routerGateBias: true,
+        routerNormAfterTopK: true,
+        unpaddedVocabSize: 200_058,
+        qkNorm: false,
+        attentionSinks: true,
+        inkling2: Inkling2Config(
+            loopCoreStart: 6,
+            loopCoreEnd: 18,
+            loopNumPasses: 3,
+            loopGateRank: 64,
+            attnResBlockSize: 6,
+            qkClipThreshold: Double(Float(22.627416997969522)),   // sqrt(512)
+            relClipThreshold: 8.0,
+            attentionSinkProjected: true,
+            expertGateSoftcap: 4.0,
+            expertUpSoftcap: 25.0,
+            routedExpertFormats: [String](repeating: "NVFP4", count: 20)
+                + [String](repeating: "Q8_0", count: 4))
+    )
+
+    private static func inkling2LayerMask() -> [UInt8] {
+        // `layer_types[i]` is full attention when (i + 1) % 6 == 0.
+        (0..<24).map { ($0 + 1) % 6 == 0 ? 1 : 0 }
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     ///
     /// A family here has a validated baseline, not necessarily a runner:
     /// `ManifestReader.familiesWithoutRunner` is the separate, authoritative
-    /// gate over whether the runtime can execute one. That table is empty
-    /// today — every family in this registry has a runner — but the two facts
-    /// stay separate, because a new port earns its baseline first.
+    /// gate over whether the runtime can execute one (it holds `inkling2Loop`
+    /// until its runner lands), because a new port earns its baseline first.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .qwen36: .qwen36_35B_A3B,
         .qwen38: .qwen38_27B,
         .maple: .maplePreview,
         .minicpm5: .miniCPM5_2B,
+        .inkling2Loop: .inkling2Mini,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -1027,7 +1260,9 @@ public struct TensorView: @unchecked Sendable {
     public let biasLength: UInt64
     public let shape: (UInt32, UInt32, UInt32, UInt32)
     /// Dtype byte. 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32, 4 = I64
-    /// (integer lookup tables, read CPU-side only); 5 = I32.
+    /// (integer lookup tables, read CPU-side only); 5 = I32;
+    /// `0x40 | ggml type id` = native GGML blocks (`GGMLBlockFormat`, an
+    /// install copied from a GGUF: 0x48 Q8_0, 0x68 NVFP4).
     public let dtype: UInt8
 
     public init(buffer: MTLBuffer,
