@@ -46,9 +46,11 @@ struct Inkling2ReferenceOpsTests {
         #expect(Op.l2Clip([3, 4], threshold: 10) == [3, 4])
         #expect(Op.l2ClipActive([3, 4], threshold: 2.5))
         #expect(!Op.l2ClipActive([3, 4], threshold: 10))
-        // The per-channel scale applies before the norm is taken.
-        let scaled = Op.l2Clip([3, 4], scale: [2, 2], threshold: 20)
-        #expect(scaled == [6, 8])
+        // The per-channel scale applies before the norm is taken: [6, 8] has
+        // norm 10 and is clipped to 7; scaling after a clip of [3, 4] (norm 5,
+        // unclipped) would give [6, 8].
+        let scaled = Op.l2Clip([3, 4], scale: [2, 2], threshold: 7)
+        #expect(close(scaled[0], 4.2, 1e-5) && close(scaled[1], 5.6, 1e-5))
     }
 
     @Test func logScaleStartsAtTheFloor() {
@@ -94,18 +96,22 @@ struct Inkling2ReferenceOpsTests {
     }
 
     @Test func controllerMixesWithTanhGates() {
-        // down picks z = [rms(x)_0, rms(m)_0]; gain row i = (0, 1), forget row i = (1, 0).
-        let x: [Float] = [1, 1]
-        let m: [Float] = [2, 2]
+        // rms(x) = [√2, 0], rms(m) = [0, √2]; z = [g0, 2·g3] = [√2, 2√2] with
+        // the [rms(x); rms(m)] order ([0, 0] the other way round). Gain reads
+        // z1 and forget reads z0, so swapping either the halves or the two
+        // gates changes the result.
+        let x: [Float] = [1, 0]
+        let m: [Float] = [0, 3]
         var downValues = [Float](repeating: 0, count: 2 * 4)
-        downValues[0] = 1          // z0 = rms(x)[0] = 1
-        downValues[4 + 2] = 1      // z1 = rms(m)[0] = 1
+        downValues[0] = 1          // z0 = g[0] = rms(x)[0]
+        downValues[4 + 3] = 2      // z1 = 2 g[3] = 2 rms(m)[1]
         let down = Inkling2DenseMatrix(rows: 2, cols: 4, values: downValues)
         let gain = Inkling2DenseMatrix(rows: 2, cols: 2, values: [0, 1, 0, 1])
         let forget = Inkling2DenseMatrix(rows: 2, cols: 2, values: [1, 0, 1, 0])
         let out = Op.control(x, message: m, down: down, gain: gain, forget: forget)
-        let t = Float(tanh(1.0))
-        #expect(close(out[0], (1 - t) * 1 + t * 2, 1e-5))
+        let z0 = Float(2).squareRoot(), z1 = 2 * Float(2).squareRoot()
+        #expect(close(out[0], (1 - tanh(z0)) * 1, 1e-5))
+        #expect(close(out[1], tanh(z1) * 3, 1e-5))
     }
 
     @Test func attendHeadWithoutSinkIsSoftmax() {

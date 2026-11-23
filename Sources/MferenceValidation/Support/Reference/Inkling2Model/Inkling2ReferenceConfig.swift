@@ -185,6 +185,8 @@ public struct Inkling2ReferenceConfig: Sendable, Equatable {
         guard slidingLayers.count == numLayers else { throw fail("slidingLayers has \(slidingLayers.count) entries for \(numLayers) layers") }
         guard coreStart > 0, coreStart < coreEnd, coreEnd <= numLayers else { throw fail("invalid loop core [\(coreStart), \(coreEnd))") }
         guard coreStart % attnResBlockSize == 0, coreEnd % attnResBlockSize == 0 else { throw fail("loop core must align with the attention-residual blocks") }
+        // At least one pass: the reference also runs variable-loop counts
+        // (upstream asks for two on a fixed-loop file such as Mini).
         guard numPasses >= 1, gateRank >= 1 else { throw fail("invalid pass count or gate rank") }
         guard numKVHeads > 0, numHeads % numKVHeads == 0 else { throw fail("query heads must be a multiple of KV heads") }
         guard topK >= 1, topK <= numExperts else { throw fail("invalid top-k") }

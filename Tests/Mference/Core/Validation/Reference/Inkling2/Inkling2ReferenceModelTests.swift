@@ -44,10 +44,25 @@ struct Inkling2ReferenceModelTests {
     @Test func validationNamesAMissingTensor() {
         var w = Inkling2ToyCheckpoint.weights()
         w.layers[11].kConvProj = nil
-        #expect(throws: (any Error).self) { try w.validate(against: .toy) }
+        let missing = #expect(throws: (any Error).self) { try w.validate(against: .toy) }
+        #expect(missing?.localizedDescription.contains("layer 11") == true)
         var w2 = Inkling2ToyCheckpoint.weights()
         w2.layers[3].attnResQueries.append(w2.layers[3].ffnResQuery)
-        #expect(throws: (any Error).self) { try w2.validate(against: .toy) }
+        let extra = #expect(throws: (any Error).self) { try w2.validate(against: .toy) }
+        #expect(extra?.localizedDescription.contains("attention-residual queries") == true)
+    }
+
+    @Test func slidingLayersUseTheWindowAsTheirBiasExtent() {
+        // transformers: rel_extent = sliding_window_size on sliding layers,
+        // rel_extent on global ones. The toy gives them different values.
+        let toy = Inkling2ReferenceConfig.toy
+        #expect(toy.relativeExtent(layer: 4) == 8 && toy.relativeExtent(layer: 5) == 12)
+        #expect(toy.relativeExtent(layer: 6) == 8 && toy.relativeExtent(layer: 23) == 12)
+        let w = Inkling2ToyCheckpoint.weights()
+        #expect(w.layers[0].relBias.count == 8 * toy.relDim)
+        #expect(w.layers[17].relBias.count == 12 * toy.relDim)
+        #expect(Inkling2ReferenceConfig.mini.relativeExtent(layer: 0) == 1024)
+        #expect(Inkling2ReferenceConfig.mini.relativeExtent(layer: 11) == 1024)
     }
 
     // MARK: Determinism and chunking
@@ -162,7 +177,7 @@ struct Inkling2ReferenceModelTests {
         #expect(cov.clippedQueries > 0 && cov.clippedQueries < headVisits, seen)
         #expect(cov.clippedKeys > 0 && cov.clippedKeys < kvVisits, seen)
         #expect(cov.clippedRelStates > 0 && cov.clippedRelStates < headVisits, seen)
-        // Positions past the floor on all 8 global visits.
+        // Positions past the floor on global visits.
         #expect(cov.logScaledQueries > 0, seen)
         // Keys past the window on sliding visits, past the extent on global ones.
         #expect(cov.windowMaskedKeys > 0, seen)

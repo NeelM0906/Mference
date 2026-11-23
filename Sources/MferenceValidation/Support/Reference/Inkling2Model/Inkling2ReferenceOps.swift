@@ -210,14 +210,15 @@ public enum Inkling2ReferenceOps {
 
     // MARK: Mixture of experts
 
-    /// Router: `scores = sigmoid(router x)` in FP32 semantics, top-k on
-    /// `scores + bias` (ties to the lower index), weights = the chosen
+    /// Router: `scores = sigmoid(router x)`, top-k on `scores + bias` added
+    /// in FP32 as upstream and transformers add it, weights = the chosen
     /// unbiased scores normalized to sum 1 (`/(sum + 1e-20)`), times
-    /// `routeScale`. Experts in descending selection order.
+    /// `routeScale`. Experts in descending selection order. Exact ties go to
+    /// the lower index here; upstream leaves tie order unspecified.
     public static func route(_ x: [Float], router: any Inkling2ReferenceMatrix,
                              bias: [Float], topK: Int, routeScale: Float) -> Inkling2Route {
         let scores = router.apply(x).map(sigmoid)
-        let selection = (0..<scores.count).map { Double(scores[$0]) + Double(bias[$0]) }
+        let selection: [Float] = (0..<scores.count).map { scores[$0] + bias[$0] }
         let chosen = (0..<scores.count).sorted {
             selection[$0] != selection[$1] ? selection[$0] > selection[$1] : $0 < $1
         }.prefix(topK)
