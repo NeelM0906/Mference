@@ -463,6 +463,43 @@ class V116Tests(unittest.TestCase):
         gv.FORCED_TOTAL = 18816  # the four files must cover the measured total
         self.assertTrue(any("not 18816" in m for m in gv.forced_gate(self.root, self.tdir)["missing"]))
 
+    def test_trace_by_content(self):
+        """v1.18: the forced-on trace sits beside the candidate; key order only passes, content differences are stale."""
+        import shutil
+        self.forced(positions=300)  # forced on cand-x's trace as written; now move that trace to cand-orig
+        orig = os.path.join(self._tmp.name, "cand-orig", "traces")
+        shutil.copytree(self.tdir, orig)
+        path = os.path.join(self.root, "t", "forced", "t.json")
+        with open(path) as f:
+            d = json.load(f)
+        d["candidate"] = "cand-orig"
+        dump(d, path)
+        tj = os.path.join(self.tdir, "t", "trace.json")
+        with open(tj) as f:
+            t = json.load(f)
+        def write(obj):
+            with open(tj, "w") as f:
+                f.write(json.dumps(obj)); f.flush()
+        # 1. key order only: passes, with the note
+        write({k: t[k] for k in reversed(list(t))})
+        r = gv.forced_report(self.root, "t", self.tdir)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["trace_note"], "raw bytes differ, key order only")
+        # 2. one expert id differs: stale
+        t2 = json.loads(json.dumps(t))
+        t2["visits"][0]["experts"][0][0] = 99
+        write(t2)
+        r = gv.forced_report(self.root, "t", self.tdir)
+        self.assertEqual(r["status"], "stale")
+        self.assertIn("content differs", r["why"])
+        # 3. the hidden-state file differs: stale
+        write(t)
+        with open(os.path.join(self.tdir, "t", "h.f32"), "r+b") as f:
+            f.write(b"\x00\x00\x00\x40")
+        r = gv.forced_report(self.root, "t", self.tdir)
+        self.assertEqual(r["status"], "stale")
+        self.assertIn("hidden-state file differs", r["why"])
+
     def ref(self, **kw):
         kw.setdefault("positions", 300)
         self.forced(where=os.path.join(self.root, gv.REF_LLAMA), precision=kw.pop("precision", "llamaExperts"), **kw)
