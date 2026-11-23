@@ -218,10 +218,13 @@ struct Inkling2ForwardRunnerToyTests {
         let context = try MetalContext()
         let toy = try Inkling2RunnerToy(device: context.device)
         let c = Inkling2RunnerToy.config
-        let d = c.hiddenSize, rows = 16
+        let d = c.hiddenSize, rows = 24
         // The short steps, then a prefill after the decodes (it restages
-        // layers whose slots live decode visits used) and one more decode.
-        let steps = Self.shortSteps + [([88, 5, 61], false), ([41], true)]
+        // layers whose slots live decode visits used) and one more decode,
+        // then a 10-token prefill in chunks of 4, 4 and 2 (each chunk but the
+        // last prefetches the next one's first staged read) and a decode.
+        let steps = Self.shortSteps + [([88, 5, 61], false), ([41], true),
+                                       ((0..<10).map { Int32(($0 * 37 + 11) % 500) }, false), ([9], true)]
         let shape = Inkling2MoEShape(d: d, f: c.expertFF, experts: c.numExperts, topK: c.topK)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("inkling2-store-\(UUID().uuidString)")
@@ -244,8 +247,11 @@ struct Inkling2ForwardRunnerToyTests {
         let stagedLayers = plan.placements.filter { $0 == .staged }.count
         #expect(stagedLayers == (hostGigabytes == 32 ? 12 : 24))
         var stored = toy.runnerWeights
+        // The toy's layers are small, so the plan's `.fill` would hold every
+        // expert; 24 slots a layer keep the caches evicting.
         stored.experts = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
-                                                 readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30))
+                                                 readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
+                                                 decodeSlots: .perLayer(24))
 
         func run(_ weights: Inkling2RunnerWeights) async throws
             -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], cache: Inkling2ForwardRunner.DecodeCacheStats) {

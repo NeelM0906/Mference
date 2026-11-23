@@ -72,6 +72,50 @@ import MferenceValidationSupport
         return best
     }
 
+    /// The loop passes' per-visit gate and mix kernels at one token (decode),
+    /// Mini shapes (d 2,304, gate rank 64; synthetic F32 weights): GPU time
+    /// per dispatch, 32 dispatches per command buffer so the GPU stays
+    /// clocked up. Each loop-pass visit runs four message gates (q, k, v and
+    /// the MoE input) and two depth mixes; the real install's decode
+    /// timeline shows loop-pass visits at about 6 ms against 0.9 ms in pass 0.
+    @Test(.enabled(if: enabled))
+    func loopPassKernelsAtOneToken() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2RunnerKernels(device: context.device)
+        let device = context.device
+        let d = 2304, rank = 64, steps = 32
+        func floats(_ count: Int, seed: UInt64) -> MTLBuffer {
+            var rng = SeedTree(seed).key("loop-pass-bench")
+            let values = (0..<count).map { _ in Float.random(in: -0.05...0.05, using: &rng) }
+            return device.makeBuffer(bytes: values, length: count * 4, options: .storageModeShared)!
+        }
+        let x = floats(4 * d, seed: 1), message = floats(4 * d, seed: 2), out = floats(4 * d, seed: 3)
+        let down = floats(rank * 2 * d, seed: 4), gain = floats(d * rank, seed: 5), forget = floats(d * rank, seed: 6)
+        let arena = floats(9 * d, seed: 7), queries = floats(4 * d, seed: 8)
+        func perDispatch(_ body: (MTLComputeCommandEncoder) -> Void) -> Double {
+            _ = Inkling2MoETestSupport.run(context) { enc in for _ in 0..<steps { body(enc) } }
+            return Self.best(context) { enc in for _ in 0..<steps { body(enc) } } / Double(steps) * 1000
+        }
+        let gate = perDispatch { enc in
+            kernels.encodeMessageGate(enc, x: x, xStride: d, message: message, messageStride: d,
+                                      down: down, downOffset: 0, gain: gain, gainOffset: 0, forget: forget,
+                                      forgetOffset: 0, rank: rank, out: out, outStride: d, d: d, tokens: 1)
+        }
+        let mix4 = perDispatch { enc in
+            kernels.encodeDepthMix(enc, arena: arena, stateOffsets: (0..<8).map { $0 * d }, stateStride: d,
+                                   queries: queries, queryCount: 4, out: out, outStride: d, outQueryStride: d,
+                                   d: d, tokens: 1)
+        }
+        let mix1 = perDispatch { enc in
+            kernels.encodeDepthMix(enc, arena: arena, stateOffsets: (0..<8).map { $0 * d }, stateStride: d,
+                                   queries: queries, queryCount: 1, out: out, outStride: d, outQueryStride: d,
+                                   d: d, tokens: 1)
+        }
+        let gateBytes = Double((rank * 2 * d + 2 * d * rank) * 4)
+        print(String(format: "[inkling2-moe-kbench] loop pass at one token: message gate %.3f ms per dispatch (%.1f GB/s of its %.2f MB of weights), four per visit %.2f ms; depth mix over 8 states with 4 queries %.3f ms, with 1 query %.3f ms",
+                     gate, gateBytes / (gate / 1000) / 1e9, gateBytes / 1e6, 4 * gate, mix4, mix1))
+    }
+
     @Test(.enabled(if: enabled))
     func groupedExperts() throws {
         let context = try MetalContext()

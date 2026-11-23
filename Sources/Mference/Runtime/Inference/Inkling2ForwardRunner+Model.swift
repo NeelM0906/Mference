@@ -23,8 +23,8 @@ extension Inkling2RunnerWeights {
     /// against what the kernels read; and the routed experts from K2's
     /// `Inkling2ExpertStore`, which reads the layer files itself under its
     /// residency plan for this host (on 32 GB: the looped layers 6-17
-    /// resident, 6.9 GB; the rest staged through two slabs for prefill and
-    /// mapped for decode). The `Model`'s own expert streamers are never
+    /// resident, 6.9 GB; the rest staged through three slabs for prefill,
+    /// whose bytes also hold the decode slot caches). The `Model`'s own expert streamers are never
     /// opened, so load it with `.pread` streaming: `.resident` would warm the
     /// whole 15.8 GB pool at load.
     ///

@@ -30,12 +30,19 @@ protocol Inkling2ExpertSource: AnyObject {
     /// After a command buffer failed, once every committed one completed:
     /// releases what its skipped signals would have.
     func recoverAfterFailedCommands()
+    /// Starts the next prefill chunk's first staged read early (when another
+    /// chunk follows); a no-op for sources that stage nothing.
+    func prefetchFirstStagedVisit() throws
+    /// Gives back a prefetched read whose chunk will not run.
+    func cancelPrefetch() throws
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
 
 extension Inkling2ExpertSource {
     func recoverAfterFailedCommands() {}
+    func prefetchFirstStagedVisit() throws {}
+    func cancelPrefetch() throws {}
     func decodeNeedsRoutes(layer: Int) -> Bool { false }
     func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
@@ -51,7 +58,7 @@ extension Inkling2ExpertSource {
 /// read back the routed ids and decode from the layer's slot cache
 /// (`prepareDecodeVisit`), reading only the experts that miss.
 extension Inkling2ExpertStore: Inkling2ExpertSource {
-    var boundExpertBytes: Int { plan.residentBytes + plan.stagingBytes }
+    var boundExpertBytes: Int { boundBytes }
     func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool {
         try beginPrefillVisit(layer: layer, commandBuffer: commandBuffer)
     }
@@ -260,6 +267,17 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     }
     private(set) var decodeCacheStats = DecodeCacheStats()
     private let logsDecodeCache = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_CACHE_LOG"] != nil
+    /// Diagnostic (`MFERENCE_INKLING2_DECODE_TIMELINE`; `2` adds each
+    /// buffer): per decoded token, the command buffers, the CPU's waits on
+    /// them and the GPU's own start and end times, printed to stderr.
+    private let decodeTimeline = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_TIMELINE"]
+    /// Set by `prefillChunked` while another chunk follows the one running.
+    private var prefetchesNextChunk = false
+    /// With the decode-cache log: the last token's routed ids of each staged
+    /// prefill visit (the seed a decode cache could start from), copied on
+    /// the GPU and printed after the chunk.
+    private var prefillRouteLog: MTLBuffer?
+    private var prefillRouteLayers: [Int] = []
 
     /// Diagnostic and golden hook: while set, every chunk copies each
     /// visit's output, the running block sum (FP32 `[48][rows][d]`), and the
@@ -286,9 +304,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     var positionLogits: PositionLogits?
 
     /// The most routed-expert bytes the runner lets its expert source make
-    /// resident: 40% of the host's memory. 12.8 GB on 32 GB, where K2's plan
-    /// binds 9.07 GB (layers 6-17 resident plus two slabs) and every layer
-    /// resident (15.8 GB) is refused; every layer fits from 40 GB up.
+    /// resident: 40% of the host's memory. 13.7 GB on 32 GB, where K2's plan
+    /// binds just under it (layers 6-17 resident, 6.9 GB, plus three staging
+    /// slabs sized to what is left, decision 6) and every layer resident
+    /// (15.8 GB) is refused; every layer fits from 40 GB up. The plan uses
+    /// the same formula (`Inkling2ExpertResidencyPlan.expertBudget`).
     static func expertBudget(physicalMemory: UInt64) -> Int { Int(physicalMemory / 5 * 2) }
 
     init(weights: Inkling2RunnerWeights, context: MetalContext, maxContext: Int, maxChunkTokens: Int,
@@ -513,8 +533,26 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         }
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count, startPosition: startPosition,
                                               chunkTokens: min(config.chunkTokens, maxChunkTokens))
+        defer {
+            // Still set: the chunk after the one that set it never ran
+            // (cancelled between chunks, or that chunk threw); give the
+            // prefetched slab back now. A prefetch left by a last chunk's
+            // early throw stays until the next prefill takes it or a decode
+            // visit, abandon or recovery releases it.
+            if prefetchesNextChunk {
+                do {
+                    try w.experts.cancelPrefetch()
+                } catch {
+                    expertsFailed = "releasing an unused prefetched staging read failed: \(error)"
+                }
+            }
+            prefetchesNextChunk = false
+        }
         for (i, span) in spans.enumerated() {
             try Task.checkCancellation()
+            // Every chunk but the last starts the next one's first staged read
+            // early (not for a one-token chunk, which decodes from the slots).
+            prefetchesNextChunk = i < spans.count - 1 && spans[i + 1].tokenCount > 1
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try run(tokens: Array(tokens[lower..<upper]), start: span.startPosition,
@@ -558,9 +596,26 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         }
 
         var slots = Slots()
+        prefillRouteLayers.removeAll()
+        if logsDecodeCache, t > 1, prefillRouteLog == nil {
+            prefillRouteLog = ctx.device.makeBuffer(length: 48 * moeShape.topK * 4, options: .storageModeShared)
+        }
         var cb = try commandBuffer()
         var committed: [MTLCommandBuffer] = []
         var pending: MTLCommandBuffer? = cb
+        let timesBuffers = decodeTimeline != nil && t == 1
+        let runStarted = Self.hostSeconds()
+        let statsBefore = decodeCacheStats
+        var blocked: Double = 0, waits = 0
+        /// Waits for every committed buffer (timed for the decode timeline).
+        func waitAll() {
+            let started = timesBuffers ? Self.hostSeconds() : 0
+            committed.forEach { $0.waitUntilCompleted() }
+            if timesBuffers {
+                blocked += Self.hostSeconds() - started
+                waits += 1
+            }
+        }
         /// Commits the buffer being encoded and starts the next.
         func nextBuffer() throws {
             cb.commit()
@@ -577,7 +632,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 committed.append(open)
                 pending = nil
             }
-            committed.forEach { $0.waitUntilCompleted() }
+            waitAll()
         }
         func encode(_ body: (MTLComputeCommandEncoder) -> Void) {
             let enc = cb.makeComputeCommandEncoder()!
@@ -589,7 +644,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         /// every earlier command completed), and returns the next buffer.
         func split() throws -> MTLCommandBuffer {
             try nextBuffer()
-            committed.forEach { $0.waitUntilCompleted() }
+            waitAll()
             if let failed = committed.first(where: { $0.status != .completed }) {
                 throw Inkling2ForwardRunnerError.commandFailed(
                     failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
@@ -674,6 +729,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                                       cur: cur, blocks: &blocks, bank: nil, slots: &slots, split: split)
                 record(cur)
             }
+            if prefetchesNextChunk && t > 1 {
+                // Another prefill chunk follows: its first staged read starts
+                // as soon as a slab frees, overlapping this chunk's end.
+                try w.experts.prefetchFirstStagedVisit()
+            }
 
             if let hook = positionLogits {
                 // G6c: the head over every token of the chunk the hook asks for.
@@ -732,6 +792,20 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             throw Inkling2ForwardRunnerError.commandFailed(
                 failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
         }
+        if logsDecodeCache, t > 1, let log = prefillRouteLog, !prefillRouteLayers.isEmpty {
+            let ids = log.contents().bindMemory(to: UInt32.self, capacity: 48 * moeShape.topK)
+            var lines = ""
+            for (index, layer) in prefillRouteLayers.enumerated() {
+                let routed = (0..<moeShape.topK).map { String(ids[index * moeShape.topK + $0]) }
+                lines += "inkling2 prefill last-token routes: position \(start + t - 1) layer \(layer) ids "
+                    + routed.joined(separator: ",") + "\n"
+            }
+            FileHandle.standardError.write(Data(lines.utf8))
+        }
+        if timesBuffers {
+            reportDecodeTimeline(committed, started: runStarted, blocked: blocked, waits: waits, position: start,
+                                 before: statsBefore)
+        }
         state.advance(by: t)
         chunkState.markCommitted()
     }
@@ -765,6 +839,36 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         kernels.encodeHead(enc, x: s.finalRow, xOffset: d * 4, table: w.dense, tableOffset: w.output,
                            rowBytes: d / 32 * 34, rows: w.vocab, softcap: w.finalLogitSoftcap,
                            logits: logits, logitsOffset: logitsOffset, d: d)
+    }
+
+    /// Host time in seconds, the clock of `gpuStartTime` / `gpuEndTime`.
+    private static func hostSeconds() -> Double { Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9 }
+
+    /// One decoded token's timeline on stderr: wall time, the buffers and the
+    /// CPU's waits on them, the staged visits' readbacks and slot loads, and
+    /// the GPU's busy time and idle gaps between buffers.
+    private func reportDecodeTimeline(_ buffers: [MTLCommandBuffer], started: Double, blocked: Double, waits: Int,
+                                      position: Int, before: DecodeCacheStats) {
+        let ended = Self.hostSeconds()
+        let spans = buffers.map { ($0.gpuStartTime, $0.gpuEndTime) }
+        let busy = spans.reduce(0.0) { $0 + max(0, $1.1 - $1.0) }
+        let gaps = spans.indices.dropFirst().map { max(0, spans[$0].0 - spans[$0 - 1].1) }
+        let after = decodeCacheStats
+        let ms = { (seconds: Double) in seconds * 1000 }
+        var line = String(
+            format: "inkling2 decode timeline: position %d wall %.2f ms | buffers %d waits %d blocked %.2f ms | "
+                + "staged visits %d readback %.2f ms prepare %.2f ms hits %d misses %d | GPU busy %.2f ms, "
+                + "gaps %.2f ms (largest %.2f) | first GPU start after %.2f ms, last GPU end to return %.2f ms\n",
+            position, ms(ended - started), buffers.count, waits, ms(blocked), after.visits - before.visits,
+            ms(after.readbackSeconds - before.readbackSeconds), ms(after.seconds - before.seconds),
+            after.hits - before.hits, after.misses - before.misses, ms(busy), ms(gaps.reduce(0, +)),
+            ms(gaps.max() ?? 0), ms((spans.first?.0 ?? started) - started), ms(ended - (spans.last?.1 ?? ended)))
+        if decodeTimeline == "2" {
+            line += "inkling2 decode timeline buffers (GPU ms, gap before ms): "
+                + spans.indices.map { String(format: "%.2f/%.2f", ms(spans[$0].1 - spans[$0].0),
+                                             $0 == 0 ? 0 : ms(gaps[$0 - 1])) }.joined(separator: " ") + "\n"
+        }
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     // MARK: One visit
@@ -1032,8 +1136,9 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             decodeCacheStats.readbackSeconds += readback
             if logsDecodeCache {
                 FileHandle.standardError.write(Data(String(
-                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d readback %.3f ms prepare %.3f ms\n",
-                    start, layer, binding.hits, binding.misses, readback * 1000, seconds * 1000).utf8))
+                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d readback %.3f ms prepare %.3f ms ids %@\n",
+                    start, layer, binding.hits, binding.misses, readback * 1000, seconds * 1000,
+                    ids.map(String.init).joined(separator: ",")).utf8))
             }
             encode { enc in
                 moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, binding: binding,
@@ -1042,6 +1147,14 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             }
             w.experts.endDecodeVisit(binding, commandBuffer: cb)
         } else {
+            if logsDecodeCache, t > 1, w.experts.decodeNeedsRoutes(layer: layer), let log = prefillRouteLog,
+               prefillRouteLayers.count < 48, let blit = cb.makeBlitCommandEncoder() {
+                // Diagnostic: the chunk's last token's routes on this staged layer.
+                blit.copy(from: s.moeScratch.ids, sourceOffset: (t - 1) * moeShape.topK * 4, to: log,
+                          destinationOffset: prefillRouteLayers.count * moeShape.topK * 4, size: moeShape.topK * 4)
+                blit.endEncoding()
+                prefillRouteLayers.append(layer)
+            }
             // A staged layer's command buffer waits here for its slab and
             // releases it after the experts' encoder.
             let pool = try w.experts.beginVisit(layer: layer, commandBuffer: cb)
