@@ -51,7 +51,7 @@ extension Inkling2ExpertSource {
 /// read back the routed ids and decode from the layer's slot cache
 /// (`prepareDecodeVisit`), reading only the experts that miss.
 extension Inkling2ExpertStore: Inkling2ExpertSource {
-    var boundExpertBytes: Int { plan.residentBytes + plan.stagingBytes }
+    var boundExpertBytes: Int { boundBytes }
     func beginVisit(layer: Int, commandBuffer: MTLCommandBuffer) throws -> Inkling2ExpertPool {
         try beginPrefillVisit(layer: layer, commandBuffer: commandBuffer)
     }

@@ -32,6 +32,32 @@ enum Inkling2StagedReadMode: String, Equatable, Sendable {
     static func forHost(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Self {
         physicalMemory < Inkling2ExpertResidencyPlan.allResidentMemory ? .uncached : .cached
     }
+
+    /// The `MFERENCE_INKLING2_DECODE_MISS_READS` experiment toggle (`cached`
+    /// or `uncached`), if set.
+    static var decodeMissOverride: Self? {
+        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_MISS_READS"].flatMap(Self.init(rawValue:))
+    }
+}
+
+/// How the staged layers' decode slots are laid out in the staging slabs.
+enum Inkling2DecodeSlots: Equatable, Sendable {
+    /// The slabs as prefill needs them (each the size of the largest staged
+    /// layer), their bytes shared evenly between the staged layers: at
+    /// 32 GB, 40 NVFP4 or 21 Q8_0 slots a layer.
+    case evenBytes
+    /// The same number of slots for every staged layer (capped at the
+    /// expert count), the slabs enlarged where that needs more bytes. A Q8_0
+    /// miss costs more than an NVFP4 one, so equal counts beat even bytes at
+    /// equal memory (K2's replay of real routes, 2026-11-23).
+    case perLayer(Int)
+
+    /// `.perLayer(n)` from the `MFERENCE_INKLING2_DECODE_SLOTS` experiment
+    /// toggle, otherwise `.evenBytes`.
+    static var fromEnvironment: Self {
+        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"].flatMap(Int.init).map { .perLayer($0) }
+            ?? .evenBytes
+    }
 }
 
 /// The residency ladder of the integration plan (section 4.5), per stored
@@ -164,11 +190,13 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     /// that never completes would otherwise hold the reader forever).
     var releaseTimeoutMS: UInt64 = 120_000
 
+    /// `minimumSlabBytes` enlarges the slabs past the largest layer (room for
+    /// decode slots).
     init(device: MTLDevice, files: [Int: Inkling2ExpertLayerFile], slabs count: Int = 2,
-         readMode: Inkling2StagedReadMode = .forHost()) throws {
+         readMode: Inkling2StagedReadMode = .forHost(), minimumSlabBytes: Int = 0) throws {
         precondition(count >= 2 && !files.isEmpty)
         let pageSize = Int(getpagesize())
-        let largest = files.values.map(\.bytes).max() ?? 0
+        let largest = max(files.values.map(\.bytes).max() ?? 0, minimumSlabBytes)
         slabBytes = (largest + pageSize - 1) / pageSize * pageSize
         var made: [MTLBuffer] = []
         for index in 0..<count {
@@ -507,6 +535,15 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     var readMode: Inkling2StagedReadMode {
         didSet { staging?.readMode = readMode }
     }
+    /// The read mode of decode-cache misses when it differs from
+    /// `readMode` (nil: the same). Cached decode-miss reads keep single
+    /// experts (4.5 to 8.5 MB) in the file cache, not whole layers.
+    var decodeMissReadMode: Inkling2StagedReadMode?
+    /// How the decode slots were laid out.
+    let decodeSlotLayout: Inkling2DecodeSlots
+    /// Every expert byte the store's buffers can make resident: the resident
+    /// layers and the staging slabs (decode slots live in the slabs).
+    var boundBytes: Int { plan.residentBytes + (staging.map { $0.slabs.count * $0.slabBytes } ?? 0) }
     private let resident: [Int: Inkling2ExpertPool]
     private let mapped: [Int: Inkling2ExpertPool]
     private let templates: [Int: Inkling2ExpertPool]
@@ -525,12 +562,20 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// How long the CPU waits for the GPU before reporting `timedOut`.
     var waitTimeoutMS: UInt64 = 120_000
 
+    /// `decodeSlots` lays out the decode slots (default: the experiment
+    /// toggle, else even bytes in the slabs as prefill sizes them);
+    /// `decodeMissReadMode` reads decode misses in their own mode (default:
+    /// the toggle, else `readMode`).
     init(device: MTLDevice, shape: Inkling2MoEShape, layers: [Inkling2ExpertLayerSpec],
-         plan: Inkling2ExpertResidencyPlan, readMode: Inkling2StagedReadMode = .forHost()) throws {
+         plan: Inkling2ExpertResidencyPlan, readMode: Inkling2StagedReadMode = .forHost(),
+         decodeSlots: Inkling2DecodeSlots = .fromEnvironment,
+         decodeMissReadMode: Inkling2StagedReadMode? = Inkling2StagedReadMode.decodeMissOverride) throws {
         precondition(layers.count == plan.placements.count)
         self.plan = plan
         self.shape = shape
         self.readMode = readMode
+        self.decodeMissReadMode = decodeMissReadMode
+        self.decodeSlotLayout = decodeSlots
         let pageSize = Int(getpagesize())
         guard let ones = device.makeBuffer(length: max(16, shape.experts * 4), options: .storageModeShared) else {
             throw StoreError.allocationFailed("scale ones")
@@ -589,9 +634,28 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                 mapped[layer] = try pool(spec, buffer: buffer, offset: shift)
             }
         }
+        // Equal slot counts: each staged layer's slots, page-rounded, packed
+        // largest first onto the slab with the fewest bytes so far; the slabs
+        // grow to the fullest slab.
+        let slabCount = max(2, plan.stagingSlabs)
+        var placed: [Int: (slab: Int, offset: Int, slots: Int)] = [:]
+        var minimumSlabBytes = 0
+        if case .perLayer(let requested) = decodeSlots, !stagedLayers.isEmpty {
+            let count = min(max(requested, shape.topK), shape.experts)
+            var used = [Int](repeating: 0, count: slabCount)
+            let order = stagedLayers.sorted { layers[$0].expertStride > layers[$1].expertStride ||
+                (layers[$0].expertStride == layers[$1].expertStride && $0 < $1) }
+            for layer in order {
+                let bytes = (count * layers[layer].expertStride + pageSize - 1) / pageSize * pageSize
+                let slab = used.indices.min { used[$0] < used[$1] || (used[$0] == used[$1] && $0 < $1) }!
+                placed[layer] = (slab, used[slab], count)
+                used[slab] += bytes
+            }
+            minimumSlabBytes = used.max() ?? 0
+        }
         let staging = stagedFiles.isEmpty ? nil
-            : try Inkling2StagedExpertLayers(device: device, files: stagedFiles, slabs: max(2, plan.stagingSlabs),
-                                             readMode: readMode)
+            : try Inkling2StagedExpertLayers(device: device, files: stagedFiles, slabs: slabCount,
+                                             readMode: readMode, minimumSlabBytes: minimumSlabBytes)
 
         // Staged layers: a template over slab 0 (every staged layout must fit
         // a slab, so a visit's rebinding cannot fail after its ticket is
@@ -604,11 +668,11 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             for (index, layer) in stagedLayers.enumerated() {
                 let spec = layers[layer]
                 templates[layer] = try pool(spec, buffer: staging.slabs[0], offset: 0)
-                let slots = min(shape.experts, region / spec.expertStride)
+                let (slab, offset, slots) = placed[layer]
+                    ?? (index / perSlab, (index % perSlab) * region, min(shape.experts, region / spec.expertStride))
                 guard slots >= shape.topK else { throw StoreError.cacheTooSmall(layer: layer, slots: slots) }
-                caches[layer] = try DecodeCache(layer: layer, spec: spec, shape: shape,
-                                                slab: staging.slabs[index / perSlab],
-                                                offset: (index % perSlab) * region, slots: slots, device: device)
+                caches[layer] = try DecodeCache(layer: layer, spec: spec, shape: shape, slab: staging.slabs[slab],
+                                                offset: offset, slots: slots, device: device)
             }
         }
         guard let decodeDone = device.makeSharedEvent() else { throw StoreError.allocationFailed("decode event") }
@@ -783,7 +847,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             }
             do {
                 try Self.readExperts(cache: cache, loads: loads.map { ($0.slot, $0.expert) },
-                                     bypassCache: readMode == .uncached)
+                                     bypassCache: (decodeMissReadMode ?? readMode) == .uncached)
             } catch {
                 // The slots may hold partial bytes: mark them empty.
                 rollBack(cache, loads, keepPrevious: false)

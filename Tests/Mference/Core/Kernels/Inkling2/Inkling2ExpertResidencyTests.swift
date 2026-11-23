@@ -360,6 +360,81 @@ import MferenceValidationSupport
         #expect(hits > 0)
     }
 
+    /// Equal slot counts (`.perLayer`): NVFP4 and Q8_0 staged layers each
+    /// get the same number of slots, packed by size into slabs that grow to
+    /// hold them; the budget counts the grown slabs. Decode misses can read
+    /// in their own mode. Every visit equals the resident pool bit for bit.
+    @Test func perLayerDecodeSlotsMatchResidentPools() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let encodings: [Inkling2MoEEncoding] = [.nvfp4, .nvfp4, .nvfp4, .q8_0, .q8_0]
+        let layers = try encodings.enumerated().map { index, encoding in
+            try Inkling2SyntheticPool.make(device: context.device, encoding: encoding, shape: shape,
+                                           seed: 0x2B70 + UInt64(index), quantized: true)
+        }
+        let (directory, files) = try Self.writeLayers(layers, header: 4096)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let specs = layers.enumerated().map { layer, pool in
+            Inkling2ExpertLayerSpec(file: files[layer]!, encoding: encodings[layer], expertStride: pool.pool.expertStride,
+                                    gateUpScales: encodings[layer] == .nvfp4 ? (pool.pool.gateUpScales, pool.pool.gateUpScalesOffset) : nil,
+                                    downScales: encodings[layer] == .nvfp4 ? (pool.pool.downScales, pool.pool.downScalesOffset) : nil)
+        }
+        let plan = Inkling2ExpertResidencyPlan(placements: [.resident, .staged, .staged, .staged, .staged],
+                                               stagingSlabs: 2, residentBytes: files[0]!.bytes, stagingBytes: 0)
+        let even = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                           decodeSlots: .evenBytes)
+        let store = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                            readMode: .uncached, decodeSlots: .perLayer(10), decodeMissReadMode: .cached)
+        #expect(store.decodeSlotLayout == .perLayer(10) && store.decodeMissReadMode == .cached)
+        for layer in 1...4 { #expect(store.decodeSlots(layer: layer) == 10) }
+        // Even bytes: the Q8_0 layers get fewer slots than the NVFP4 ones.
+        #expect(even.decodeSlots(layer: 1)! > even.decodeSlots(layer: 4)!)
+        // The slabs grew past the largest layer, and the budget counts them.
+        let q8Stride = layers[3].pool.expertStride, nvStride = layers[1].pool.expertStride
+        let page = Int(getpagesize())
+        func rounded(_ bytes: Int) -> Int { (bytes + page - 1) / page * page }
+        // Largest first onto the emptier slab: each slab gets one Q8_0 and one NVFP4 layer.
+        let needed = rounded(10 * q8Stride) + rounded(10 * nvStride)
+        let slab = try #require(store.staging?.slabBytes)
+        #expect(slab >= needed && slab >= files[4]!.bytes)
+        #expect(store.boundBytes == plan.residentBytes + 2 * slab && even.boundBytes <= store.boundBytes)
+
+        let tokens = 12
+        let (x, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B71)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens * 4, experts: shape.experts, topK: shape.topK, seed: 0x2B72)
+        let weights = context.device.makeBuffer(length: routes.weights.count * 4, options: .storageModeShared)!
+        let ids = context.device.makeBuffer(length: routes.ids.count * 4, options: .storageModeShared)!
+        Inkling2MoETestSupport.write(routes.weights, to: weights)
+        Inkling2MoETestSupport.write(routes.ids, to: ids)
+        var misses = 0
+        for t in 0..<tokens {
+            for layer in 1...4 {
+                let r = t * 4 + (layer - 1)
+                let routed = (0..<shape.topK).map { Int(routes.ids[r * shape.topK + $0]) }
+                let binding = try store.prepareDecodeVisit(layer: layer, expertIDs: routed)
+                misses += binding.misses
+                let want = Self.decode(context, kernels, shape: shape, x: x, xOffset: t * shape.d * 2, weights: weights,
+                                       weightsOffset: r * shape.topK * 4, pool: layers[layer].pool, ids: ids,
+                                       idsOffset: r * shape.topK * 4)
+                let got = Self.decode(context, kernels, shape: shape, x: x, xOffset: t * shape.d * 2, weights: weights,
+                                      weightsOffset: r * shape.topK * 4, binding: binding, store: store)
+                #expect(got == want, "token \(t) layer \(layer)")
+            }
+        }
+        #expect(misses > 4 * 10, "10 slots must evict over \(tokens) tokens")
+        // Prefill still stages whole layers through the grown slabs.
+        let cb = context.queue.makeCommandBuffer()!
+        for layer in 1...4 {
+            _ = try store.beginPrefillVisit(layer: layer, commandBuffer: cb)
+            try store.endPrefillVisit(layer: layer, commandBuffer: cb)
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+        store.drainStaging()
+        #expect(cb.status == .completed && store.stagingError == nil)
+    }
+
     /// Least recently used, not first in: after A and B fill the 8 slots, C
     /// reuses two of A's experts, so the next misses evict A's other two.
     @Test func decodeCacheEvictsLeastRecentlyUsed() throws {
