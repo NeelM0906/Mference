@@ -38,13 +38,13 @@ import Mference
     }
 
     @Test func runnersWithoutPrefixSnapshotsServeMultiPrefixAsSinglePrefix() {
-        #expect(ServerModelSession.effectivePromptCacheMode(.multiPrefix, runnerSnapshotsPrefixes: true)
+        #expect(ServerModelSession.effectivePromptCacheMode(.multiPrefix, runnerSnapshotsPrefixes: true, family: nil)
             == .multiPrefix)
-        #expect(ServerModelSession.effectivePromptCacheMode(.multiPrefix, runnerSnapshotsPrefixes: false)
+        #expect(ServerModelSession.effectivePromptCacheMode(.multiPrefix, runnerSnapshotsPrefixes: false, family: nil)
             == .singlePrefix)
         for mode in [ServerPromptCacheMode.off, .singlePrefix] {
             for snapshots in [false, true] {
-                #expect(ServerModelSession.effectivePromptCacheMode(mode, runnerSnapshotsPrefixes: snapshots)
+                #expect(ServerModelSession.effectivePromptCacheMode(mode, runnerSnapshotsPrefixes: snapshots, family: nil)
                     == mode)
             }
         }
