@@ -63,6 +63,16 @@ public struct WeekContext: Sendable, Hashable {
 
     public func fact(_ id: String) -> WeekFact? { facts.first { $0.id == id } }
 
+    /// Whether `other` says the same thing apart from the minutes on the
+    /// clock: the same day, the same events and to-dos, and the same listed
+    /// days and open time. A thread keeps its schedule only while this holds,
+    /// so a later "today" or an hour that has passed gets a new one.
+    public func readsTheSame(as other: WeekContext) -> Bool {
+        week.calendar.isDate(week.now, inSameDayAs: other.week.now) && focus == other.focus
+            && week.events == other.week.events && week.todos == other.week.todos
+            && days == other.days && facts == other.facts
+    }
+
     /// The listed events, in schedule order.
     public var events: [WeekFact] {
         facts.filter { if case .event = $0.kind { true } else { false } }

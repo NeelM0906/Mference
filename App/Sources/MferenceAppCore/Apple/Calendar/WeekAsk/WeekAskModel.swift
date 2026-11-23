@@ -149,14 +149,10 @@ public final class WeekAskModel {
         let continuing = !answers.isEmpty && !isStale && week == interval
             && Self.fingerprint(snapshot, ignoring: ignoredOwnEvents) == fingerprint
         let history = continuing ? answers : []
-        let context: WeekContext
-        if continuing, let threadContext, threadContext.week.events == snapshot.events,
-           threadContext.week.todos == snapshot.todos, threadContext.focus == focusDay.map(snapshot.calendar.startOfDay) {
-            // The same schedule, word for word: the engine can reuse it.
-            context = threadContext
-        } else {
-            context = WeekContext(week: snapshot, focus: focusDay)
-        }
+        let fresh = WeekContext(week: snapshot, focus: focusDay)
+        // The thread's schedule while it still holds (the engine can reuse
+        // it word for word); a new one once the day or the open time moved.
+        let context = continuing ? threadContext.flatMap { $0.readsTheSame(as: fresh) ? $0 : nil } ?? fresh : fresh
         let answerer = answerer
         let report: @Sendable (WeekAskStep) async -> Void = { [weak self] step in
             await self?.setStep(step, generation: mine)

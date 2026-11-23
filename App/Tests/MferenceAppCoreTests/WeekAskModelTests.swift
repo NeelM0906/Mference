@@ -1,5 +1,6 @@
 import Foundation
 @testable import MferenceAppCore
+import Synchronization
 import Testing
 
 /// Ask about your week's lifecycle: in memory, one week, a thread of at most
@@ -52,6 +53,55 @@ import Testing
         #expect(second.map(\.role) == [.system, .user, .assistant, .user])
         #expect(second[2].content == "Friday 1:30 to 5 PM is open.")
         #expect(second[1].content == engine.requests[0].turns[1].content)
+    }
+
+    /// A clock the test moves forward.
+    final class Clock: Sendable {
+        let time = Mutex(CalendarFixtures.now)
+        var now: Date { time.withLock { $0 } }
+        func set(_ date: Date) { time.withLock { $0 = date } }
+    }
+
+    @MainActor static func setUp(engine: ScriptedEngineService, clock: Clock) async -> WeekAskModel {
+        let calendar = CalendarWeekModel(service: InMemoryCalendarService(events: CalendarFixtures.events),
+                                         store: PlannerStore(url: nil), layout: AppleCalendarTests.layout,
+                                         defaults: UserDefaults(suiteName: "mference-tests-\(UUID().uuidString)")!,
+                                         now: { clock.now }, syncsAutomatically: false)
+        await calendar.load()
+        return WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
+            picker: WeekModelPicker(engine: engine, appleModel: nil, useAppleModel: { false })))
+    }
+
+    @Test @MainActor func aFollowUpTheNextDayReadsANewSchedule() async {
+        let engine = Self.engine()
+        let clock = Clock()
+        let ask = await Self.setUp(engine: engine, clock: clock)
+        await ask.ask("What's on today?")
+        clock.set(CalendarFixtures.date(15, 8, 5))
+        await ask.ask("and tomorrow?")
+        // Minutes later the schedule says the same: it is sent word for word.
+        #expect(engine.requests[1].turns[1].content == engine.requests[0].turns[1].content)
+        clock.set(CalendarFixtures.date(16, 9))
+        await ask.ask("What's on today?")
+        let third = engine.requests[2].turns
+        #expect(third.map(\.role) == [.system, .user, .assistant, .user, .assistant, .user])
+        let schedule = third[1].content ?? ""
+        #expect(schedule.contains("Now: Wednesday Sep 16"))
+        #expect(!schedule.contains("Coffee with Tom"))
+    }
+
+    @Test @MainActor func aFollowUpAfterOpenTimeHasPassedReadsANewSchedule() async {
+        let engine = Self.engine()
+        let clock = Clock()
+        let ask = await Self.setUp(engine: engine, clock: clock)
+        await ask.ask("When am I free today?")
+        clock.set(CalendarFixtures.date(15, 14))
+        await ask.ask("anything after that?")
+        let first = engine.requests[0].turns[1].content ?? ""
+        let second = engine.requests[1].turns[1].content ?? ""
+        #expect(first.contains("10 AM to 12 PM"))
+        #expect(!second.contains("10 AM to 12 PM"))
+        #expect(second.contains("Now: Tuesday Sep 15, 2 PM"))
     }
 
     @Test @MainActor func anotherWeekClearsTheAnswersButAnotherViewDoesNot() async {
