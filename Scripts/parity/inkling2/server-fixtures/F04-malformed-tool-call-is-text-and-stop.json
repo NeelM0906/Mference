@@ -1,0 +1,326 @@
+{
+ "id": "F04-malformed-tool-call-is-text-and-stop",
+ "checklist_items": [
+  5
+ ],
+ "status_on_trunk_6a646319": "ABSENT: StructuredAssistantDecoder throws ToolCallParserError (Inkling2DecoderTests.parserRejectsMalformedBodies, unknownToolIsRejected, headerAndBodyMustNameTheSameTool, unclosedToolCallFailsAtFinish); NativeBackend and ServerInference rethrow it; HTTPServer.failure(for:) maps it to 500 'generation failed' (non-streaming) or an in-band error frame plus [DONE] (streaming, HTTPServerTests.streamingFailureAfterHeadReportsErrorInBand). The harness then records transport_error instead of malformed_tool_call and loses the turn's text.",
+ "variants": [
+  {
+   "name": "invalid-json-body",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "model_generates": "<|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":}<|end_message|><|content_model_end_sampling|>",
+   "expect": {
+    "http_status": 200,
+    "stream": [
+     {
+      "delta": {
+       "role": "assistant"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {
+       "content": "<concatenated: exactly the block's body text '{\"name\":\"get_weather\",\"args\":{\"city\":}' (no framing tokens, no header name)>"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {},
+      "finish_reason": "stop"
+     },
+     {
+      "choices": [],
+      "usage": "<as F01>"
+     },
+     "data: [DONE]"
+    ],
+    "never": [
+     "an error frame",
+     "a tool_calls delta",
+     "finish_reason tool_calls",
+     "HTTP 500 for the non-streaming form"
+    ],
+    "non_streaming": {
+     "http_status": 200,
+     "message": {
+      "role": "assistant",
+      "content": "{\"name\":\"get_weather\",\"args\":{\"city\":}"
+     },
+     "finish_reason": "stop"
+    }
+   }
+  },
+  {
+   "name": "unknown-tool",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "model_generates": "<|message_model|>send_email<|content_invoke_tool_json|>{\"name\":\"send_email\",\"args\":{\"to\":\"a@b.c\"}}<|end_message|><|content_model_end_sampling|>",
+   "expect": {
+    "http_status": 200,
+    "stream": [
+     {
+      "delta": {
+       "role": "assistant"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {
+       "content": "<concatenated: exactly the block's body text '{\"name\":\"send_email\",\"args\":{\"to\":\"a@b.c\"}}' (no framing tokens, no header name)>"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {},
+      "finish_reason": "stop"
+     },
+     {
+      "choices": [],
+      "usage": "<as F01>"
+     },
+     "data: [DONE]"
+    ],
+    "never": [
+     "an error frame",
+     "a tool_calls delta",
+     "finish_reason tool_calls",
+     "HTTP 500 for the non-streaming form"
+    ],
+    "non_streaming": {
+     "http_status": 200,
+     "message": {
+      "role": "assistant",
+      "content": "{\"name\":\"send_email\",\"args\":{\"to\":\"a@b.c\"}}"
+     },
+     "finish_reason": "stop"
+    }
+   }
+  },
+  {
+   "name": "header-body-name-mismatch",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "model_generates": "<|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_time\",\"args\":{\"city\":\"Paris\"}}<|end_message|><|content_model_end_sampling|>",
+   "expect": {
+    "http_status": 200,
+    "stream": [
+     {
+      "delta": {
+       "role": "assistant"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {
+       "content": "<concatenated: exactly the block's body text '{\"name\":\"get_time\",\"args\":{\"city\":\"Paris\"}}' (no framing tokens, no header name)>"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {},
+      "finish_reason": "stop"
+     },
+     {
+      "choices": [],
+      "usage": "<as F01>"
+     },
+     "data: [DONE]"
+    ],
+    "never": [
+     "an error frame",
+     "a tool_calls delta",
+     "finish_reason tool_calls",
+     "HTTP 500 for the non-streaming form"
+    ],
+    "non_streaming": {
+     "http_status": 200,
+     "message": {
+      "role": "assistant",
+      "content": "{\"name\":\"get_time\",\"args\":{\"city\":\"Paris\"}}"
+     },
+     "finish_reason": "stop"
+    }
+   }
+  },
+  {
+   "name": "unclosed-at-eos",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "model_generates": "<|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}<|content_model_end_sampling|>",
+   "expect": {
+    "http_status": 200,
+    "stream": [
+     {
+      "delta": {
+       "role": "assistant"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {
+       "content": "<concatenated: exactly the block's body text '{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}' (no framing tokens, no header name)>"
+      },
+      "finish_reason": null
+     },
+     {
+      "delta": {},
+      "finish_reason": "stop"
+     },
+     {
+      "choices": [],
+      "usage": "<as F01>"
+     },
+     "data: [DONE]"
+    ],
+    "never": [
+     "an error frame",
+     "a tool_calls delta",
+     "finish_reason tool_calls",
+     "HTTP 500 for the non-streaming form"
+    ],
+    "non_streaming": {
+     "http_status": 200,
+     "message": {
+      "role": "assistant",
+      "content": "{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}"
+     },
+     "finish_reason": "stop"
+    }
+   }
+  }
+ ],
+ "decision_for_the_implementer": "Text that preceded the bad block in the same turn stays in content ahead of it; one bad block ends tool parsing for the turn (later blocks are text too). If you prefer a different visible text (for example the whole raw block with its framing), say so in the hand-in; the harness only needs finish_reason 'stop', HTTP 200 and no error frame."
+}

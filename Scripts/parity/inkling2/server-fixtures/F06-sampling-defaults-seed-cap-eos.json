@@ -1,0 +1,88 @@
+{
+ "id": "F06-sampling-defaults-seed-cap-eos",
+ "checklist_items": [
+  7
+ ],
+ "status_on_trunk_6a646319": "PRESENT in parts: Inkling2ChatTests.samplingDefaultsAreTheVendors (temperature 1.0, no top-k/top-p, min-p 0, repetition 1); OpenAIValidationTests.omittedSamplingFieldsUseSharedDefaultsAndRequestValuesWin (generic). Not tested for Inkling through the server.",
+ "variants": [
+  {
+   "name": "defaults-and-seed",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 7,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "expect": {
+    "generation_config_reaching_the_backend": {
+     "temperature": 1.0,
+     "top_k": null,
+     "top_p": null,
+     "min_p": 0,
+     "repetition_penalty": 1,
+     "seed": 7,
+     "max_new_tokens": "min(512, context - prompt)"
+    }
+   }
+  },
+  {
+   "name": "cap-ends-with-length",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 3,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "model_generates": "<|message_model|><|content_text|>one two three four five<|end_message|><|content_model_end_sampling|>",
+   "expect": {
+    "finish_reason": "length",
+    "usage.completion_tokens": 3
+   }
+  },
+  {
+   "name": "eos-ends-with-stop",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "model_generates": "<|message_model|><|content_text|>Hello.<|end_message|><|content_model_end_sampling|><|message_model|><|content_text|>must not appear<|end_message|>",
+   "expect": {
+    "finish_reason": "stop",
+    "content": "Hello.",
+    "never": [
+     "'must not appear'"
+    ],
+    "note": "EOS is <|content_model_end_sampling|>, id 200006 (generation_config.json eos_token_id)"
+   }
+  }
+ ]
+}

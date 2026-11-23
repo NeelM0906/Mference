@@ -1,0 +1,81 @@
+{
+ "id": "F05-reasoning-effort",
+ "checklist_items": [
+  6
+ ],
+ "status_on_trunk_6a646319": "PRESENT for the harness's values; not tested through the server for Inkling. OpenAIRequestValidator accepts only none/low/medium/xhigh (QwenReasoningEffort); encodeToolChat maps them to the template's names (Inkling2Effort.named), so low = 0.2, medium = 0.7, xhigh = 0.99, none = 0.0, omitted = the template default 0.9. Inkling's own minimal/high/max and numeric levels are refused with 400 (not needed by the harness).",
+ "variants": [
+  {
+   "name": "low",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "low"
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: .named(\"low\")); the render's effort line prints 0.2 (Inkling2ChatTests.effortLevelsPrintAsTheTemplatePrintsThem)"
+   }
+  },
+  {
+   "name": "omitted",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: nil); the effort line prints 0.9 (Inkling2ChatTests.singleUserMessageGetsTheDefaultEffort)"
+   }
+  },
+  {
+   "name": "high-is-refused-today",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "high"
+   },
+   "expect": {
+    "http_status": 400,
+    "error": {
+     "param": "reasoning_effort",
+     "code": "unsupported_value"
+    },
+    "note": "current behavior, pinned so a change is deliberate; the checklist does not require 'high'"
+   }
+  }
+ ]
+}

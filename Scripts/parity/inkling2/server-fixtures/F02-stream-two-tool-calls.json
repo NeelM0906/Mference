@@ -1,0 +1,126 @@
+{
+ "id": "F02-stream-two-tool-calls",
+ "checklist_items": [
+  2,
+  3
+ ],
+ "status_on_trunk_6a646319": "PARTIAL: Inkling2DecoderTests.textThenTwoCalls parses the blocks and HTTPServerTests.streamingMultipleToolsUseDistinctIndexes pins indexes, but not together for Inkling",
+ "request": {
+  "model": "inkling-2-mini-ud-q4_k_xl",
+  "stream": true,
+  "stream_options": {
+   "include_usage": true
+  },
+  "max_completion_tokens": 512,
+  "seed": 1,
+  "messages": [
+   {
+    "role": "user",
+    "content": "Weather and time in Paris?"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "get_time",
+     "description": "Local time in a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ "model_generates": "<|message_model|><|content_thinking|>Two tools needed.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}<|end_message|><|message_model|>get_time<|content_invoke_tool_json|>{\"name\":\"get_time\",\"args\":{\"city\":\"Paris\"}}<|end_message|><|content_model_end_sampling|>",
+ "expect": {
+  "http_status": 200,
+  "stream": [
+   {
+    "delta": {
+     "role": "assistant"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {
+     "reasoning_content": "<concatenated: 'Two tools needed.'>"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {
+     "tool_calls": [
+      {
+       "index": 0,
+       "id": "<non-empty, unique in the response>",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ]
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {
+     "tool_calls": [
+      {
+       "index": 1,
+       "id": "<non-empty, different from index 0's>",
+       "type": "function",
+       "function": {
+        "name": "get_time",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ]
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {},
+    "finish_reason": "tool_calls"
+   },
+   {
+    "choices": [],
+    "usage": "<as F01>"
+   },
+   "data: [DONE]"
+  ],
+  "arguments_rule": "function.arguments is a JSON string of the args object only (not the {name, args} wrapper); json.loads(arguments) == {'city': 'Paris'}",
+  "never": [
+   "the header name 'get_weather' or 'get_time' in content",
+   "content deltas (no visible text was generated)"
+  ],
+  "chunk_shape": "every SSE chunk is {id, object: chat.completion.chunk, created, model: 'inkling-2-mini-ud-q4_k_xl', choices: [{index: 0, delta, finish_reason}]}"
+ }
+}
