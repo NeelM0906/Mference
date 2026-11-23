@@ -298,6 +298,13 @@ public struct PromptPrefixCache: Sendable {
                 || entry.assistantTurn.rawStopReason == .maxTokens else {
             return .miss
         }
+        // Inkling 2's continuation starts with the sampled EOS, so after a
+        // turn the cap cut inside a text or thinking block it would leave
+        // that block without the `<|end_message|>` a fresh render writes.
+        // Such a turn continues only through the exact rendered prefix above.
+        if tokenizer.dialect == .inkling2, entry.assistantTurn.rawStopReason == .maxTokens {
+            return .miss
+        }
         var bridge = tokenizer.encodeTextContinuation(userContent: content)
         if entry.assistantTurn.rawStopReason == .maxTokens {
             bridge = entry.uncommittedBoundaryTokenIDs + bridge
