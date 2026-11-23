@@ -72,7 +72,7 @@ log "cli: $CLI (SHA-256 $(shasum -a 256 "$CLI" | cut -d' ' -f1))"
 if [ -f "$CLI_DIR/SOURCE.txt" ]; then log "cli source: $(head -1 "$CLI_DIR/SOURCE.txt")"
 else log "cli source: no SOURCE.txt beside the CLI"; fi
 log "install: $INST (manifest SHA-256 $(shasum -a 256 "$INST/manifest.json" | cut -d' ' -f1))"
-if pgrep -f 'Mference.app/Contents/MacOS/' > /dev/null; then
+if ps -axo comm= | grep -q '/Mference.app/Contents/MacOS/'; then  # executable path, not command lines
   log "app open check: the Mference app is open"   # guarded_run.sh --timing refuses below
 else
   log "app open check: not open"

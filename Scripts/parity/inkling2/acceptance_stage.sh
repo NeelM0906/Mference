@@ -72,7 +72,9 @@ done
 [ -f "$DEEP_GGUF" ] || refuse "no Deep GGUF at $DEEP_GGUF"
 ENGINE_COMMIT=$(head -1 "$SRV_DIR/SOURCE.txt")
 (cd "$CORPUS" && shasum -a 256 -c --quiet MANIFEST.sha256) || refuse "corpus does not match MANIFEST.sha256"
-if pgrep -f 'Mference.app/Contents/MacOS/' > /dev/null; then refuse "the Mference app is open"; fi
+# by executable path (ps comm), not by command line: another process's
+# arguments can mention the app path (a K3 script did, 2026-11-23 10:54Z)
+if ps -axo comm= | grep -q '/Mference.app/Contents/MacOS/'; then refuse "the Mference app is open"; fi
 { sw_vers; sysctl -n hw.model hw.memsize; echo "server: $ENGINE_COMMIT";
   echo "server sha256: $(shasum -a 256 "$SRV_DIR/MferenceServer" | cut -d' ' -f1)"; } > "$D/machine.txt"
 log "stage $STAGE; server $ENGINE_COMMIT; port $PORT"
