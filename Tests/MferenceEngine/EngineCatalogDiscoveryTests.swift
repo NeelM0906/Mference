@@ -202,10 +202,43 @@ struct EngineCatalogDiscoveryTests {
             #expect(catalog.models.first?.location == Self.dir("/first/inkling2mini.gturbo"))
             #expect(catalog.skipped.count == 2)
         }
+        // Below the floor, the floor is the reason a request gets, even with a
+        // gated copy found first.
+        let mixed = Self.fileSystem(
+            children: ["/lib": ["/lib/a.gturbo", "/lib/inkling2mini.gturbo"]],
+            probes: ["/lib/a.gturbo": .notRunnable(family: "inkling2Loop", detail: "missing axes"),
+                     "/lib/inkling2mini.gturbo": .complete(family: .inkling2Loop)])
+        let small = EngineCatalogDiscovery.discover(roots: [Self.library], ggufDirectories: [],
+                                                    fileSystem: mixed, physicalMemory: 16 << 30)
+        #expect(small.unavailableReason(for: "inkling-2-mini-ud-q4_k_xl") == reason)
         // Only this slot has a floor of the engine's own.
         #expect(EngineProductSlot.allCases.filter { $0.minimumPhysicalMemory != nil } == [.inkling2Mini])
         #expect(EngineProductSlot.inkling2Mini.memoryFloorReason(physicalMemory: 32 << 30) == nil)
         #expect(EngineProductSlot.deep.memoryFloorReason(physicalMemory: 8 << 30) == nil)
+    }
+
+    /// The Unsloth file the native install is made from is a GGUF named like
+    /// the slot's identifier; it never takes that identifier, in either
+    /// scope, whether or not the native install is there.
+    @Test func aGGUFNamedLikeANativeProductModelNeverTakesItsIdentifier() {
+        let file = "/lib/gguf/Inkling-2-Mini-UD-Q4_K_XL.gguf"
+        #expect(EngineCatalogDiscovery.ggufModelID(fileName: "Inkling-2-Mini-UD-Q4_K_XL.gguf")
+                == EngineProductSlot.inkling2Mini.modelID)
+        let disk = Self.fileSystem(
+            children: [:], probes: [:],
+            ggufFiles: ["/lib/gguf": [file]],
+            headers: [file: .success(Self.meta(mtp: false))])
+        let product = EngineCatalogDiscovery.discover(roots: [], ggufDirectories: [Self.gguf],
+                                                      fileSystem: disk, physicalMemory: Self.roomy)
+        #expect(product.models.isEmpty)
+        #expect(product.skipped.map(\.modelID) == [nil])
+        #expect(product.unavailableReason(for: "inkling-2-mini-ud-q4_k_xl") == nil)
+        for memory: UInt64 in [16 << 30, Self.roomy] {
+            let all = EngineCatalogDiscovery.discover(roots: [], ggufDirectories: [Self.gguf], scope: .all,
+                                                      fileSystem: disk, physicalMemory: memory)
+            #expect(all.models.isEmpty)
+            #expect(all.skipped.first?.reason == "another model already uses the identifier inkling-2-mini-ud-q4_k_xl")
+        }
     }
 
     @Test func gatedAndPartialInstallsAreReported() {
