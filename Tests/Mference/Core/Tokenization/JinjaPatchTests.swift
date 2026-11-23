@@ -23,6 +23,21 @@ struct JinjaPatchTests {
         #expect(try Template("a{ \n{#- note -#}\n b").render([:]) == "a{b")
     }
 
+    @Test func tojsonTakesSeparatorsAndSortKeys() throws {
+        // transformers' tojson passes both through to json.dumps; Inkling 2's
+        // template uses them for tool declarations and tool-call arguments.
+        let v = #"{%- set v = {"b": 1, "a": [1, "é"]} -%}"#
+        func render(_ expression: String) throws -> String {
+            try Template(v + "{{ v | " + expression + " }}").render([:])
+        }
+        #expect(try render(#"tojson(sort_keys=true, separators=(",", ":"))"#) == #"{"a":[1,"é"],"b":1}"#)
+        #expect(try render(#"tojson(separators=(",", ":"))"#) == #"{"b":1,"a":[1,"é"]}"#)
+        #expect(try render("tojson(sort_keys=true)") == #"{"a": [1, "é"], "b": 1}"#)
+        // Without the new arguments nothing changes.
+        #expect(try render("tojson") == #"{"b": 1, "a": [1, "é"]}"#)
+        #expect(throws: (any Error).self) { try render(#"tojson(separators=(",",))"#) }
+    }
+
     @Test func quotedDelimitersAreData() throws {
         #expect(try Template("{{ 'a -}} b' }}").render([:]) == "a -}} b")
         #expect(try Template("{{ 'a {%- b' }}").render([:]) == "a {%- b")
