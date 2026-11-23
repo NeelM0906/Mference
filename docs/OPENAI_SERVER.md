@@ -194,6 +194,16 @@ The server accepts only function tools. Omit `tool_choice` or set it to `auto`
 to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
 
+Inkling 2 Mini returns a tool call that does not parse as text rather than as
+an error: when its JSON is invalid, it names a tool the request did not offer
+(including any call when no tools were offered or `tool_choice` is `none`),
+its header and body name different tools, or it is still open when
+generation ends. The response has HTTP 200, the call's JSON text as
+`content`, no `tool_calls`, and `finish_reason` `"stop"` (`"length"` when
+the completion cap ended it). A turn that also produced a valid call ends with
+`"tool_calls"`. Such a turn is not kept for prompt-prefix reuse. For every
+other model, a malformed call fails the request as before.
+
 ## Library mode
 
 With `--library`, the server scans for completed installs and serves the
@@ -409,8 +419,20 @@ the cached generated turn with a verified source-template suffix, including
 tool-result rounds. `preserve_thinking` is accepted for compatibility; source
 template history always preserves reasoning. Thinking requests without an
 explicit completion cap default to 32,768 tokens, subject to available context.
-Other models reject explicit thinking controls. Sampling and MTP defaults
-remain unchanged.
+Other models, apart from Inkling 2 Mini (below), reject explicit thinking
+controls. Sampling and MTP defaults remain unchanged.
+
+Inkling 2 Mini always reasons in its own thinking blocks, which stream as
+`reasoning_content`; replay them in history. `reasoning_effort` takes any name
+of its template's effort map, rendered as a level: `none` (0), `minimal`
+(0.1), `low` (0.2), `medium` (0.7), `high` (0.9), `xhigh` and `max` (0.99).
+Other values get HTTP 400. Omitted, the template's default level 0.9 applies;
+even `none` does not turn thinking off entirely. `enable_thinking: true` or
+`false` maps to `xhigh` or `none`, and an explicit `reasoning_effort` takes
+precedence. With an effort other than `none` and no explicit completion cap,
+the cap defaults to 32,768 tokens; with none given, to 4,096. Its sampling
+defaults are the vendor's: temperature 1.0, with no top-k, top-p or min-p
+cut.
 
 For Qwen 3.6's recommended general-thinking sampling profile, send these
 explicit options along with `model` and `messages`:
