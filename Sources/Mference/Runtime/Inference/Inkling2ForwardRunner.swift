@@ -673,19 +673,21 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 let lower = max(start, hook.positions.lowerBound)
                 let upper = min(start + t, hook.positions.upperBound)
                 if lower < upper {
-                    encode { enc in
-                        for position in lower..<upper {
-                            encodeFinalHead(enc, row: position - start, blocks: blocks, cur: cur,
+                    let enc = cb.makeComputeCommandEncoder()!
+                    defer { enc.endEncoding() }
+                    for position in lower..<upper {
+                        try encodeFinalHead(enc, row: position - start, blocks: blocks, cur: cur,
                                             logits: hook.buffer,
                                             logitsOffset: (position - hook.positions.lowerBound) * w.vocabRows * 2)
-                        }
                     }
                 }
             }
             if let logits {
                 // The head reads only the last token.
-                encode { enc in
-                    encodeFinalHead(enc, row: t - 1, blocks: blocks, cur: cur, logits: logits, logitsOffset: 0)
+                do {
+                    let enc = cb.makeComputeCommandEncoder()!
+                    defer { enc.endEncoding() }
+                    try encodeFinalHead(enc, row: t - 1, blocks: blocks, cur: cur, logits: logits, logitsOffset: 0)
                 }
                 if w.vocabRows > w.vocab, let blit = cb.makeBlitCommandEncoder() {
                     // 0xFBFB is about -65376 in FP16: never sampled, never the argmax.
@@ -727,18 +729,29 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         chunkState.markCommitted()
     }
 
-    /// Encodes the head for the chunk's token at `row`: the final depth mix
-    /// of its block states and running sum, the output norm, and the FP16
-    /// logits of the first `vocab` head rows at `logitsOffset`.
+    /// Encodes the head for the chunk's token at `row` into `enc` (a serial
+    /// encoder, which orders the three steps): the final depth mix of its
+    /// block states and running sum, the output norm, and the FP16 logits of
+    /// the first `vocab` head rows at `logitsOffset`. The mix is one row, so
+    /// it takes K3's one-row kernel, as decode visits do; a layout it cannot
+    /// take (more than six states) falls back to the runner's kernel.
     private func encodeFinalHead(_ enc: MTLComputeCommandEncoder, row: Int, blocks: [Int], cur: Int,
-                                 logits: MTLBuffer, logitsOffset: Int) {
+                                 logits: MTLBuffer, logitsOffset: Int) throws {
         let s = scratch
         let d = Self.d
-        kernels.encodeDepthMix(enc, arena: s.arena,
-                               stateOffsets: (blocks + [cur]).map { s.arenaFloats($0) + row * d },
-                               stateStride: d, queries: w.outputResQuery.buffer,
-                               queriesOffset: w.outputResQuery.offset, queryCount: 1,
-                               out: s.finalRow, outStride: d, outQueryStride: d, d: d, tokens: 1)
+        let states = blocks + [cur]
+        if states.count <= Inkling2DepthMix.maxStates {
+            let rows = states.map { (Inkling2BufferRef(s.arena, offset: s.arenaRef($0).offset + row * d * 4), d) }
+            try depthMix.encode(encoder: enc, states: rows,
+                                queries: w.outputResQuery, queryCount: 1, output: .init(s.finalRow),
+                                outputStride: d, rows: 1, width: d, eps: Inkling2RunnerKernels.residualNormEps)
+        } else {
+            kernels.encodeDepthMix(enc, arena: s.arena,
+                                   stateOffsets: states.map { s.arenaFloats($0) + row * d },
+                                   stateStride: d, queries: w.outputResQuery.buffer,
+                                   queriesOffset: w.outputResQuery.offset, queryCount: 1,
+                                   out: s.finalRow, outStride: d, outQueryStride: d, d: d, tokens: 1)
+        }
         kernels.encodeRMSNorm(enc, x: s.finalRow, xStride: d, weight: w.outputNorm.buffer,
                               weightOffset: w.outputNorm.offset, eps: w.rmsEps,
                               out: s.finalRow, outOffset: d * 4, outStride: d, d: d, tokens: 1)
