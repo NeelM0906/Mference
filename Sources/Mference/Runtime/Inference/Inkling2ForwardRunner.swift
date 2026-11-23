@@ -264,6 +264,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// buffer): per decoded token, the command buffers, the CPU's waits on
     /// them and the GPU's own start and end times, printed to stderr.
     private let decodeTimeline = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_TIMELINE"]
+    /// With the decode-cache log: the last token's routed ids of each staged
+    /// prefill visit (the seed a decode cache could start from), copied on
+    /// the GPU and printed after the chunk.
+    private var prefillRouteLog: MTLBuffer?
+    private var prefillRouteLayers: [Int] = []
 
     /// Diagnostic and golden hook: while set, every chunk copies each
     /// visit's output, the running block sum (FP32 `[48][rows][d]`), and the
@@ -562,6 +567,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         }
 
         var slots = Slots()
+        prefillRouteLayers.removeAll()
+        if logsDecodeCache, t > 1, prefillRouteLog == nil {
+            prefillRouteLog = ctx.device.makeBuffer(length: 48 * moeShape.topK * 4, options: .storageModeShared)
+        }
         var cb = try commandBuffer()
         var committed: [MTLCommandBuffer] = []
         var pending: MTLCommandBuffer? = cb
@@ -748,6 +757,16 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         if let failed = committed.first(where: { $0.status != .completed }) {
             throw Inkling2ForwardRunnerError.commandFailed(
                 failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
+        }
+        if logsDecodeCache, t > 1, let log = prefillRouteLog, !prefillRouteLayers.isEmpty {
+            let ids = log.contents().bindMemory(to: UInt32.self, capacity: 48 * moeShape.topK)
+            var lines = ""
+            for (index, layer) in prefillRouteLayers.enumerated() {
+                let routed = (0..<moeShape.topK).map { String(ids[index * moeShape.topK + $0]) }
+                lines += "inkling2 prefill last-token routes: position \(start + t - 1) layer \(layer) ids "
+                    + routed.joined(separator: ",") + "\n"
+            }
+            FileHandle.standardError.write(Data(lines.utf8))
         }
         if timesBuffers {
             reportDecodeTimeline(committed, started: runStarted, blocked: blocked, waits: waits, position: start,
@@ -1083,8 +1102,9 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             decodeCacheStats.readbackSeconds += readback
             if logsDecodeCache {
                 FileHandle.standardError.write(Data(String(
-                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d readback %.3f ms prepare %.3f ms\n",
-                    start, layer, binding.hits, binding.misses, readback * 1000, seconds * 1000).utf8))
+                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d readback %.3f ms prepare %.3f ms ids %@\n",
+                    start, layer, binding.hits, binding.misses, readback * 1000, seconds * 1000,
+                    ids.map(String.init).joined(separator: ",")).utf8))
             }
             encode { enc in
                 moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, binding: binding,
@@ -1093,6 +1113,14 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             }
             w.experts.endDecodeVisit(binding, commandBuffer: cb)
         } else {
+            if logsDecodeCache, t > 1, w.experts.decodeNeedsRoutes(layer: layer), let log = prefillRouteLog,
+               prefillRouteLayers.count < 48, let blit = cb.makeBlitCommandEncoder() {
+                // Diagnostic: the chunk's last token's routes on this staged layer.
+                blit.copy(from: s.moeScratch.ids, sourceOffset: (t - 1) * moeShape.topK * 4, to: log,
+                          destinationOffset: prefillRouteLayers.count * moeShape.topK * 4, size: moeShape.topK * 4)
+                blit.endEncoding()
+                prefillRouteLayers.append(layer)
+            }
             // A staged layer's command buffer waits here for its slab and
             // releases it after the experts' encoder.
             let pool = try w.experts.beginVisit(layer: layer, commandBuffer: cb)
