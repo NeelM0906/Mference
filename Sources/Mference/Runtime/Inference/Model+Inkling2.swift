@@ -96,7 +96,7 @@ extension Model {
 
     // MARK: - Block attention residuals
 
-    /// `attn_res_query.weight`, F32 `[1, 2304]` on sliding layers and
+    /// `attn_res_query.weight`, F32 `[2304]` on sliding layers and
     /// `[3, 2304]` (q, k, v) on global layers; absent on layer 0.
     public func inkling2AttnResQuery(layer L: Int) throws -> TensorView { try inkling2Layer(L, "attn_res_query.weight") }
     /// `ffn_res_query.weight`, F32 `[2304]`: the MoE input's block-residual query.

@@ -256,8 +256,9 @@ extension GGUFTokenizer {
             }
         }
 
+        private static let hex = Array("0123456789abcdef".utf8)
+
         private static func writeString(_ s: String, to out: inout [UInt8]) {
-            let hex = Array("0123456789abcdef".utf8)
             out.append(UInt8(ascii: "\""))
             for byte in s.utf8 {
                 switch byte {

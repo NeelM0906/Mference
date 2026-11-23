@@ -493,11 +493,15 @@ the top-level `expertStride` is the largest), and `Model.load` checks them
 against `routedExpertFormats` (`Inkling2ExpertLayout`). A layout without
 per-layer strides, every other family's, reads exactly as before.
 
-The rest of the file's formats are per tensor, not axes: the runtime
-dispatches on each resident tensor's index dtype (`GGMLBlockFormat`: Q8_0 for
-attention, embedding and head; F32 for the norms, router, convolutions,
-clips, residual queries and loop gates; BF16 for `attn_sink_proj` and the
-dynamic-convolution projections in the shipped file).
+The rest of the file's formats are per tensor, not axes: each resident
+tensor has one format (`GGMLBlockFormat`: Q8_0 for attention, embedding and
+head; F32 for the norms, router, convolutions, clips, residual queries and
+loop gates; BF16 for `attn_sink_proj` and the dynamic-convolution
+projections), the shipped file's, which the kernels read in place.
+`Model.load` checks every resident tensor against
+`Inkling2ResidentContract`: name, shape, that one format, byte size, and a
+256-byte-aligned offset. It also requires the resident region to map as one
+`MTLBuffer`, since a layer's stacked projections share one weight buffer.
 
 ## Vocabulary and head
 
