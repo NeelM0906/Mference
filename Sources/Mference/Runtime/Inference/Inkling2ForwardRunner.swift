@@ -35,6 +35,23 @@ protocol Inkling2ExpertSource: AnyObject {
     func prefetchFirstStagedVisit() throws
     /// Gives back a prefetched read whose chunk will not run.
     func cancelPrefetch() throws
+    /// A short prefill chunk's visit of `layer` through its slot cache, the
+    /// chunk's routed ids read back (`tokens x topK`): the binding and each
+    /// entry's slot, or nil (decided before any slot changes) when the
+    /// chunk's experts do not fit, and the layer is then read whole.
+    func beginShortPrefillVisit(layer: Int, expertIDs: [Int]) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])?
+    /// A staged decode visit encoded before its routes are known: the
+    /// command buffer signals after the router (whose ids are in `routerIDs`)
+    /// and waits while the source fills the slots; decode from the returned
+    /// binding, then `endDecodeVisit`. No command buffer is split.
+    func encodeDeferredDecodeVisit(layer: Int, routerIDs: MTLBuffer, commandBuffer: MTLCommandBuffer) throws -> Inkling2DecodeBinding
+    /// The deferred visits served since the last call, once their command
+    /// buffers completed.
+    func takeDeferredVisits() -> [Inkling2ExpertStore.DeferredVisit]
+    /// Set when a deferred visit failed; the source is then unusable.
+    var deferredDecodeFailure: String? { get }
+    /// Called from a failed command buffer's completion handler.
+    func commandBufferFailed()
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
@@ -43,6 +60,15 @@ extension Inkling2ExpertSource {
     func recoverAfterFailedCommands() {}
     func prefetchFirstStagedVisit() throws {}
     func cancelPrefetch() throws {}
+    func beginShortPrefillVisit(layer: Int, expertIDs: [Int]) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])? {
+        nil
+    }
+    func encodeDeferredDecodeVisit(layer: Int, routerIDs: MTLBuffer, commandBuffer: MTLCommandBuffer) throws -> Inkling2DecodeBinding {
+        throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
+    }
+    func takeDeferredVisits() -> [Inkling2ExpertStore.DeferredVisit] { [] }
+    var deferredDecodeFailure: String? { nil }
+    func commandBufferFailed() {}
     func decodeNeedsRoutes(layer: Int) -> Bool { false }
     func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
@@ -66,6 +92,10 @@ extension Inkling2ExpertStore: Inkling2ExpertSource {
         try endPrefillVisit(layer: layer, commandBuffer: commandBuffer)
     }
     func decodeNeedsRoutes(layer: Int) -> Bool { isStaged(layer: layer) }
+    func encodeDeferredDecodeVisit(layer: Int, routerIDs: MTLBuffer, commandBuffer: MTLCommandBuffer) throws -> Inkling2DecodeBinding {
+        try encodeDeferredDecodeVisit(layer: layer, routerIDs: routerIDs, routerIDsOffset: 0, commandBuffer: commandBuffer)
+    }
+    // `beginShortPrefillVisit` is the store's own method (it satisfies the protocol).
     func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         try prepareDecodeVisit(layer: layer, expertIDs: expertIDs)
     }
@@ -262,6 +292,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// also printed to stderr.
     struct DecodeCacheStats: Equatable {
         var visits = 0
+        /// Of `visits`, those served deferred (no command-buffer split).
+        var deferred = 0
         var hits = 0
         var misses = 0
         var seconds: Double = 0
@@ -275,6 +307,41 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private let decodeTimeline = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_TIMELINE"]
     /// Set by `prefillChunked` while another chunk follows the one running.
     private var prefetchesNextChunk = false
+    /// Staged decode visits wait on the GPU for the slot loads (a shared
+    /// event the CPU signals) instead of splitting the command buffer for a
+    /// route readback. Off by default: timed, it was 3% faster on one text
+    /// and 3% slower on another, the same tokens either way (coordinator
+    /// ruling, 2026-11-23); `MFERENCE_INKLING2_DECODE_READBACK=deferred`
+    /// turns it on (an A/B switch).
+    var defersDecodeReadback = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_READBACK"] == "deferred"
+    /// Deferred visits encoded in the chunk being run.
+    private var deferredInChunk = 0
+    /// Prefill chunks of at most this many tokens visit staged layers
+    /// through their slot caches, loading only the routed experts not already
+    /// there, instead of reading each layer whole (K2's short-prompt study:
+    /// about 0.05 to 0.3 GB warm against 8.9 GB for a 16 to 64 token turn).
+    /// 64 by default; `MFERENCE_INKLING2_SHORT_PREFILL=sweep` forces the
+    /// whole-layer reads (an A/B switch and safety valve), a number sets it.
+    var shortPrefillMaxTokens: Int = {
+        switch ProcessInfo.processInfo.environment["MFERENCE_INKLING2_SHORT_PREFILL"] {
+        case "sweep"?: return 0
+        case let value?: return Int(value) ?? 64
+        case nil: return 64
+        }
+    }()
+    /// A short chunk's slot per routed entry (`tokens x topK` uint32), the
+    /// route plan's ids for a staged layer's slot pool.
+    private var shortSlotIDs: MTLBuffer?
+    /// Short prefill chunks' staged visits so far: through the slots or
+    /// fallen back to a whole-layer read, and the slot loads (diagnostics).
+    struct ShortPrefillStats: Equatable {
+        var visits = 0
+        var fallbacks = 0
+        var hits = 0
+        var misses = 0
+        var seconds: Double = 0
+    }
+    private(set) var shortPrefillStats = ShortPrefillStats()
     /// With the decode-cache log: the last token's routed ids of each staged
     /// prefill visit (the seed a decode cache could start from), copied on
     /// the GPU and printed after the chunk.
@@ -572,8 +639,8 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         for (i, span) in spans.enumerated() {
             try Task.checkCancellation()
             // Every chunk but the last starts the next one's first staged read
-            // early (not for a one-token chunk, which decodes from the slots).
-            prefetchesNextChunk = i < spans.count - 1 && spans[i + 1].tokenCount > 1
+            // early (not for a short chunk, which reads through the slots).
+            prefetchesNextChunk = i < spans.count - 1 && spans[i + 1].tokenCount > max(1, shortPrefillMaxTokens)
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try run(tokens: Array(tokens[lower..<upper]), start: span.startPosition,
@@ -817,10 +884,12 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             }
             finish()
             if committed.contains(where: { $0.status != .completed }) { w.experts.recoverAfterFailedCommands() }
+            collectDeferredVisits(position: start)
             throw error
         }
         finish()
         if committed.contains(where: { $0.status != .completed }) { w.experts.recoverAfterFailedCommands() }
+        collectDeferredVisits(position: start)
         if let failure = w.experts.stagingFailure {
             expertsFailed = "expert staging failed: \(failure)"
         }
@@ -1187,7 +1256,21 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                                  tokens: t, routeScale: w.routeScale)
             }
         }
-        if t == 1, w.experts.decodeNeedsRoutes(layer: layer) {
+        if t == 1, defersDecodeReadback, w.experts.decodeNeedsRoutes(layer: layer) {
+            // A staged layer's decode visit, deferred: the GPU signals after
+            // the router and waits while the store loads the routed experts
+            // into the layer's slots; the slots are this command buffer's
+            // until it completes.
+            let binding = try w.experts.encodeDeferredDecodeVisit(layer: layer, routerIDs: s.moeScratch.ids,
+                                                                  commandBuffer: cb)
+            deferredInChunk += 1
+            encode { enc in
+                moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, binding: binding,
+                                 routeWeights: s.moeScratch.routeWeights, activation: s.decodeActivation,
+                                 out: s.moeOut)
+            }
+            w.experts.endDecodeVisit(binding, commandBuffer: cb)
+        } else if t == 1, w.experts.decodeNeedsRoutes(layer: layer) {
             // A staged layer's decode visit: read the router's ids back, load
             // the experts that miss into the layer's slots, decode from the
             // slots. The slots are this command buffer's until it completes.
@@ -1216,6 +1299,17 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                                  out: s.moeOut)
             }
             w.experts.endDecodeVisit(binding, commandBuffer: cb)
+        } else if t > 1, t <= shortPrefillMaxTokens, w.experts.decodeNeedsRoutes(layer: layer),
+                  let visit = try shortPrefillVisit(layer: layer, tokens: t, start: start, split: split, cb: &cb) {
+            // A short chunk's staged visit through the layer's slots: the
+            // route plan works by slot (`shortSlotIDs`), the router's expert
+            // ids stay in `moeScratch.ids`. The slots are this command
+            // buffer's until it completes.
+            encode { enc in
+                moe.encodePrefill(enc, hidden: s.moeInHalf, hiddenStride: d, pool: visit.binding.pool,
+                                  scratch: s.moeScratch, tokens: t, out: s.moeOut, outStride: d, ids: visit.ids)
+            }
+            w.experts.endDecodeVisit(visit.binding, commandBuffer: cb)
         } else {
             if logsDecodeCache, t > 1, w.experts.decodeNeedsRoutes(layer: layer), let log = prefillRouteLog,
                prefillRouteLayers.count < 48, let blit = cb.makeBlitCommandEncoder() {
@@ -1254,6 +1348,74 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         return next
     }
 
+    /// Folds the chunk's served deferred visits into the decode statistics
+    /// (and the decode-cache log), and marks the experts failed if one failed.
+    private func collectDeferredVisits(position: Int) {
+        guard deferredInChunk > 0 else { return }
+        deferredInChunk = 0
+        let served = w.experts.takeDeferredVisits()
+        for visit in served {
+            decodeCacheStats.visits += 1
+            decodeCacheStats.deferred += 1
+            decodeCacheStats.hits += visit.hits
+            decodeCacheStats.misses += visit.misses
+            decodeCacheStats.seconds += visit.seconds
+            if logsDecodeCache {
+                FileHandle.standardError.write(Data(String(
+                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d readback 0.000 ms prepare %.3f ms ids %@\n",
+                    position, visit.layer, visit.hits, visit.misses, visit.seconds * 1000,
+                    visit.expertIDs.map(String.init).joined(separator: ",")).utf8))
+            }
+        }
+        if let failure = w.experts.deferredDecodeFailure, expertsFailed == nil {
+            expertsFailed = "a deferred decode visit failed: \(failure)"
+        }
+    }
+
+    /// A short prefill chunk's staged visit: commits and waits (`split`),
+    /// reads the chunk's routed ids back, and asks the expert source for
+    /// slots. Nil when the chunk's experts do not fit the layer's slots (the
+    /// caller then reads the layer whole); `cb` is the buffer to encode into
+    /// either way.
+    private func shortPrefillVisit(layer: Int, tokens t: Int, start: Int, split: () throws -> MTLCommandBuffer,
+                                   cb: inout MTLCommandBuffer) throws -> (binding: Inkling2DecodeBinding, ids: MTLBuffer)? {
+        cb = try split()
+        let topK = moeShape.topK
+        let routed = scratch.moeScratch.ids.contents().bindMemory(to: UInt32.self, capacity: t * topK)
+        let ids = (0..<(t * topK)).map { Int(routed[$0]) }
+        let started = DispatchTime.now().uptimeNanoseconds
+        guard let visit = try w.experts.beginShortPrefillVisit(layer: layer, expertIDs: ids) else {
+            shortPrefillStats.visits += 1
+            shortPrefillStats.fallbacks += 1
+            if logsDecodeCache {
+                FileHandle.standardError.write(Data(String(
+                    format: "inkling2 short prefill: position %d tokens %d layer %d distinct %d: whole-layer read\n",
+                    start, t, layer, Set(ids).count).utf8))
+            }
+            return nil
+        }
+        let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        if shortSlotIDs == nil || shortSlotIDs!.length < t * topK * 4 {
+            shortSlotIDs = ctx.device.makeBuffer(length: max(16, shortPrefillMaxTokens, t) * topK * 4,
+                                                 options: .storageModeShared)
+        }
+        guard let slotIDs = shortSlotIDs else {
+            throw Inkling2ForwardRunnerError.allocationFailed("Inkling 2 short prefill slot ids")
+        }
+        let out = slotIDs.contents().bindMemory(to: UInt32.self, capacity: t * topK)
+        for (entry, slot) in visit.slots.enumerated() { out[entry] = slot }
+        shortPrefillStats.visits += 1
+        shortPrefillStats.hits += visit.binding.hits
+        shortPrefillStats.misses += visit.binding.misses
+        shortPrefillStats.seconds += seconds
+        if logsDecodeCache {
+            FileHandle.standardError.write(Data(String(
+                format: "inkling2 short prefill: position %d tokens %d layer %d distinct %d hits %d misses %d prepare %.3f ms\n",
+                start, t, layer, Set(ids).count, visit.binding.hits, visit.binding.misses, seconds * 1000).utf8))
+        }
+        return (visit.binding, slotIDs)
+    }
+
     /// Whether K3's decode gate can take `controllers` of `loop`: their
     /// `down`, `forget` and `gain` in one buffer at 16-byte offsets, and a
     /// rank it serves.
@@ -1266,6 +1428,13 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private func commandBuffer() throws -> MTLCommandBuffer {
         guard let cb = ctx.queue.makeCommandBuffer() else {
             throw Inkling2ForwardRunnerError.commandFailed("unable to create an Inkling 2 command buffer")
+        }
+        // A failed buffer never runs its signals: release whatever waits on
+        // them (a deferred decode visit's worker, a slot refill) at once.
+        // The source is thread-safe for this call (it takes its own lock).
+        nonisolated(unsafe) let experts = w.experts
+        cb.addCompletedHandler { buffer in
+            if buffer.status == .error { experts.commandBufferFailed() }
         }
         return cb
     }

@@ -22,6 +22,9 @@ import Testing
 /// * `chunk2048-uncached`, `chunk2048-cached`: a 2,048-token chunk and a
 ///   4,096-token prompt (two chunks) with the staging timeline;
 /// * `all-cached`: prefill fills and decode misses both cached;
+/// * `short-vs-sweep`: 16- and 64-token prompts prefilled through the slot
+///   caches and with the whole-layer reads forced, in two runners: the
+///   next-token logits byte for byte, then 32 greedy tokens each;
 /// * `long-decode`: the store's defaults (option D below 48 GB): a 64-token
 ///   prompt, 1,024 greedy tokens with the slot cache, the staged files'
 ///   file-cache pages and the host's free memory every 128 tokens, then a
@@ -380,5 +383,56 @@ struct Inkling2StagedReadRealInstallTests {
         let pids = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             .split(separator: "\n").compactMap { Int32($0) }
         return pids.filter { $0 != getpid() }.count
+    }
+
+    @Test(.enabled(if: enabled && stage == "short-vs-sweep", "needs MFERENCE_INKLING2_GTURBO and the short-vs-sweep stage"))
+    func shortChunksMatchTheSweep() async throws {
+        let context = try MetalContext()
+        let (model, runner, _) = try Self.runner(context, mode: .forHost())
+        let c = model.config
+        let tokens = try await Self.promptTokens(model, count: 64)
+        let out = try #require(context.device.makeBuffer(length: c.vocabSize * 2, options: .storageModeShared))
+        func argmax() -> Int32 {
+            let p = out.contents().bindMemory(to: Float16.self, capacity: c.unpaddedVocabSize)
+            var best = 0
+            for i in 1..<c.unpaddedVocabSize where p[i] > p[best] { best = i }
+            return Int32(best)
+        }
+        /// The prompt's next-token logits (raw FP16 bytes), then 32 greedy tokens.
+        func generate(_ prompt: [Int32], shortMax: Int) async throws -> (logits: [UInt16], tokens: [Int32], seconds: Double) {
+            runner.shortPrefillMaxTokens = shortMax
+            runner.reset()
+            let started = DispatchTime.now().uptimeNanoseconds
+            _ = try await runner.prefillChunked(tokens: prompt[...], startPosition: 0, outputMode: .logits,
+                                                config: .production(chunkTokens: 2048), into: out, onProgress: { _ in })
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+            let logits = Array(UnsafeBufferPointer(start: out.contents().bindMemory(to: UInt16.self, capacity: c.vocabSize),
+                                                   count: c.vocabSize))
+            var generated: [Int32] = [], token = argmax(), position = prompt.count
+            for _ in 0..<32 {
+                generated.append(token)
+                try await runner.produce(token: token, position: position, into: out)
+                token = argmax()
+                position += 1
+            }
+            return (logits, generated, seconds)
+        }
+        for n in [16, 64] {
+            let prompt = Array(tokens.prefix(n))
+            let before = runner.shortPrefillStats
+            let short = try await generate(prompt, shortMax: 64)
+            let stats = runner.shortPrefillStats
+            let sweep = try await generate(prompt, shortMax: 0)
+            let again = try await generate(prompt, shortMax: 64)      // warm: the slots hold the last turn's experts
+            Self.log(String(format: "%d-token prompt: prefill through the slots %.3f s cold, %.3f s warm; whole-layer reads %.3f s; "
+                            + "staged visits %d (%d read whole), %d hits, %d misses; logits identical: %@, text identical: %@",
+                            n, short.seconds, again.seconds, sweep.seconds, stats.visits - before.visits,
+                            stats.fallbacks - before.fallbacks, stats.hits - before.hits, stats.misses - before.misses,
+                            short.logits == sweep.logits ? "yes" : "NO", short.tokens == sweep.tokens ? "yes" : "NO"))
+            #expect(short.logits == sweep.logits, "\(n)-token prompt: next-token logits")
+            #expect(short.tokens == sweep.tokens, "\(n)-token prompt: generated tokens")
+            #expect(again.logits == sweep.logits)
+        }
+        Self.state("end")
     }
 }

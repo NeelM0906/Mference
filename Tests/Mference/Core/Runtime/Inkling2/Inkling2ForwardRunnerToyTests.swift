@@ -254,17 +254,21 @@ struct Inkling2ForwardRunnerToyTests {
                                                  readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
                                                  decodeSlots: .perLayer(24))
 
-        func run(_ weights: Inkling2RunnerWeights) async throws
+        func run(_ weights: Inkling2RunnerWeights, shortPrefill: Int? = nil, deferredReadbacks: Bool = false) async throws
             -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], routerLogits: [Float],
-                cache: Inkling2ForwardRunner.DecodeCacheStats) {
+                cache: Inkling2ForwardRunner.DecodeCacheStats, short: Inkling2ForwardRunner.ShortPrefillStats) {
             let runner = try Inkling2ForwardRunner(weights: weights, context: context,
                                                    maxContext: 64, maxChunkTokens: 4)
+            if let shortPrefill { runner.shortPrefillMaxTokens = shortPrefill }
+            runner.defersDecodeReadback = deferredReadbacks
             let device = context.device
             let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
             let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
             let routes = try #require(device.makeBuffer(length: 48 * rows * c.topK * 4, options: .storageModeShared))
-            // The trace's router logits too: staged decode visits record them
-            // after `split()`, in the buffer that follows the readback.
+            // The trace's router logits too: a staged decode visit records them
+            // in the buffer that follows the readback `split()` (split
+            // readbacks, the default), or in its own buffer after the visit
+            // (deferred).
             let routerLogits = try #require(device.makeBuffer(length: 48 * rows * c.numExperts * 4,
                                                               options: .storageModeShared))
             runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows, routerLogits: routerLogits)
@@ -286,10 +290,27 @@ struct Inkling2ForwardRunnerToyTests {
             return (logits, Inkling2BufferMatrix.floats(outputs, offset: 0, count: 48 * rows * d),
                     Array(UnsafeBufferPointer(start: traced, count: 48 * rows * c.topK)),
                     Inkling2BufferMatrix.floats(routerLogits, offset: 0, count: 48 * rows * c.numExperts),
-                    runner.decodeCacheStats)
+                    runner.decodeCacheStats, runner.shortPrefillStats)
         }
         let fixed = try await run(toy.runnerWeights)
         let staged = try await run(stored)
+        // Short prefill chunks through the slots (the default, up to 64
+        // tokens) against the whole-layer reads forced: the same bits.
+        let swept = try await run(stored, shortPrefill: 0)
+        #expect(swept.logits == fixed.logits && swept.outputs == fixed.outputs)
+        #expect(swept.short.visits == 0 && staged.short.visits > staged.short.fallbacks)
+        // Decode visits deferred (the GPU waits on a CPU-signalled event; the
+        // switch's other arm) against split readbacks (the default): the same
+        // bits, the same caching.
+        let deferred = try await run(stored, deferredReadbacks: true)
+        #expect(deferred.logits == fixed.logits && deferred.outputs == fixed.outputs)
+        // K4's traced router logits: recorded after each visit in whichever
+        // buffer is current, the same bits on every path.
+        #expect(deferred.routerLogits == fixed.routerLogits && swept.routerLogits == fixed.routerLogits)
+        // (Hits are not compared: the runs share one store, so each starts from
+        // the slots the run before it left.)
+        #expect(deferred.cache.visits == staged.cache.visits)
+        #expect(deferred.cache.deferred == deferred.cache.visits && deferred.cache.deferred > 0 && staged.cache.deferred == 0)
         #expect(staged.logits == fixed.logits)
         #expect(staged.outputs == fixed.outputs)
         #expect(staged.routes == fixed.routes)
@@ -325,7 +346,8 @@ struct Inkling2ForwardRunnerToyTests {
         print("inkling2 toy expert store at \(hostGigabytes) GB: \(plan.placements.filter { $0 == .resident }.count) "
               + "resident, \(stagedLayers) staged layers; decode slot cache \(staged.cache.hits) hits, "
               + "\(staged.cache.misses) misses over \(staged.cache.visits) visits; experts new to a later pass on "
-              + "the looped layers: \(newExperts); bit-identical: "
+              + "the looped layers: \(newExperts); short prefill \(staged.short.visits) staged visits, "
+              + "\(staged.short.fallbacks) read whole; bit-identical: "
               + "\(staged.logits == fixed.logits && staged.outputs == fixed.outputs)")
     }
 }

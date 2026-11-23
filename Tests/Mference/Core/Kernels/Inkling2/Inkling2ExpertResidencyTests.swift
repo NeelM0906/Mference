@@ -582,6 +582,116 @@ import MferenceValidationSupport
         #expect(store.stagingError == nil)
     }
 
+    /// A short prefill chunk through a staged layer's slots: the grouped
+    /// prefill kernel on the slot pool, planned by slot, equals the resident
+    /// pool planned by expert, bit for bit. A chunk whose distinct experts
+    /// outnumber the slots is refused before any slot changes (what was
+    /// cached still hits), and its whole-layer read empties only the caches
+    /// of the slab it overwrites.
+    @Test func shortPrefillChunksUseTheSlotsOrRefuseWhole() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let (store, layers, directory, _) = try Self.cacheStore(context, shape: shape)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(store.decodeSlots(layer: 2) == 8)
+        let tokens = 3
+        let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B90)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: 8)
+        let weights = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2B91).weights
+        Inkling2MoETestSupport.write(weights, to: scratch.routeWeights)
+        func out() -> MTLBuffer { context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared)! }
+        // Three tokens over seven distinct experts: they fit the 8 slots.
+        let routed = [2, 9, 5, 14, 9, 7, 2, 11, 3, 14, 7, 5]
+        Inkling2MoETestSupport.write(routed.map(UInt32.init), to: scratch.ids)
+        let want = out()
+        _ = Inkling2MoETestSupport.run(context) {
+            kernels.encodePrefill($0, hidden: hidden, hiddenStride: shape.d, pool: layers[2].pool, scratch: scratch,
+                                  tokens: tokens, out: want, outStride: shape.d)
+        }
+        let visit = try #require(try store.beginShortPrefillVisit(layer: 2, expertIDs: routed))
+        #expect(visit.binding.misses == 7 && visit.binding.hits == 5)
+        let slotIDs = context.device.makeBuffer(length: routed.count * 4, options: .storageModeShared)!
+        Inkling2MoETestSupport.write(visit.slots, to: slotIDs)
+        let got = out()
+        let cb = context.queue.makeCommandBuffer()!
+        let encoder = cb.makeComputeCommandEncoder()!
+        kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: visit.binding.pool, scratch: scratch,
+                              tokens: tokens, out: got, outStride: shape.d, ids: slotIDs)
+        encoder.endEncoding()
+        store.endDecodeVisit(visit.binding, commandBuffer: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+        let gotRows = Inkling2MoETestSupport.read(got, as: Float.self, count: tokens * shape.d)
+        #expect(gotRows.allSatisfy { $0.isFinite })
+        #expect(gotRows == Inkling2MoETestSupport.read(want, as: Float.self, count: tokens * shape.d))
+        // The router's expert ids are untouched (the plan read the slot ids).
+        #expect(Inkling2MoETestSupport.read(scratch.ids, as: UInt32.self, count: routed.count) == routed.map(UInt32.init))
+        // Ten distinct experts do not fit 8 slots: refused, and nothing moved.
+        #expect(try store.beginShortPrefillVisit(layer: 2, expertIDs: [0, 1, 4, 6, 8, 10, 12, 13, 15, 2, 9, 5]) == nil)
+        let again = try #require(try store.beginShortPrefillVisit(layer: 2, expertIDs: [2, 9, 5, 14]))
+        #expect(again.binding.hits == 4 && again.binding.misses == 0)
+        let done = context.queue.makeCommandBuffer()!
+        store.endDecodeVisit(again.binding, commandBuffer: done)
+        done.commit()
+        done.waitUntilCompleted()
+    }
+
+    /// Deferred decode visits: many staged visits encoded into one command
+    /// buffer before their routes exist (each visit's ids written by a blit,
+    /// standing in for the router); the worker fills the slots between each
+    /// visit's signal and its wait. Every output equals the resident pool's
+    /// bit for bit, the served visits count their hits and misses, and the
+    /// same layer visited twice in the buffer refills only after its first
+    /// visit's reads.
+    @Test func deferredDecodeVisitsMatchResidentPools() throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let (store, layers, directory, _) = try Self.cacheStore(context, shape: shape)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        store.waitTimeoutMS = 10_000            // a regression fails instead of hanging
+        let visits: [(layer: Int, ids: [UInt32])] = [
+            (1, [0, 1, 2, 3]), (2, [4, 5, 6, 7]), (1, [8, 9, 10, 11]), (3, [1, 3, 5, 7]),
+            (1, [12, 13, 0, 1]), (2, [4, 6, 15, 14]),
+        ]
+        let (x, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: 1, stride: shape.d, d: shape.d, seed: 0x2BA0)
+        let weights = context.device.makeBuffer(length: 16, options: .storageModeShared)!
+        Inkling2MoETestSupport.write([Float](repeating: 0.25, count: 4), to: weights)
+        let router = context.device.makeBuffer(length: 16, options: .storageModeShared)!     // the "router's" ids
+        let staging = visits.map { visit -> MTLBuffer in
+            let b = context.device.makeBuffer(length: 16, options: .storageModeShared)!
+            Inkling2MoETestSupport.write(visit.ids, to: b)
+            return b
+        }
+        let activation = context.device.makeBuffer(length: shape.topK * shape.f * 2, options: .storageModeShared)!
+        let outs = visits.map { _ in context.device.makeBuffer(length: shape.d * 4, options: .storageModeShared)! }
+        let cb = context.queue.makeCommandBuffer()!
+        for (i, visit) in visits.enumerated() {
+            let blit = cb.makeBlitCommandEncoder()!
+            blit.copy(from: staging[i], sourceOffset: 0, to: router, destinationOffset: 0, size: 16)
+            blit.endEncoding()
+            let binding = try store.encodeDeferredDecodeVisit(layer: visit.layer, routerIDs: router, commandBuffer: cb)
+            let encoder = cb.makeComputeCommandEncoder()!
+            kernels.encodeDecode(encoder, shape: shape, x: x, binding: binding, routeWeights: weights,
+                                 activation: activation, out: outs[i])
+            encoder.endEncoding()
+            store.endDecodeVisit(binding, commandBuffer: cb)
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.status == .completed && store.deferredDecodeFailure == nil)
+        let served = store.takeDeferredVisits()
+        #expect(served.map(\.layer) == visits.map(\.layer))
+        #expect(served.allSatisfy { $0.hits + $0.misses == shape.topK })
+        #expect(served[4].hits == 2)                       // experts 0 and 1, loaded by layer 1's first visit
+        for (i, visit) in visits.enumerated() {
+            let want = Self.decode(context, kernels, shape: shape, x: x, xOffset: 0, weights: weights, weightsOffset: 0,
+                                   pool: layers[visit.layer].pool, ids: staging[i], idsOffset: 0)
+            #expect(Inkling2MoETestSupport.read(outs[i], as: Float.self, count: shape.d) == want, "visit \(i)")
+        }
+    }
+
     /// Least recently used, not first in: after A and B fill the 8 slots, C
     /// reuses two of A's experts, so the next misses evict A's other two.
     @Test func decodeCacheEvictsLeastRecentlyUsed() throws {
@@ -608,7 +718,10 @@ import MferenceValidationSupport
         defer { try? FileManager.default.removeItem(at: directory) }
         let experts = [3, 7, 11, 15]
         _ = try store.prepareDecodeVisit(layer: 2, expertIDs: experts)
+        _ = try store.prepareDecodeVisit(layer: 3, expertIDs: experts)
         #expect(try store.prepareDecodeVisit(layer: 2, expertIDs: experts).hits == 4)
+        // The first staged read goes to slab 0, which holds layers 1 and 2's
+        // slots (even bytes, two layers a slab); layer 3's live in slab 1.
         let cb = context.queue.makeCommandBuffer()!
         _ = try store.beginPrefillVisit(layer: 2, commandBuffer: cb)
         try store.endPrefillVisit(layer: 2, commandBuffer: cb)
@@ -616,6 +729,8 @@ import MferenceValidationSupport
         cb.waitUntilCompleted()
         let after = try store.prepareDecodeVisit(layer: 2, expertIDs: experts)
         #expect(after.hits == 0 && after.misses == 4)
+        // Only the overwritten slab's caches were emptied.
+        #expect(try store.prepareDecodeVisit(layer: 3, expertIDs: experts).hits == 4)
         #expect(throws: Inkling2ExpertStore.StoreError.notStaged(layer: 0)) {
             try store.prepareDecodeVisit(layer: 0, expertIDs: experts)
         }

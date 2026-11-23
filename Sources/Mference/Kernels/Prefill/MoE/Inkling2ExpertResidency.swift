@@ -540,7 +540,10 @@ struct Inkling2DecodeBinding {
 ///   ids, `prepareDecodeVisit` makes sure those experts are in the layer's
 ///   cache slots (LRU, misses read from the layer file) and binds them.
 ///   The slots live in the staging slabs, which decode leaves idle; a
-///   prefill visit of a staged layer empties every cache.
+///   whole-layer prefill read empties the caches of the slab it writes.
+///   Short prefill chunks use the slots too (`beginShortPrefillVisit`), and
+///   decode visits can be deferred (`encodeDeferredDecodeVisit`: the GPU
+///   waits on an event while a worker fills the slots).
 ///
 /// Prefill slab fills read by `readMode`: uncached (`F_NOCACHE`) by default
 /// below 48 GB, so whole staged layers are not held a second time in the
@@ -553,7 +556,10 @@ struct Inkling2DecodeBinding {
 /// that signal before refilling a slot of the layer, and a prefill fill of
 /// the slabs waits for every decode visit ended so far. A decode visit waits
 /// for every prefill visit's GPU reads of the slabs before it refills them.
-/// Use the store from one thread (the runner's).
+/// Use the store from one thread (the runner's); the deferred-visit worker
+/// and `commandBufferFailed` (a Metal completion handler) are the only
+/// others, and take the store's lock. A deferred visit's command buffer must
+/// be committed (the runner commits all encoded work, even on a throw).
 ///
 /// Staged layer files are mapped read-only for CPU readers (references,
 /// checks) but never bound on the GPU: Metal makes a bound mapping resident
@@ -671,11 +677,36 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// (`prefetchFirstStagedVisit`); that chunk's `beginPrefillVisit` of the
     /// layer takes it over.
     private var prefetched: (layer: Int, ticket: Inkling2StagedExpertLayers.Ticket)?
-    /// Set by a staged prefill visit (it overwrites the slabs the caches use).
-    private var cachesStale = false
+    /// Slabs a prefill read has written since their caches were last
+    /// emptied: those caches are emptied before their next use. Caches in
+    /// other slabs keep their experts (a short prefill chunk that falls back
+    /// to a whole-layer read for one layer costs only that slab's caches).
+    private var staleSlabs = Set<ObjectIdentifier>()
+    private func markAllStale() {
+        for cache in caches.values { staleSlabs.insert(ObjectIdentifier(cache.slab)) }
+    }
     /// Signalled by each ended decode visit's command buffer with its count.
     private let decodeDone: MTLSharedEvent
     private var decodeIssued: UInt64 = 0
+
+    // Deferred decode visits: the GPU signals `routed` with a visit's number
+    // after its router, the decode worker loads the routed experts into the
+    // layer's slots and signals `ready`, which the GPU waits for before the
+    // visit's experts. No command buffer is split for a route readback.
+    private let routed: MTLSharedEvent
+    private let ready: MTLSharedEvent
+    private var deferredIssued: UInt64 = 0
+    private let decodeWorker = DispatchQueue(label: "inkling2.decode-slots", qos: .userInteractive)
+    /// One deferred visit as the worker served it (diagnostics).
+    struct DeferredVisit: Sendable {
+        let layer: Int
+        let hits: Int
+        let misses: Int
+        let seconds: Double
+        let expertIDs: [Int]
+    }
+    private var deferredServed: [DeferredVisit] = []
+    private var deferredFailure: String?
     private let lock = NSLock()
     /// How long the CPU waits for the GPU before reporting `timedOut`.
     var waitTimeoutMS: UInt64 = 120_000
@@ -785,8 +816,11 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                                                 offset: offset, slots: slots, device: device)
             }
         }
-        guard let decodeDone = device.makeSharedEvent() else { throw StoreError.allocationFailed("decode event") }
+        guard let decodeDone = device.makeSharedEvent(), let routed = device.makeSharedEvent(),
+              let ready = device.makeSharedEvent() else { throw StoreError.allocationFailed("decode events") }
         self.decodeDone = decodeDone
+        self.routed = routed
+        self.ready = ready
         self.resident = resident
         self.mapped = mapped
         self.templates = templates
@@ -841,7 +875,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         }
         staging.encodeWait(ticket, commandBuffer: commandBuffer)
         open[layer, default: []].append(ticket)
-        cachesStale = true
+        staleSlabs.insert(ObjectIdentifier(ticket.slab))
         return try template.rebound(to: ticket.slab)
     }
 
@@ -858,8 +892,9 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard prefetched == nil else { return }
-        prefetched = (first, try staging.stage(layer: first, after: (decodeDone, decodeIssued)))
-        cachesStale = true
+        let ticket = try staging.stage(layer: first, after: (decodeDone, decodeIssued))
+        prefetched = (first, ticket)
+        staleSlabs.insert(ObjectIdentifier(ticket.slab))
     }
 
     /// Releases a prefetched visit whose chunk will not run (cancelled between
@@ -918,9 +953,102 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         open.removeAll()
         prefetched = nil
         if decodeDone.signaledValue < decodeIssued { decodeDone.signaledValue = decodeIssued }
-        cachesStale = true
+        markAllStale()
+        let lastDeferred = deferredIssued
         lock.unlock()
         staging?.releaseIssued()
+        // Deferred visits whose router signal never ran: let the worker pass them.
+        if routed.signaledValue < lastDeferred { routed.signaledValue = lastDeferred }
+        decodeWorker.sync {}
+        if ready.signaledValue < lastDeferred { ready.signaledValue = lastDeferred }
+    }
+
+    /// A staged layer's decode visit encoded before its routes are known.
+    /// Encode it after the encoder that writes the router's ids
+    /// (`routerIDs`, `topK` uint32 at `routerIDsOffset`, shared storage), then
+    /// encode the decode with the returned binding (the layer's slot pool and
+    /// slot ids) and `endDecodeVisit`. In the command buffer this adds a
+    /// `routed` signal and a wait on `ready`; between the two the decode
+    /// worker reads the ids, loads the misses into the slots, writes the slot
+    /// ids and signals `ready`. The slots are the command buffer's until it
+    /// completes, as for `prepareDecodeVisit`. The binding's hit and miss
+    /// counts are zero here; `takeDeferredVisits` gives the served ones.
+    func encodeDeferredDecodeVisit(layer: Int, routerIDs: MTLBuffer, routerIDsOffset: Int = 0,
+                                   commandBuffer: MTLCommandBuffer) throws -> Inkling2DecodeBinding {
+        guard let cache = caches[layer] else { throw StoreError.notStaged(layer: layer) }
+        lock.lock()
+        deferredIssued += 1
+        let visit = deferredIssued
+        // The visit of this layer before this one, whose GPU reads a refill
+        // must wait for (`endDecodeVisit` moves `lastRead` on at encode time).
+        let previousRead = cache.lastRead
+        lock.unlock()
+        commandBuffer.encodeSignalEvent(routed, value: visit)
+        commandBuffer.encodeWaitForEvent(ready, value: visit)
+        let topK = shape.topK, experts = shape.experts
+        nonisolated(unsafe) let source = routerIDs
+        decodeWorker.async { [self] in
+            defer { if ready.signaledValue < visit { ready.signaledValue = visit } }
+            guard routed.wait(untilSignaledValue: visit, timeoutMS: waitTimeoutMS) else {
+                recordDeferredFailure("deferred decode visit \(visit) of layer \(layer): the router never signalled")
+                return
+            }
+            // After a failed command buffer the ids may never have been
+            // written: touch nothing.
+            if deferredDecodeFailure != nil { return }
+            let p = (source.contents() + routerIDsOffset).bindMemory(to: UInt32.self, capacity: topK)
+            let ids = (0..<topK).map { Int(p[$0]) }
+            guard ids.allSatisfy({ $0 < experts }) else {
+                recordDeferredFailure("deferred decode visit \(visit) of layer \(layer): routed ids out of range \(ids)")
+                return
+            }
+            let started = DispatchTime.now().uptimeNanoseconds
+            do {
+                guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: ids, refuseWhenFull: false,
+                                                             refillAfter: previousRead) else { return }
+                let out = binding.ids.contents().bindMemory(to: UInt32.self, capacity: topK)
+                for (rank, slot) in slots.enumerated() { out[rank] = UInt32(slot) }
+                let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+                lock.withLock {
+                    deferredServed.append(DeferredVisit(layer: layer, hits: binding.hits, misses: binding.misses,
+                                                        seconds: seconds, expertIDs: ids))
+                }
+            } catch {
+                recordDeferredFailure("deferred decode visit \(visit) of layer \(layer): \(error)")
+            }
+        }
+        return Inkling2DecodeBinding(layer: layer, pool: cache.pool, ids: cache.ids, hits: 0, misses: 0)
+    }
+
+    /// From a command buffer's completion handler when it failed: its
+    /// signals will never run, so the deferred worker and any refill waiting
+    /// on them are released now (the visits are marked failed; the runner
+    /// then recovers and refuses until the model reloads), instead of each
+    /// waiting out `waitTimeoutMS`.
+    func commandBufferFailed() {
+        lock.lock()
+        if deferredFailure == nil { deferredFailure = "a command buffer failed" }
+        let lastDeferred = deferredIssued, lastDecode = decodeIssued
+        lock.unlock()
+        if decodeDone.signaledValue < lastDecode { decodeDone.signaledValue = lastDecode }
+        if routed.signaledValue < lastDeferred { routed.signaledValue = lastDeferred }
+        if ready.signaledValue < lastDeferred { ready.signaledValue = lastDeferred }
+    }
+
+    /// The deferred visits served since the last call (waits for the worker).
+    func takeDeferredVisits() -> [DeferredVisit] {
+        decodeWorker.sync {}
+        return lock.withLock {
+            defer { deferredServed.removeAll() }
+            return deferredServed
+        }
+    }
+
+    /// The first failure of a deferred visit, if any; after one, reload.
+    var deferredDecodeFailure: String? { lock.withLock { deferredFailure } }
+
+    private func recordDeferredFailure(_ message: String) {
+        lock.withLock { if deferredFailure == nil { deferredFailure = message } }
     }
 
     /// Ends a decode visit: after the encoder that reads `binding.pool`, in
@@ -944,14 +1072,53 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// (`endDecodeVisit`). Encode the visit with the binding, then call
     /// `endDecodeVisit` in the same command buffer.
     func prepareDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
+        precondition(expertIDs.count == shape.topK)
+        guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: expertIDs, refuseWhenFull: false) else {
+            preconditionFailure("a decode visit always fits its slots")
+        }
         guard let cache = caches[layer] else { throw StoreError.notStaged(layer: layer) }
-        precondition(expertIDs.count == shape.topK && expertIDs.allSatisfy { $0 >= 0 && $0 < shape.experts })
+        let ids = cache.ids.contents().bindMemory(to: UInt32.self, capacity: shape.topK)
+        for (rank, slot) in slots.enumerated() { ids[rank] = UInt32(slot) }
+        return binding
+    }
+
+    /// A short prefill chunk's visit of a staged layer through its slot
+    /// cache, after the runner has read back the chunk's routed ids
+    /// (`expertIDs`: `tokens x topK`, token-major): if the chunk's distinct
+    /// experts fit the layer's slots, loads the ones not already there (as
+    /// `prepareDecodeVisit` does) and returns the binding (the slot pool) and
+    /// each entry's slot, for the grouped prefill kernel's route plan. Nil,
+    /// decided before any slot is touched, when they do not fit: the runner
+    /// then reads the layer whole (`beginPrefillVisit`), which empties only
+    /// the caches in the slab it overwrites. End a returned visit with
+    /// `endDecodeVisit` after the encoder that reads its slots; the slots are
+    /// that command buffer's until it completes.
+    func beginShortPrefillVisit(layer: Int, expertIDs: [Int]) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])? {
+        precondition(!expertIDs.isEmpty && expertIDs.count % shape.topK == 0)
+        guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: expertIDs, refuseWhenFull: true) else {
+            return nil
+        }
+        return (binding, slots.map { UInt32($0) })
+    }
+
+    /// The decode cache's slot assignment for `expertIDs` (any number of
+    /// entries): hits keep their slots, misses take the least recently used
+    /// slots no entry of this visit needs and are read from the layer file,
+    /// the slot scales follow. With `refuseWhenFull`, returns nil before
+    /// touching anything when the distinct experts outnumber the slots.
+    /// Before refilling, waits for the GPU to finish the prefill visits that
+    /// wrote this cache's slab and the last visit that read this layer's slots.
+    private func assignSlots(layer: Int, expertIDs: [Int], refuseWhenFull: Bool,
+                             refillAfter: UInt64? = nil) throws -> (Inkling2DecodeBinding, [Int])? {
+        guard let cache = caches[layer] else { throw StoreError.notStaged(layer: layer) }
+        precondition(expertIDs.allSatisfy { $0 >= 0 && $0 < shape.experts })
         lock.lock()
         defer { lock.unlock() }
-        if cachesStale, let staging {
-            // Prefill wrote the slabs: wait for its last read into them and
-            // for the GPU to finish reading them, then forget every cache. A
-            // visit prefetched for a chunk that never came is released first.
+        if refuseWhenFull && Set(expertIDs).count > cache.slots { return nil }
+        if !staleSlabs.isEmpty, let staging {
+            // Prefill wrote slabs: wait for its last read into them and for the
+            // GPU to finish reading them, then empty the caches in those slabs.
+            // A visit prefetched for a chunk that never came is released first.
             do {
                 try releasePrefetched(staging)
             } catch {
@@ -963,44 +1130,48 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                !staging.released.wait(untilSignaledValue: last, timeoutMS: waitTimeoutMS) {
                 throw StoreError.timedOut("prefill reads of the staging slabs")
             }
-            for c in caches.values { c.clear() }
-            cachesStale = false
+            for c in caches.values where staleSlabs.contains(ObjectIdentifier(c.slab)) { c.clear() }
+            staleSlabs.removeAll()
         }
 
         cache.clock += 1
         var slotFor = [Int](repeating: -1, count: expertIDs.count)
         var hits = 0
-        for (rank, expert) in expertIDs.enumerated() {
+        for (entry, expert) in expertIDs.enumerated() {
             if let slot = cache.slotOf[expert] {
-                slotFor[rank] = slot
+                slotFor[entry] = slot
                 cache.lastUse[slot] = cache.clock
                 hits += 1
             }
         }
         let needed = Set(slotFor.filter { $0 >= 0 })
         var loads: [(slot: Int, expert: Int, previous: Int, previousUse: UInt64)] = []
-        for (rank, expert) in expertIDs.enumerated() where slotFor[rank] < 0 {
-            if let slot = cache.slotOf[expert] {           // loaded for an earlier rank of this visit
-                slotFor[rank] = slot
+        var loadedSlots = Set<Int>()
+        for (entry, expert) in expertIDs.enumerated() where slotFor[entry] < 0 {
+            if let slot = cache.slotOf[expert] {           // loaded for an earlier entry of this visit
+                slotFor[entry] = slot
                 hits += 1
                 continue
             }
             var victim = -1
-            for slot in 0..<cache.slots where !needed.contains(slot) && !loads.contains(where: { $0.slot == slot }) {
+            for slot in 0..<cache.slots where !needed.contains(slot) && !loadedSlots.contains(slot) {
                 if victim < 0 || cache.lastUse[slot] < cache.lastUse[victim] { victim = slot }
             }
-            precondition(victim >= 0, "fewer slots than ranks")
+            precondition(victim >= 0, "fewer slots than the visit's experts")
             loads.append((victim, expert, cache.expertIn[victim], cache.lastUse[victim]))
+            loadedSlots.insert(victim)
             if cache.expertIn[victim] >= 0 { cache.slotOf[cache.expertIn[victim]] = nil }
             cache.expertIn[victim] = expert
             cache.slotOf[expert] = victim
             cache.lastUse[victim] = cache.clock
-            slotFor[rank] = victim
+            slotFor[entry] = victim
         }
         if !loads.isEmpty {
-            // The previous decode visit of this layer must be done reading.
-            if decodeDone.signaledValue < cache.lastRead,
-               !decodeDone.wait(untilSignaledValue: cache.lastRead, timeoutMS: waitTimeoutMS) {
+            // The previous visit that read this layer's slots must be done
+            // (a deferred visit names it: its own end is already counted).
+            let lastRead = refillAfter ?? cache.lastRead
+            if decodeDone.signaledValue < lastRead,
+               !decodeDone.wait(untilSignaledValue: lastRead, timeoutMS: waitTimeoutMS) {
                 rollBack(cache, loads)
                 throw StoreError.timedOut("decode reads of layer \(layer)'s slots")
             }
@@ -1019,9 +1190,8 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                 down[load.slot] = cache.scale(cache.sourceDown, expert: load.expert)
             }
         }
-        let ids = cache.ids.contents().bindMemory(to: UInt32.self, capacity: shape.topK)
-        for (rank, slot) in slotFor.enumerated() { ids[rank] = UInt32(slot) }
-        return Inkling2DecodeBinding(layer: layer, pool: cache.pool, ids: cache.ids, hits: hits, misses: loads.count)
+        return (Inkling2DecodeBinding(layer: layer, pool: cache.pool, ids: cache.ids, hits: hits, misses: loads.count),
+                slotFor)
     }
 
     /// Undoes a visit's slot assignments: back to the evicted experts while
