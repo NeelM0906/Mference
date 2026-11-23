@@ -363,6 +363,7 @@ static int cmd_generate(int argc, char ** argv) {
             // token ids given directly (teacher forcing: another run's prompt
             // ids followed by its generated ids), never re-tokenized
             for (const auto & t : pr.at("ids")) ids.push_back((llama_token) t.get<int>());
+            if (ids.empty()) { fprintf(stderr, "ink-golden: %s: empty ids\n", id.c_str()); return 1; }
             prompt_text = detok(vocab, ids);
         } else {
             prompt_text = pr.at("text");

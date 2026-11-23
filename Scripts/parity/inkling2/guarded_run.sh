@@ -10,6 +10,7 @@
 # the ancestor check below, but model-hold.sh is the program's rule)
 #
 # Before: refuses (exit 71) unless `lock.sh preflight` passes, the GGUF exists,
+# (with --timing) the Mference app is not open,
 # no other model process runs and, with --timing, `pmset -g batt` shows AC
 # Power. During: samples swap every 2 s; any growth stops the command (INT,
 # then TERM after 30 s) and exits 70. After: records swap at start and end,

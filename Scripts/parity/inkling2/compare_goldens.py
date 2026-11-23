@@ -143,7 +143,9 @@ def main():
         pid = p["id"]
         ga, gb = load(da, pid, "golden.json"), load(db, pid, "golden.json")
         if gb is None:
-            result["prompts"].append({"id": pid, "missing_in_b": True})
+            # teacher-forced sets cover only the log-prob prompts: skip the rest quietly
+            if not teacher_forced:
+                result["prompts"].append({"id": pid, "missing_in_b": True})
             continue
         if teacher_forced:
             # B ran A's prompt + generated ids (but the last) as one prompt:
@@ -152,7 +154,10 @@ def main():
             r = {"id": pid, "teacher_forced": True, "context_equal": gb["prompt_ids"] == ctx,
                  "prompt_ids_equal": gb["prompt_ids"] == ctx}
             if r["context_equal"] and ga.get("logprobs_file") and gb.get("logprobs_file"):
-                r["logprobs"] = lp_metrics(load(da, pid, "logprobs.json"), load(db, pid, "logprobs.json"), len(ctx))
+                la = load(da, pid, "logprobs.json")
+                r["logprobs"] = lp_metrics(la, load(db, pid, "logprobs.json"), len(ctx))
+                # every position of A must have been compared
+                r["all_positions_compared"] = r["logprobs"]["positions"] == len(la)
             result["prompts"].append(r)
             continue
         r = {"id": pid, "prompt_ids_equal": ga["prompt_ids"] == gb["prompt_ids"]}
@@ -190,6 +195,12 @@ def main():
         pa = sum(l["top1_at_margin"][k]["agree"] for l in lps)
         pooled[f"top1_at_margin_{k}"] = pa / pn if pn else None
     result["pooled_logprobs"] = pooled
+    if teacher_forced:
+        result["summary_teacher_forced"] = {
+            "prompts": len(result["prompts"]),
+            "all_contexts_equal": all(p.get("context_equal") for p in result["prompts"]),
+            "all_positions_compared": all(p.get("all_positions_compared") for p in result["prompts"]),
+        }
     result["summary"] = {
         "prompts": len(result["prompts"]),
         "all_prompt_ids_equal": all(p.get("prompt_ids_equal") for p in result["prompts"]),
@@ -202,9 +213,12 @@ def main():
     txt = json.dumps(result, indent=1)
     if out_json:
         open(out_json, "w").write(txt)
-    print(json.dumps(result["summary"], indent=1))
+    print(json.dumps(result.get("summary_teacher_forced", result["summary"]), indent=1))
     for p in result["prompts"]:
-        line = f"{p['id']}: ids_equal={p.get('prompt_ids_equal')} identical={p.get('generated_identical')} prefix={p.get('common_prefix')}/{p.get('generated_a')}"
+        if p.get("teacher_forced"):
+            line = f"{p['id']}: teacher-forced context_equal={p.get('context_equal')} all_positions={p.get('all_positions_compared')}"
+        else:
+            line = f"{p['id']}: ids_equal={p.get('prompt_ids_equal')} identical={p.get('generated_identical')} prefix={p.get('common_prefix')}/{p.get('generated_a')}"
         if p.get("logprobs"):
             l = p["logprobs"]
             line += f" top1={l['top1_agreement']:.4f} max|dlp|={l['max_abs_dlogprob_top1']:.4g} maxKL~={l['max_kl_top20_approx']:.3g}"
