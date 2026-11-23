@@ -8,6 +8,9 @@
 # Stages, each its own lock hold:
 #   metal      ink-golden generate, -ngl 99 (the default GPU offload): the goldens
 #   metal-r2   the same again in a fresh process: the reference's run-to-run noise
+#   metal5     trace02's prompt on Metal without the trace (inputs/generate_prompts_5.json,
+#              log-probs at every position): does the trace's eval callback change
+#              Metal's numbers? Writes generate5/metal
 #   cpu        the same with -ngl 0: ink-golden then loads no GPU device, turns
 #              op offload and CPU weight repacking off, so every op runs on the
 #              CPU from the mapped file: the backend noise
@@ -29,6 +32,7 @@ IN=$HERE/inputs/generate_prompts.json; OUTD=$G/generate/$STAGE
 case "$STAGE" in
   metal|metal-r2) ngl=99 ;;
   cpu) ngl=0 ;;
+  metal5) ngl=99; IN=$HERE/inputs/generate_prompts_5.json; OUTD=$G/generate5/metal ;;
   metal2) ngl=99; IN=$HERE/inputs/generate_prompts_2.json; OUTD=$G/generate2/metal ;;
   cpu2) ngl=0; IN=$HERE/inputs/generate_prompts_2.json; OUTD=$G/generate2/cpu ;;
   metal3) ngl=99; IN=$HERE/inputs/generate_prompts_3.json; OUTD=$G/generate3/metal ;;

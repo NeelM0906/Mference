@@ -1,0 +1,15 @@
+[
+ {
+  "id": "trace02",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "none",
+  "n_gen": 1,
+  "logprobs": true
+ }
+]
