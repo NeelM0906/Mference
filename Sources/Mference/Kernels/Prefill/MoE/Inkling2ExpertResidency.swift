@@ -111,8 +111,8 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
     let stagingBytes: Int
     /// How the staged layers' decode slots are laid out in the slabs.
     var decodeSlots: Inkling2DecodeSlots = .evenBytes
-    /// The read mode of decode-cache misses when it differs from the staged
-    /// layers' (nil: the same).
+    /// The read mode of decode-cache misses (nil: the staged layers' own,
+    /// the store's `readMode`).
     var decodeMissReadMode: Inkling2StagedReadMode? = nil
 
     /// Hosts of at least this much memory hold every layer.
@@ -122,14 +122,17 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
     static let loopedResidentMemory: UInt64 = 30 << 30
 
     /// `layerBytes[i]`: bytes of stored layer `i`'s expert file
-    /// (`experts` blobs at the layer's stride). Decode slots and the
-    /// decode-miss read mode default to the host's
-    /// (`Inkling2DecodeSlots.forHost`, `Inkling2StagedReadMode.decodeMissForHost`),
-    /// unless the experiment toggles name others.
+    /// (`experts` blobs at the layer's stride; it must be the store's expert
+    /// count, 128 for the Mini, or the plan's slab size differs from the
+    /// store's, which the runner's budget check on the store then catches).
+    /// Decode slots and the decode-miss read mode are the host's
+    /// (`Inkling2DecodeSlots.forHost`, `Inkling2StagedReadMode.decodeMissForHost`)
+    /// unless given. The experiment toggles never move the plan (it is also
+    /// the product's memory estimate); only the store applies them.
     static func make(layerBytes: [Int], loopedLayers: Range<Int>, physicalMemory: UInt64,
                      stagingSlabs slabs: Int = 2, experts: Int = 128,
                      decodeSlots: Inkling2DecodeSlots? = nil,
-                     decodeMissReadMode: Inkling2StagedReadMode?? = nil) -> Inkling2ExpertResidencyPlan {
+                     decodeMissReadMode: Inkling2StagedReadMode? = nil) -> Inkling2ExpertResidencyPlan {
         precondition(slabs >= 2, "one layer ahead needs two slabs")
         let placements: [Inkling2ExpertPlacement] = layerBytes.indices.map { layer in
             if physicalMemory >= allResidentMemory { return .resident }
@@ -142,10 +145,8 @@ struct Inkling2ExpertResidencyPlan: Equatable, Sendable {
             return Inkling2ExpertResidencyPlan(placements: placements, stagingSlabs: 0, residentBytes: resident,
                                                stagingBytes: 0)
         }
-        let slots = decodeSlots ?? Inkling2DecodeSlots.fromEnvironment ?? .forHost(physicalMemory: physicalMemory)
-        let missMode = decodeMissReadMode
-            ?? Inkling2StagedReadMode.decodeMissOverride.map { Optional($0) }
-            ?? Inkling2StagedReadMode.decodeMissForHost(physicalMemory: physicalMemory)
+        let slots = decodeSlots ?? .forHost(physicalMemory: physicalMemory)
+        let missMode = decodeMissReadMode ?? Inkling2StagedReadMode.decodeMissForHost(physicalMemory: physicalMemory)
         let strides = Dictionary(uniqueKeysWithValues: staged.map { ($0, layerBytes[$0] / experts) })
         let packing = Inkling2DecodeSlots.pack(slots, strides: strides, experts: experts, slabs: slabs)
         let pageSize = Int(getpagesize())
@@ -491,9 +492,10 @@ struct Inkling2DecodeBinding {
 ///   The slots live in the staging slabs, which decode leaves idle; a
 ///   prefill visit of a staged layer empties every cache.
 ///
-/// Both staged paths read by `readMode`: uncached (`F_NOCACHE`) by default
-/// on hosts below 48 GB, so the staged layers are not held a second time in
-/// the file cache.
+/// Prefill slab fills read by `readMode`: uncached (`F_NOCACHE`) by default
+/// below 48 GB, so whole staged layers are not held a second time in the
+/// file cache. Decode misses read by `decodeMissReadMode` when it is set:
+/// cached by default below 48 GB (option D), one expert at a time.
 ///
 /// Slot ownership: a decode visit's slots belong to its command buffer from
 /// `prepareDecodeVisit` until `endDecodeVisit`'s signal; the store waits for
@@ -624,17 +626,21 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     var waitTimeoutMS: UInt64 = 120_000
 
     /// `decodeSlots` lays out the decode slots and `decodeMissReadMode`
-    /// reads decode misses in their own mode; both default to the plan's.
+    /// reads decode misses in their own mode; unless given, the experiment
+    /// toggles (`MFERENCE_INKLING2_DECODE_SLOTS`,
+    /// `MFERENCE_INKLING2_DECODE_MISS_READS`) and then the plan's choices
+    /// apply. Slots larger than the plan's grow the slabs past its
+    /// `stagingBytes`; the runner's budget check counts the store's own.
     init(device: MTLDevice, shape: Inkling2MoEShape, layers: [Inkling2ExpertLayerSpec],
          plan: Inkling2ExpertResidencyPlan, readMode: Inkling2StagedReadMode = .forHost(),
          decodeSlots: Inkling2DecodeSlots? = nil,
-         decodeMissReadMode: Inkling2StagedReadMode?? = nil) throws {
+         decodeMissReadMode: Inkling2StagedReadMode? = nil) throws {
         precondition(layers.count == plan.placements.count)
-        let decodeSlots = decodeSlots ?? plan.decodeSlots
+        let decodeSlots = decodeSlots ?? Inkling2DecodeSlots.fromEnvironment ?? plan.decodeSlots
         self.plan = plan
         self.shape = shape
         self.readMode = readMode
-        self.decodeMissReadMode = decodeMissReadMode ?? plan.decodeMissReadMode
+        self.decodeMissReadMode = decodeMissReadMode ?? Inkling2StagedReadMode.decodeMissOverride ?? plan.decodeMissReadMode
         self.decodeSlotLayout = decodeSlots
         let pageSize = Int(getpagesize())
         guard let ones = device.makeBuffer(length: max(16, shape.experts * 4), options: .storageModeShared) else {
@@ -707,8 +713,9 @@ final class Inkling2ExpertStore: @unchecked Sendable {
 
         // Staged layers: a template over slab 0 (every staged layout must fit
         // a slab, so a visit's rebinding cannot fail after its ticket is
-        // taken), and a decode cache carved out of the slabs: the slabs'
-        // bytes shared evenly, each layer's slots inside one slab.
+        // taken), and a decode cache carved out of the slabs by
+        // `decodeSlots`: the slabs' bytes shared evenly, or equal counts
+        // packed by size; each layer's slots inside one slab.
         var caches: [Int: DecodeCache] = [:]
         if let staging {
             let perSlab = (stagedLayers.count + staging.slabs.count - 1) / staging.slabs.count

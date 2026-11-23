@@ -48,8 +48,8 @@ import MferenceValidationSupport
         // Explicit choices win over the host's.
         let chosen = Inkling2ExpertResidencyPlan.make(layerBytes: Self.miniLayerBytes, loopedLayers: 6..<18,
                                                       physicalMemory: 32 << 30, decodeSlots: .perLayer(84),
-                                                      decodeMissReadMode: .some(nil))
-        #expect(chosen.decodeSlots == .perLayer(84) && chosen.decodeMissReadMode == nil)
+                                                      decodeMissReadMode: .uncached)
+        #expect(chosen.decodeSlots == .perLayer(84) && chosen.decodeMissReadMode == .uncached)
         #expect(chosen.stagingBytes == 2 * (2 * 84 * 8_470_528 + 4 * 84 * 4_489_216))
     }
 
