@@ -40,8 +40,10 @@ struct EngineCatalogDiscoveryTests {
 
     static let standardDisk = fileSystem(
         children: ["/lib": ["/lib/gguf", "/lib/maple.gturbo", "/lib/minicpm5.gturbo",
-                            "/lib/half.gturbo", "/lib/qwen36.gturbo", "/lib/qwen38.gturbo"]],
+                            "/lib/half.gturbo", "/lib/qwen36.gturbo", "/lib/qwen38.gturbo",
+                            "/lib/inkling2mini.gturbo"]],
         probes: ["/lib/qwen36.gturbo": .complete(family: .qwen36),
+                 "/lib/inkling2mini.gturbo": .complete(family: .inkling2Loop),
                  "/lib/minicpm5.gturbo": .complete(family: .minicpm5),
                  "/lib/maple.gturbo": .complete(family: .maple),
                  "/lib/qwen38.gturbo": .complete(family: .qwen38),
@@ -51,11 +53,15 @@ struct EngineCatalogDiscoveryTests {
                   deepFile.path: .success(meta(mtp: true)),
                   "/lib/gguf/Other-Model.Q8_0.gguf": .success(meta(mtp: false, context: 8_192))])
 
-    @Test func productScopeListsExactlyTheFiveProductModels() throws {
+    /// A Mac above every product model's memory floor.
+    static let roomy: UInt64 = 64 << 30
+
+    @Test func productScopeListsExactlyTheProductModels() throws {
         let catalog = EngineCatalogDiscovery.discover(roots: [Self.library], ggufDirectories: [Self.gguf],
-                                                      fileSystem: Self.standardDisk)
+                                                      fileSystem: Self.standardDisk, physicalMemory: Self.roomy)
         #expect(catalog.models.map(\.id) == [
-            "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b", "qwen3.6-35b-a3b", "qwen3.8-27b",
+            "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b",
+            "qwen3.6-35b-a3b", "qwen3.8-27b",
         ])
         #expect(Set(catalog.models.compactMap(\.product)) == Set(EngineProductSlot.allCases))
         let deep = try #require(catalog.descriptor(for: "qwen3.8-27b"))
@@ -68,6 +74,11 @@ struct EngineCatalogDiscoveryTests {
         #expect(qwen36.format == .gturbo(family: .qwen36, checkpointID: nil))
         #expect(qwen36.contextLength == ModelFamily.qwen36.maximumContext)
         #expect(qwen36.sizeBytes == 42)
+        let inkling = try #require(catalog.descriptor(for: "inkling-2-mini-ud-q4_k_xl"))
+        #expect(inkling.product == .inkling2Mini && inkling.engine == .mference)
+        #expect(inkling.displayName == "Inkling 2 Mini")
+        #expect(inkling.format == .gturbo(family: .inkling2Loop, checkpointID: nil))
+        #expect(inkling.location == Self.dir("/lib/inkling2mini.gturbo"))
 
         // Native Qwen 3.8 is found but not offered, and says so when requested.
         #expect(catalog.descriptor(for: "qwen3.8-27b-4bit") == nil)
@@ -92,9 +103,10 @@ struct EngineCatalogDiscoveryTests {
 
     @Test func allScopeAlsoListsEverythingElseRunnable() throws {
         let catalog = EngineCatalogDiscovery.discover(roots: [Self.library], ggufDirectories: [Self.gguf],
-                                                      scope: .all, fileSystem: Self.standardDisk)
+                                                      scope: .all, fileSystem: Self.standardDisk,
+                                                      physicalMemory: Self.roomy)
         #expect(catalog.models.map(\.id) == [
-            "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "other-model.q8_0", "qwen3.5-4b",
+            "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "other-model.q8_0", "qwen3.5-4b",
             "qwen3.6-35b-a3b", "qwen3.8-27b", "qwen3.8-27b-4bit",
         ])
         let other = try #require(catalog.descriptor(for: "other-model.q8_0"))
@@ -158,6 +170,42 @@ struct EngineCatalogDiscoveryTests {
                                                       fileSystem: disk)
         #expect(catalog.models.map(\.location.path) == ["/a/Qwen3.5-4B-UD-Q4_K_XL.gguf"])
         #expect(catalog.skipped.map(\.location.path) == ["/b/Qwen3.5-4B-UD-Q4_K_XL.gguf"])
+    }
+
+    /// Inkling 2 Mini is offered from 32 GB up (launch scope): below that its
+    /// installs are skipped in either scope with the reason under its
+    /// identifier, and a request for it is told why.
+    @Test func inkling2MiniNeedsThirtyTwoGigabytes() throws {
+        let disk = Self.fileSystem(
+            children: ["/first": ["/first/inkling2mini.gturbo", "/first/aaa.gturbo"],
+                       "/second": ["/second/inkling2mini.gturbo"]],
+            probes: ["/first/inkling2mini.gturbo": .complete(family: .inkling2Loop),
+                     "/first/aaa.gturbo": .complete(family: .inkling2Loop),
+                     "/second/inkling2mini.gturbo": .complete(family: .inkling2Loop)])
+        let roots = [Self.dir("/first"), Self.dir("/second")]
+        let reason = "Needs a Mac with 32 GB of memory or more."
+        for memory: UInt64 in [16 << 30, 24 << 30, (32 << 30) - 1] {
+            for scope in [EngineCatalogScope.product, .all] {
+                let catalog = EngineCatalogDiscovery.discover(roots: roots, ggufDirectories: [], scope: scope,
+                                                              fileSystem: disk, physicalMemory: memory)
+                #expect(catalog.models.isEmpty)
+                #expect(catalog.skipped.count == 3)
+                #expect(catalog.skipped.allSatisfy { $0.reason == reason && $0.modelID == "inkling-2-mini-ud-q4_k_xl" })
+                #expect(catalog.unavailableReason(for: "inkling-2-mini-ud-q4_k_xl") == reason)
+            }
+        }
+        // From 32 GB: the earliest root, then the installer's label, wins.
+        for memory: UInt64 in [32 << 30, 64 << 30] {
+            let catalog = EngineCatalogDiscovery.discover(roots: roots, ggufDirectories: [],
+                                                          fileSystem: disk, physicalMemory: memory)
+            #expect(catalog.models.map(\.id) == ["inkling-2-mini-ud-q4_k_xl"])
+            #expect(catalog.models.first?.location == Self.dir("/first/inkling2mini.gturbo"))
+            #expect(catalog.skipped.count == 2)
+        }
+        // Only this slot has a floor of the engine's own.
+        #expect(EngineProductSlot.allCases.filter { $0.minimumPhysicalMemory != nil } == [.inkling2Mini])
+        #expect(EngineProductSlot.inkling2Mini.memoryFloorReason(physicalMemory: 32 << 30) == nil)
+        #expect(EngineProductSlot.deep.memoryFloorReason(physicalMemory: 8 << 30) == nil)
     }
 
     @Test func gatedAndPartialInstallsAreReported() {
@@ -291,6 +339,7 @@ struct EngineCatalogDiscoveryTests {
         #expect(EngineNativeModelID.modelID(for: .qwen36) == EngineProductSlot.qwen36.modelID)
         #expect(EngineNativeModelID.modelID(for: .minicpm5) == EngineProductSlot.minicpm5.modelID)
         #expect(EngineNativeModelID.modelID(for: .maple) == EngineProductSlot.maple.modelID)
+        #expect(EngineNativeModelID.modelID(for: .inkling2Loop) == EngineProductSlot.inkling2Mini.modelID)
         #expect(EngineCatalogDiscovery.ggufModelID(fileName: "Foo-Bar.Q4.gguf") == "foo-bar.q4")
     }
 

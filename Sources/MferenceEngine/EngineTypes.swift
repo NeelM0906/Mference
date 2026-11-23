@@ -36,6 +36,10 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     case minicpm5
     /// Native Maple Preview install.
     case maple
+    /// Native Inkling 2 Mini install: `unsloth/Inkling-2-Mini-GGUF`,
+    /// `Inkling-2-Mini-UD-Q4_K_XL`, copied byte for byte by `MferenceRepack
+    /// --model inkling2mini`. Offered on Macs with 32 GB or more.
+    case inkling2Mini
 
     public var modelID: String {
         switch self {
@@ -44,6 +48,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
         case .maple: "maple-preview-2bit-mlx"
+        case .inkling2Mini: "inkling-2-mini-ud-q4_k_xl"
         }
     }
 
@@ -54,14 +59,33 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .qwen36: "Qwen 3.6 35B-A3B"
         case .minicpm5: "MiniCPM5 2B"
         case .maple: "Maple Preview"
+        case .inkling2Mini: "Inkling 2 Mini"
         }
     }
 
     public var engine: EngineKind {
         switch self {
         case .quick, .deep: .llamaCpp
-        case .qwen36, .minicpm5, .maple: .mference
+        case .qwen36, .minicpm5, .maple, .inkling2Mini: .mference
         }
+    }
+
+    /// The least physical memory a Mac needs for the product to offer this
+    /// model, or nil for no floor of the engine's own. Discovery skips the
+    /// slot's install below it, with `memoryFloorReason`. (Deep's rule, more
+    /// than 16 GB, is the app's: it is still offered there with approval.)
+    public var minimumPhysicalMemory: UInt64? {
+        switch self {
+        case .inkling2Mini: 32 << 30
+        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        }
+    }
+
+    /// Why this model is not offered on a Mac with `physicalMemory` bytes, or
+    /// nil when it is.
+    public func memoryFloorReason(physicalMemory: UInt64) -> String? {
+        guard let floor = minimumPhysicalMemory, physicalMemory < floor else { return nil }
+        return "Needs a Mac with \(floor >> 30) GB of memory or more."
     }
 
     public init?(modelID: String) {
