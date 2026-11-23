@@ -454,32 +454,47 @@ struct Inkling2ServerTests {
     /// tool the request did not offer, header and body naming different
     /// tools) or one still open at EOS reaches the client as the block's body
     /// text with `finish_reason: stop` and HTTP 200, streamed or not: no
-    /// error frame, no 500, no tool call.
+    /// error frame, no 500, no tool call. Ruling B, extended: when the
+    /// request offered no tools (`tools` omitted or empty) or set
+    /// `tool_choice: "none"` (the server then offers none), any call, even a
+    /// well-formed one, names a tool not offered and is text too.
     @Test func f04MalformedToolCallsAreTextAndStop() async throws {
         try await Self.withHarness { h in
-            let tools = [Self.tool("get_weather", "Current weather for a city.")]
-            let variants: [(name: String, generates: String, body: String)] = [
-                ("invalid-json-body",
+            let question: [[String: Any]] = [["role": "user", "content": "Weather in Paris?"]]
+            let offered = Self.base(question, tools: [Self.tool("get_weather", "Current weather for a city.")])
+            var toolChoiceNone = offered
+            toolChoiceNone["tool_choice"] = "none"
+            let wellFormed = #"{"name":"get_weather","args":{"city":"Paris"}}"#
+            let call = Self.mdl + "get_weather" + Self.invoke + wellFormed + Self.end + Self.eos
+            // `engine`: the tools the server hands the engine for that request.
+            let weather = ["get_weather"], none: [String] = []
+            let variants: [(name: String, request: [String: Any], engine: [String], generates: String,
+                            body: String)] = [
+                ("invalid-json-body", offered, weather,
                  Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_weather","args":{"city":}"# + Self.end
                     + Self.eos,
                  #"{"name":"get_weather","args":{"city":}"#),
-                ("unknown-tool",
+                ("unknown-tool", offered, weather,
                  Self.mdl + "send_email" + Self.invoke + #"{"name":"send_email","args":{"to":"a@b.c"}}"# + Self.end
                     + Self.eos,
                  #"{"name":"send_email","args":{"to":"a@b.c"}}"#),
-                ("header-body-name-mismatch",
+                ("header-body-name-mismatch", offered, weather,
                  Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_time","args":{"city":"Paris"}}"# + Self.end
                     + Self.eos,
                  #"{"name":"get_time","args":{"city":"Paris"}}"#),
-                ("unclosed-at-eos",
-                 Self.mdl + "get_weather" + Self.invoke + #"{"name":"get_weather","args":{"city":"Paris"}}"#
-                    + Self.eos,
-                 #"{"name":"get_weather","args":{"city":"Paris"}}"#),
+                ("unclosed-at-eos", offered, weather,
+                 Self.mdl + "get_weather" + Self.invoke + wellFormed + Self.eos,
+                 wellFormed),
+                ("no-tools-offered", Self.base(question), none, call, wellFormed),
+                ("empty-tools", Self.base(question, tools: []), none, call, wellFormed),
+                ("tool-choice-none", toolChoiceNone, none, call, wellFormed),
             ]
             for variant in variants {
-                var body = Self.base([["role": "user", "content": "Weather in Paris?"]], tools: tools)
+                var body = variant.request
                 let (status, text, _) = try await h.run(body, generates: variant.generates)
                 #expect(status == 200, "\(variant.name): \(text)")
+                #expect(h.model.requests.last?.tools.map(\.name) == variant.engine,
+                        "\(variant.name): tools the engine was handed")
                 let s = Stream(text)
                 #expect(s.errors == 0 && s.done && s.shapeOK, "\(variant.name): \(text)")
                 #expect(s.roles == ["assistant"], "\(variant.name)")
@@ -493,6 +508,8 @@ struct Inkling2ServerTests {
                 body.removeValue(forKey: "stream_options")
                 let (plainStatus, plain, _) = try await h.run(body, generates: variant.generates)
                 #expect(plainStatus == 200, "\(variant.name): \(plain)")
+                #expect(h.model.requests.last?.tools.map(\.name) == variant.engine,
+                        "\(variant.name): tools the engine was handed (not streamed)")
                 let object = try #require(try JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any])
                 let choice = try #require((object["choices"] as? [[String: Any]])?.first)
                 let message = try #require(choice["message"] as? [String: Any])
@@ -594,36 +611,6 @@ struct Inkling2ServerTests {
             let after = try await turn([question, ["role": "assistant", "content": converted.content], thanks],
                                        Self.mdl + Self.txt + "You are welcome." + Self.end + Self.eos)
             #expect(after.prefilled == after.prompt, "a converted turn must not be reused")
-        }
-    }
-
-    /// Ruling B, extended: a call the model emits when the request offered no
-    /// tools, or set `tool_choice: "none"` (the server then offers none), is
-    /// the block as text with `stop` and HTTP 200, streamed or not.
-    @Test func callsWithNoToolsOfferedAreText() async throws {
-        try await Self.withHarness { h in
-            let body = #"{"name":"get_weather","args":{"city":"Paris"}}"#
-            let generates = Self.mdl + "get_weather" + Self.invoke + body + Self.end + Self.eos
-            let question: [[String: Any]] = [["role": "user", "content": "Weather in Paris?"]]
-            var noTools = Self.base(question)
-            var toolChoiceNone = Self.base(question, tools: [Self.tool("get_weather", "Current weather for a city.")])
-            toolChoiceNone["tool_choice"] = "none"
-            for (name, request) in [("no-tools-offered", noTools), ("tool-choice-none", toolChoiceNone)] {
-                let (status, text, _) = try await h.run(request, generates: generates)
-                #expect(status == 200, "\(name): \(text)")
-                let s = Stream(text)
-                #expect(s.errors == 0 && s.done && s.shapeOK, "\(name): \(text)")
-                #expect(s.content == body && s.toolCalls.isEmpty && s.finishReasons == ["stop"], "\(name)")
-                #expect(h.model.requests.last?.tools.isEmpty == true, "\(name): no tools reach the engine")
-            }
-            noTools["stream"] = false
-            noTools.removeValue(forKey: "stream_options")
-            let (plainStatus, plain, _) = try await h.run(noTools, generates: generates)
-            #expect(plainStatus == 200, "\(plain)")
-            let object = try #require(try JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any])
-            let choice = try #require((object["choices"] as? [[String: Any]])?.first)
-            #expect((choice["message"] as? [String: Any])?["content"] as? String == body)
-            #expect(choice["finish_reason"] as? String == "stop")
         }
     }
 
