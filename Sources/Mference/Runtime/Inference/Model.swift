@@ -699,6 +699,7 @@ extension Model {
         var inkling2Experts: Inkling2ExpertLayout?
         if expecting.family == .inkling2Loop {
             inkling2Experts = try Inkling2ExpertLayout.validated(layout: layout, config: expecting)
+            try Inkling2ResidentContract.validate(index: residentIndex, config: expecting)
         } else if layout.hasPerLayerStrides {
             throw ModelError.indexCorrupt(
                 detail: "layout.json: per-layer expert strides are not a \(expecting.family.rawValue) format")
