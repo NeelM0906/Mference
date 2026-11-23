@@ -310,37 +310,53 @@ struct I2RHeadParams {
 constant uint I2R_HEAD_ROWS_PER_SIMD = 4;
 
 // One normalized FP32 row x -> FP16 logits. Each simdgroup takes
-// I2R_HEAD_ROWS_PER_SIMD consecutive rows; lanes split each row's blocks.
+// I2R_HEAD_ROWS_PER_SIMD consecutive rows; lanes split each row's blocks
+// (lane k: blocks k, k + 32, ... in order, each summed in order, then
+// simd_sum). The simdgroup's rows run interleaved, so one x load serves them
+// all and their weight loads are in flight together; x is read from device
+// memory (it stays in cache) and a block's codes in eight 4-byte loads.
 kernel void inkling2_head_q8_0(device const float *x        [[buffer(0)]],
                                device const uchar *table    [[buffer(1)]],
                                device half *logits          [[buffer(2)]],
                                constant I2RHeadParams &p    [[buffer(3)]],
                                uint group [[threadgroup_position_in_grid]],
-                               uint tid   [[thread_index_in_threadgroup]],
                                uint simd  [[simdgroup_index_in_threadgroup]],
                                uint lane  [[thread_index_in_simdgroup]]) {
-    threadgroup float xs[4096];
-    for (uint i = tid; i < p.d; i += I2R_THREADS) { xs[i] = x[i]; }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
     const uint blocks = p.d / 32;
     const uint firstRow = (group * I2R_SIMDS + simd) * I2R_HEAD_ROWS_PER_SIMD;
+    if (firstRow >= p.rows) { return; }
+    device const uchar *rows[I2R_HEAD_ROWS_PER_SIMD];
+    float acc[I2R_HEAD_ROWS_PER_SIMD];
     for (uint k = 0; k < I2R_HEAD_ROWS_PER_SIMD; ++k) {
-        const uint r = firstRow + k;
-        if (r >= p.rows) { return; }
-        device const uchar *row = table + ulong(r) * p.rowBytes;
-        float acc = 0.0f;
-        for (uint b = lane; b < blocks; b += 32) {
-            device const uchar *block = row + b * 34;
-            const float scale = float(as_type<half>(ushort(ushort(block[0]) | (ushort(block[1]) << 8))));
+        // The simdgroup's rows at or past `rows` re-read row rows - 1 (no
+        // read past the rows asked for) and are not written.
+        rows[k] = table + ulong(min(firstRow + k, p.rows - 1)) * p.rowBytes;
+        acc[k] = 0.0f;
+    }
+    for (uint b = lane; b < blocks; b += 32) {
+        device const float4 *xb = reinterpret_cast<device const float4 *>(x + b * 32);
+        float4 xv[8];
+        for (uint j = 0; j < 8; ++j) { xv[j] = xb[j]; }
+        for (uint k = 0; k < I2R_HEAD_ROWS_PER_SIMD; ++k) {
+            device const uchar *block = rows[k] + b * 34;
+            const float scale = float(*reinterpret_cast<device const half *>(block));
+            device const packed_char4 *q = reinterpret_cast<device const packed_char4 *>(block + 2);
             float s = 0.0f;
-            for (uint j = 0; j < 32; ++j) {
-                s += float(as_type<char>(block[2 + j])) * xs[b * 32 + j];
+            for (uint j = 0; j < 8; ++j) {
+                const char4 c = char4(q[j]);
+                s += float(c.x) * xv[j].x;
+                s += float(c.y) * xv[j].y;
+                s += float(c.z) * xv[j].z;
+                s += float(c.w) * xv[j].w;
             }
-            acc += scale * s;
+            acc[k] += scale * s;
         }
-        acc = simd_sum(acc);
-        if (lane == 0) {
-            float v = acc;
+    }
+    for (uint k = 0; k < I2R_HEAD_ROWS_PER_SIMD; ++k) {
+        const float total = simd_sum(acc[k]);
+        const uint r = firstRow + k;
+        if (lane == 0 && r < p.rows) {
+            float v = total;
             if (p.softcap > 0.0f) { v = p.softcap * precise::tanh(v / p.softcap); }
             logits[r] = half(v);
         }
