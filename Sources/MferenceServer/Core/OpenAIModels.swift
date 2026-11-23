@@ -581,8 +581,12 @@ public enum OpenAIRequestValidator {
                         "invalid_tool_arguments")
                 }
                 knownCalls[call.id] = (call.function.name, false)
+                // Inkling 2 renders the arguments from their text
+                // (`HistoricalToolCall.argumentsText`); every other dialect
+                // from the parsed value, as before.
                 return MFTokenizer.HistoricalToolCall(
-                    id: call.id, name: call.function.name, arguments: arguments)
+                    id: call.id, name: call.function.name, arguments: arguments,
+                    argumentsText: dialect == .inkling2 ? call.function.arguments : nil)
             }
             if role == .tool {
                 guard let id = message.toolCallID,

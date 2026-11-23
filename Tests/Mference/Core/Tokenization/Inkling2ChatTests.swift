@@ -151,11 +151,11 @@ struct Inkling2ChatTests {
                 + tool + "get_weather" + txt + "sunny" + end)
     }
 
-    /// Known deviation, pinned on purpose: arguments arrive as `JSONValue`,
-    /// whose objects have no key order, and reach the template with sorted
-    /// keys. The template sorts the top level itself; transformers and
-    /// llama.cpp keep the order nested objects arrived in, so a nested
-    /// object written by the model in another order re-renders differently.
+    /// A call with no arguments text (the app's history today) renders from
+    /// `JSONValue`, whose objects have no key order and reach the template
+    /// with sorted keys. The template sorts the top level itself;
+    /// transformers and llama.cpp keep the order nested objects arrived in.
+    /// Calls with a text render from it (`Inkling2ToolArgumentsTests`).
     @Test func nestedArgumentsAreCompactWithRawUnicode() throws {
         let out = try render([
             Message(role: .user, content: "Grüße"),

@@ -476,11 +476,18 @@ public struct MFTokenizer: @unchecked Sendable {
         public let id: String
         public let name: String
         public let arguments: JSONValue
+        /// The arguments' JSON text, set only where the call came with one
+        /// and the dialect is Inkling 2, whose render parses it
+        /// (`Inkling2ToolArguments`) so that nested objects keep their order
+        /// and numbers their kind. Nil everywhere else: every other dialect
+        /// renders `arguments`.
+        public let argumentsText: String?
 
-        public init(id: String, name: String, arguments: JSONValue) {
+        public init(id: String, name: String, arguments: JSONValue, argumentsText: String? = nil) {
             self.id = id
             self.name = name
             self.arguments = arguments
+            self.argumentsText = argumentsText
         }
     }
 
