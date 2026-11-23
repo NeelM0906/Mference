@@ -36,8 +36,15 @@ A difference in the arguments string alone, with the parsed JSON equal, is repor
 | R1, R2 | U1's user message + a fixed assistant turn (`call_0`, `{"city":"Paris","unit":"celsius"}`) + the tool result `{"temp_c": 18, "sky": "clear"}`, 96 tokens | all | tool results fed back |
 | L1, L2 | user "Write a 250-word story about a lighthouse keeper.", 400 tokens | all | the detokenizer's window path over hundreds of tokens |
 | S1, S2 | P1 with `stop: ["\n\n"]`, 48 tokens | all | the stop matcher on the detokenizer's output |
+| S3, S4 | user "Write two short paragraphs about the sea, separated by a blank line." with `stop: ["\n\n"]`, 160 tokens | all | the stop string between visible paragraphs (added after the first run) |
 
 ## Coverage seen on 2026-11-23 (main bccd7546 against trunk 9a639656)
+
+Read these cases no wider than they are:
+- MiniCPM5's T1 and T2 are refusals (400) on both sides, so they do not exercise thinking.
+- S1 and S2 stopped on the string on MiniCPM5 only.
+- S3 and S4 were added after this run.
+
 
 - **Long visible text:** Qwen 3.6 (L: 400 visible tokens) and Maple (332). MiniCPM5's 400 tokens were hidden reasoning.
 - **The stop string:** it fired on MiniCPM5 (S: 31 tokens against P1's 37). It did not fire on Qwen 3.6 or Maple.

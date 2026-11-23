@@ -75,6 +75,9 @@ def cases(family):
     out += [("L1", base(story, 400)), ("L2", base(story, 400, **STREAM))]
     # a stop string that can straddle a token boundary (the stop matcher reads the detokenizer's output)
     out += [("S1", base(p1, 48, stop=["\n\n"])), ("S2", base(p1, 48, stop=["\n\n"], **STREAM))]
+    # the same stop string inside visible text: two paragraphs, so it fires between them
+    two = [{"role": "user", "content": "Write two short paragraphs about the sea, separated by a blank line."}]
+    out += [("S3", base(two, 160, stop=["\n\n"])), ("S4", base(two, 160, stop=["\n\n"], **STREAM))]
     return out
 
 
@@ -217,7 +220,7 @@ def compare(a_path, b_path):
             print(f"    {k[1]} {f}: B={json.dumps(vb)[:400]}")
     for side, rows in (("A", a), ("B", b)):  # stream against its non-stream twin, same side: printed, not gated
         for (m, c), r in sorted(rows.items()):
-            twin = {"P2": "P1", "T2": "T1", "U2": "U1", "R2": "R1", "L2": "L1", "S2": "S1"}.get(c)
+            twin = {"P2": "P1", "T2": "T1", "U2": "U1", "R2": "R1", "L2": "L1", "S2": "S1", "S4": "S3"}.get(c)
             if twin and (m, twin) in rows:
                 n1, n2 = rows[(m, twin)]["norm"], r["norm"]
                 fs = [f for f in ("content", "reasoning", "tool_calls", "tool_calls_raw", "finish_reason", "usage")
