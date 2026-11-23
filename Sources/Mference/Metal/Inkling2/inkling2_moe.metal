@@ -812,48 +812,80 @@ kernel void inkling2_moe_input_quant(
 
 // MARK: - Decode (one token)
 
-// Doubled E2M1 magnitudes (0, 1, 2, 3, 4, 6, 8, 12) as the nibbles of one
-// word, so a code decodes in registers.
-constant constexpr uint kI2E2M1Doubled = 0xC8643210u;
-
-static inline float i2_e2m1_doubled(uint code) {
-    const float magnitude = float((kI2E2M1Doubled >> ((code & 7u) << 2)) & 15u);
-    return as_type<float>(as_type<uint>(magnitude) | ((code & 8u) << 28));
+// NVFP4 codes decode two at a time as FP16 bit patterns: a code's three
+// magnitude bits at bits 9-11 (the exponent's low bits and the mantissa's top
+// bit) and its sign at bit 15 give its E2M1 value times 2^-14, exact for all
+// 16 codes (1 is the subnormal 2^-15). The pair is the codes in bits 0-3 and
+// 16-19 of `t`. A few integer operations per two weights, where a table
+// lookup per weight left this loop ALU-bound at about 120 GB/s.
+static inline half2 i2_e2m1_pair(uint t) {
+    return as_type<half2>(((t & 0x00070007u) << 9) | ((t & 0x00080008u) << 12));
 }
 
 // One 16-weight NVFP4 sub-block (codes in `lo4` = bytes 0..3, `hi4` = bytes
-// 4..7) against x[0..16): low nibbles are elements 0..7, high nibbles 8..15.
-static inline float i2_nvfp4_sub_dot(uint lo4, uint hi4, device const half4* x) {
-    const float4 a = float4(i2_e2m1_doubled(lo4), i2_e2m1_doubled(lo4 >> 8),
-                            i2_e2m1_doubled(lo4 >> 16), i2_e2m1_doubled(lo4 >> 24));
-    const float4 b = float4(i2_e2m1_doubled(hi4), i2_e2m1_doubled(hi4 >> 8),
-                            i2_e2m1_doubled(hi4 >> 16), i2_e2m1_doubled(hi4 >> 24));
-    const float4 c = float4(i2_e2m1_doubled(lo4 >> 4), i2_e2m1_doubled(lo4 >> 12),
-                            i2_e2m1_doubled(lo4 >> 20), i2_e2m1_doubled(lo4 >> 28));
-    const float4 d = float4(i2_e2m1_doubled(hi4 >> 4), i2_e2m1_doubled(hi4 >> 12),
-                            i2_e2m1_doubled(hi4 >> 20), i2_e2m1_doubled(hi4 >> 28));
-    return dot(a, float4(x[0])) + dot(b, float4(x[1])) + dot(c, float4(x[2])) + dot(d, float4(x[3]));
+// 4..7; low nibbles are elements 0..7, high nibbles 8..15) against
+// x[0..16) = x0..x3, times 2^-14. Each pair holds elements k and k + 2.
+static inline float i2_nvfp4_sub_dot(uint lo4, uint hi4, half4 x0, half4 x1, half4 x2, half4 x3) {
+    const half2 a = i2_e2m1_pair(lo4), b = i2_e2m1_pair(lo4 >> 8);          // 0, 2 | 1, 3
+    const half2 c = i2_e2m1_pair(hi4), d = i2_e2m1_pair(hi4 >> 8);          // 4, 6 | 5, 7
+    const half2 e = i2_e2m1_pair(lo4 >> 4), f = i2_e2m1_pair(lo4 >> 12);    // 8, 10 | 9, 11
+    const half2 g = i2_e2m1_pair(hi4 >> 4), h = i2_e2m1_pair(hi4 >> 12);    // 12, 14 | 13, 15
+    return dot(float4(a.x, b.x, a.y, b.y), float4(x0)) + dot(float4(c.x, d.x, c.y, d.y), float4(x1))
+         + dot(float4(e.x, f.x, e.y, f.y), float4(x2)) + dot(float4(g.x, h.x, g.y, h.y), float4(x3));
 }
 
-// Weights [32 g, 32 g + 32) of a row (half an NVFP4 block, or one Q8_0
-// block) against x, FP32.
+// A UE4M3 scale byte times 2^14 (undoing the codes' 2^-14): `i2_ue4m3`
+// without branches. The byte's low seven bits at FP16 bits 7-13 give the
+// value times 2^-8, subnormals included. As in `i2_ue4m3`, bit 7 is ignored
+// except that only the byte 0x7F itself is 0 (0xFF reads as 480).
+static inline float i2_ue4m3_x2p14(uint byte) {
+    const float v = float(as_type<half>(ushort((byte & 0x7Fu) << 7))) * 4194304.0f;
+    return byte == 0x7Fu ? 0.0f : v;
+}
+
+// acc plus weights [32 g, 32 g + 32) of an NVFP4 row (half a block) against
+// x, FP32. The two sub-block terms combine as fma(t1, s1, t0 * s0), then add
+// to acc, with no other contraction or reassociation: the order the compiler
+// gave the table-lookup decode, so the output is the same to the bit.
+static inline float i2_nvfp4_group_acc(device const uchar* row, uint g, device const half* x, float acc) {
+    device const half4* xv = reinterpret_cast<device const half4*>(x + g * 32u);
+    device const uchar* block = row + (g / 2u) * 36u;
+    const uint part = g % 2u;
+    const ushort scales = *reinterpret_cast<device const ushort*>(block + part * 2u);
+    const packed_uint4 q = *reinterpret_cast<device const packed_uint4*>(block + 4u + part * 16u);
+    const half4 x0 = xv[0], x1 = xv[1], x2 = xv[2], x3 = xv[3], x4 = xv[4], x5 = xv[5], x6 = xv[6], x7 = xv[7];
+    const float t0 = i2_nvfp4_sub_dot(q.x, q.y, x0, x1, x2, x3);
+    const float t1 = i2_nvfp4_sub_dot(q.z, q.w, x4, x5, x6, x7);
+    const float s0 = i2_ue4m3_x2p14(scales & 0xFFu), s1 = i2_ue4m3_x2p14(scales >> 8);
+    {
+        #pragma clang fp contract(off) reassociate(off)
+        const float c = fma(t1, s1, t0 * s0);
+        return acc + c;
+    }
+}
+
+// One lane's share of an NVFP4 row's dot with x: groups lane % 4, + 4, ...
+// summed in order, two per step.
+static inline float i2_nvfp4_lane_dot(device const uchar* row, uint groups, uint lane, device const half* x) {
+    float acc = 0.0f;
+    uint g = lane % 4u;
+    for (; g + 4u < groups; g += 8u) {
+        acc = i2_nvfp4_group_acc(row, g, x, acc);
+        acc = i2_nvfp4_group_acc(row, g + 4u, x, acc);
+    }
+    for (; g < groups; g += 4u) acc = i2_nvfp4_group_acc(row, g, x, acc);
+    return acc;
+}
+
+// Weights [32 g, 32 g + 32) of a Q8_0 row (one block) against x, FP32.
 static inline float i2_group_dot(device const uchar* row, uint g, device const half* x) {
     device const half4* xv = reinterpret_cast<device const half4*>(x + g * 32u);
-    if (kI2Encoding == kI2NVFP4) {
-        device const uchar* block = row + (g / 2u) * 36u;
-        const uint part = g % 2u;
-        const ushort scales = *reinterpret_cast<device const ushort*>(block + part * 2u);
-        const packed_uint4 q = *reinterpret_cast<device const packed_uint4*>(block + 4u + part * 16u);
-        return i2_nvfp4_sub_dot(q.x, q.y, xv) * (i2_ue4m3(scales & 0xFFu) * 0.5f)
-             + i2_nvfp4_sub_dot(q.z, q.w, xv + 4) * (i2_ue4m3(scales >> 8) * 0.5f);
-    } else {
-        device const uchar* block = row + g * 34u;
-        const float scale = float(*reinterpret_cast<device const half*>(block));
-        device const packed_char4* q = reinterpret_cast<device const packed_char4*>(block + 2u);
-        float sum = 0.0f;
-        I2_UNROLL for (uint i = 0; i < 8; ++i) sum += dot(float4(char4(q[i])), float4(xv[i]));
-        return sum * scale;
-    }
+    device const uchar* block = row + g * 34u;
+    const float scale = float(*reinterpret_cast<device const half*>(block));
+    device const packed_char4* q = reinterpret_cast<device const packed_char4*>(block + 2u);
+    float sum = 0.0f;
+    I2_UNROLL for (uint i = 0; i < 8; ++i) sum += dot(float4(char4(q[i])), float4(xv[i]));
+    return sum * scale;
 }
 
 // Gate-up and SITU for one token's experts: grid (F / 16, top_k), four
@@ -877,7 +909,11 @@ kernel void inkling2_moe_decode_gate_up(
     device const uchar* w = pool + ulong(expert) * p.expert_stride + p.gate_up_offset + ulong(row) * row_bytes;
     const uint groups = p.D / 32u;
     float acc = 0.0f;
-    for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, x);
+    if (kI2Encoding == kI2NVFP4) {
+        acc = i2_nvfp4_lane_dot(w, groups, lane, x);
+    } else {
+        for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, x);
+    }
     acc += simd_shuffle_xor(acc, 1);
     acc += simd_shuffle_xor(acc, 2);
     const float up = simd_shuffle_down(acc, 16);
@@ -911,7 +947,11 @@ kernel void inkling2_moe_decode_down(
         device const uchar* w = pool + ulong(expert) * p.expert_stride + p.down_offset + ulong(row) * row_bytes;
         device const half* act = activation + ulong(r) * p.F;
         float acc = 0.0f;
-        for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, act);
+        if (kI2Encoding == kI2NVFP4) {
+            acc = i2_nvfp4_lane_dot(w, groups, lane, act);
+        } else {
+            for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, act);
+        }
         acc += simd_shuffle_xor(acc, 1);
         acc += simd_shuffle_xor(acc, 2);
         const float weight = (p.flags & 1u) != 0u ? 1.0f : route_weights[r];
