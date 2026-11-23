@@ -260,6 +260,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     }
     private(set) var decodeCacheStats = DecodeCacheStats()
     private let logsDecodeCache = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_CACHE_LOG"] != nil
+    /// Diagnostic (`MFERENCE_INKLING2_DECODE_TIMELINE`; `2` adds each
+    /// buffer): per decoded token, the command buffers, the CPU's waits on
+    /// them and the GPU's own start and end times, printed to stderr.
+    private let decodeTimeline = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_TIMELINE"]
 
     /// Diagnostic and golden hook: while set, every chunk copies each
     /// visit's output, the running block sum (FP32 `[48][rows][d]`), and the
@@ -561,6 +565,19 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         var cb = try commandBuffer()
         var committed: [MTLCommandBuffer] = []
         var pending: MTLCommandBuffer? = cb
+        let timesBuffers = decodeTimeline != nil && t == 1
+        let runStarted = Self.hostSeconds()
+        let statsBefore = decodeCacheStats
+        var blocked: Double = 0, waits = 0
+        /// Waits for every committed buffer (timed for the decode timeline).
+        func waitAll() {
+            let started = timesBuffers ? Self.hostSeconds() : 0
+            committed.forEach { $0.waitUntilCompleted() }
+            if timesBuffers {
+                blocked += Self.hostSeconds() - started
+                waits += 1
+            }
+        }
         /// Commits the buffer being encoded and starts the next.
         func nextBuffer() throws {
             cb.commit()
@@ -577,7 +594,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 committed.append(open)
                 pending = nil
             }
-            committed.forEach { $0.waitUntilCompleted() }
+            waitAll()
         }
         func encode(_ body: (MTLComputeCommandEncoder) -> Void) {
             let enc = cb.makeComputeCommandEncoder()!
@@ -589,7 +606,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         /// every earlier command completed), and returns the next buffer.
         func split() throws -> MTLCommandBuffer {
             try nextBuffer()
-            committed.forEach { $0.waitUntilCompleted() }
+            waitAll()
             if let failed = committed.first(where: { $0.status != .completed }) {
                 throw Inkling2ForwardRunnerError.commandFailed(
                     failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
@@ -732,6 +749,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             throw Inkling2ForwardRunnerError.commandFailed(
                 failed.error?.localizedDescription ?? "Inkling 2 command buffer did not complete")
         }
+        if timesBuffers {
+            reportDecodeTimeline(committed, started: runStarted, blocked: blocked, waits: waits, position: start,
+                                 before: statsBefore)
+        }
         state.advance(by: t)
         chunkState.markCommitted()
     }
@@ -765,6 +786,36 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         kernels.encodeHead(enc, x: s.finalRow, xOffset: d * 4, table: w.dense, tableOffset: w.output,
                            rowBytes: d / 32 * 34, rows: w.vocab, softcap: w.finalLogitSoftcap,
                            logits: logits, logitsOffset: logitsOffset, d: d)
+    }
+
+    /// Host time in seconds, the clock of `gpuStartTime` / `gpuEndTime`.
+    private static func hostSeconds() -> Double { Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9 }
+
+    /// One decoded token's timeline on stderr: wall time, the buffers and the
+    /// CPU's waits on them, the staged visits' readbacks and slot loads, and
+    /// the GPU's busy time and idle gaps between buffers.
+    private func reportDecodeTimeline(_ buffers: [MTLCommandBuffer], started: Double, blocked: Double, waits: Int,
+                                      position: Int, before: DecodeCacheStats) {
+        let ended = Self.hostSeconds()
+        let spans = buffers.map { ($0.gpuStartTime, $0.gpuEndTime) }
+        let busy = spans.reduce(0.0) { $0 + max(0, $1.1 - $1.0) }
+        let gaps = spans.indices.dropFirst().map { max(0, spans[$0].0 - spans[$0 - 1].1) }
+        let after = decodeCacheStats
+        let ms = { (seconds: Double) in seconds * 1000 }
+        var line = String(
+            format: "inkling2 decode timeline: position %d wall %.2f ms | buffers %d waits %d blocked %.2f ms | "
+                + "staged visits %d readback %.2f ms prepare %.2f ms hits %d misses %d | GPU busy %.2f ms, "
+                + "gaps %.2f ms (largest %.2f) | first GPU start after %.2f ms, last GPU end to return %.2f ms\n",
+            position, ms(ended - started), buffers.count, waits, ms(blocked), after.visits - before.visits,
+            ms(after.readbackSeconds - before.readbackSeconds), ms(after.seconds - before.seconds),
+            after.hits - before.hits, after.misses - before.misses, ms(busy), ms(gaps.reduce(0, +)),
+            ms(gaps.max() ?? 0), ms((spans.first?.0 ?? started) - started), ms(ended - (spans.last?.1 ?? ended)))
+        if decodeTimeline == "2" {
+            line += "inkling2 decode timeline buffers (GPU ms, gap before ms): "
+                + spans.indices.map { String(format: "%.2f/%.2f", ms(spans[$0].1 - spans[$0].0),
+                                             $0 == 0 ? 0 : ms(gaps[$0 - 1])) }.joined(separator: " ") + "\n"
+        }
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     // MARK: One visit
