@@ -217,7 +217,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
 
     let maxContext: Int
     let maxChunkTokens: Int
-    private let w: Inkling2RunnerWeights
+    let w: Inkling2RunnerWeights
     private let ctx: MetalContext
     private let inputNorm: Inkling2InputNorm
     private let projection: Inkling2Projection
@@ -245,13 +245,15 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     private let gateZ: MTLBuffer
     private let moe: Inkling2MoEKernels
     private let kernels: Inkling2RunnerKernels
-    private let state: Inkling2AttentionState
+    let state: Inkling2AttentionState
     private let moeShape: Inkling2MoEShape
     private let scratch: Scratch
-    private var chunkState = PrefillChunkCommitState()
+    private(set) var chunkState = PrefillChunkCommitState()
     /// Set once the expert source can no longer be trusted (a staging or
     /// abandon failure); every later chunk refuses until the model reloads.
-    private var expertsFailed: String?
+    /// Set only by the prefill path (`run`, `prefillChunked`) and the
+    /// prefix-snapshot restore, never cleared.
+    var expertsFailed: String?
     /// Staged decode visits so far, for diagnostics: slot-cache hits and
     /// misses, CPU time in `beginDecodeVisit` (the miss reads), and the
     /// route readbacks (how long the CPU waited for the GPU to finish

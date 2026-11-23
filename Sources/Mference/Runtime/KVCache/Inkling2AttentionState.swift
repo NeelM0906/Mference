@@ -239,10 +239,14 @@ public final class Inkling2AttentionState {
 
     /// Bytes a snapshot at the current position takes.
     public func snapshotBytes(includeGlobalRows: Bool) -> Int {
+        snapshotBytes(at: position, includeGlobalRows: includeGlobalRows)
+    }
+
+    private func snapshotBytes(at position: Int, includeGlobalRows: Bool) -> Int {
         Self.headerBytes
             + Inkling2VisitPlan.visitCount * Inkling2VisitTails.floatsPerVisit * 4
             + Inkling2VisitPlan.windowSlots.count * 2 * ringRows(at: position) * Self.rowBytes
-            + (includeGlobalRows ? Inkling2VisitPlan.globalSlots.count * 2 * position * Self.rowBytes : 0)
+            + (includeGlobalRows ? Self.globalRowBytes(tokens: position) : 0)
     }
 
     /// Copies the state at the current position into `region`. Leaves the
@@ -310,6 +314,24 @@ public final class Inkling2AttentionState {
         let target = snapshot.position
         if snapshot.includesGlobalRows { try ensureCapacity(tokens: target) }
 
+        var offset = copyTailsAndRings(from: region, at: target)
+        if snapshot.includesGlobalRows {
+            for i in 0..<globalKeys.count {
+                for buffer in [globalKeys[i], globalValues[i]] {
+                    memcpy(buffer.contents(), region.base + offset, target * Self.rowBytes)
+                    offset += target * Self.rowBytes
+                }
+            }
+        }
+        // Global rows restored from a snapshot come from another timeline as
+        // far as later light snapshots know: every global row was rewritten.
+        noteRewind(to: snapshot.includesGlobalRows ? 0 : target)
+        position = target
+    }
+
+    /// Copies a snapshot's tails and ring rows at `target` from `region` into
+    /// the state; returns the offset just past them.
+    private func copyTailsAndRings(from region: PrefixSnapshotRegion, at target: Int) -> Int {
         var offset = Self.headerBytes
         memcpy(tailBuffer.contents(), region.base + offset, tailBuffer.length)
         offset += tailBuffer.length
@@ -322,17 +344,104 @@ public final class Inkling2AttentionState {
                 }
             }
         }
-        if snapshot.includesGlobalRows {
+        return offset
+    }
+
+    // MARK: Prefix snapshots for the multi-prefix cache
+    //
+    // The runner's `PrefixStateSnapshotting` maps the protocol's KV rows to
+    // the global visits' linear rows, and its recurrent state to a light
+    // snapshot: the tails and the last `window - 1` rows of every ring. The
+    // rings cannot be part of a row image `[0, L)`: a ring holds only its last
+    // `ringCapacity` positions. `PrefixStateCache` owns the lineage (it moves
+    // or drops every retained prefix whose rows a request will overwrite), so
+    // these restores do not consult the rewind log (`canRestore`), which would
+    // refuse a valid prefix after an image restore. They still record their
+    // rewinds in it for the snapshot API above.
+
+    /// Bytes of the global visits' rows `[0, tokens)`, keys and values.
+    public static func globalRowBytes(tokens: Int) -> Int {
+        Inkling2VisitPlan.globalSlots.count * 2 * tokens * rowBytes
+    }
+
+    /// Copies the global visits' rows `[0, count)` into `region`: each global
+    /// visit in order, its keys then its values. Leaves the state unchanged.
+    /// The caller has drained GPU work.
+    public func copyGlobalRows(count: Int, into region: PrefixSnapshotRegion) throws {
+        guard count > 0, count <= position else {
+            throw PrefixSnapshotError.outOfRange("global rows 0..<\(count) with the cursor at \(position)")
+        }
+        let needed = Self.globalRowBytes(tokens: count)
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        var offset = 0
+        for i in 0..<globalKeys.count {
+            for buffer in [globalKeys[i], globalValues[i]] {
+                memcpy(region.base + offset, buffer.contents(), count * Self.rowBytes)
+                offset += count * Self.rowBytes
+            }
+        }
+    }
+
+    /// Throws unless `restorePrefix` with these arguments would restore: the
+    /// region holds a light snapshot at `target` for this window, the image
+    /// covers `target` and fits its region, or, without one, `target` is at
+    /// or below the cursor. Changes nothing.
+    public func checkPrefixRestore(globalRows: (region: PrefixSnapshotRegion, count: Int)?, position target: Int,
+                                   light: PrefixSnapshotRegion) throws {
+        guard target > 0, target <= configuration.maxContext else {
+            throw PrefixSnapshotError.outOfRange("prefix restore to \(target) with maxContext \(configuration.maxContext)")
+        }
+        let lightBytes = snapshotBytes(at: target, includeGlobalRows: false)
+        guard light.byteCount >= lightBytes else {
+            throw PrefixSnapshotError.regionTooSmall(needed: lightBytes, available: light.byteCount)
+        }
+        var header = [UInt64](repeating: 0, count: 8)
+        header.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, light.base, Self.headerBytes) }
+        guard header[0] == Self.magic, header[1] == Self.version, header[2] == UInt64(target),
+              header[3] == UInt64(configuration.window), header[4] == 0, header[6] == UInt64(lightBytes) else {
+            throw PrefixSnapshotError.unsupported("region does not hold a light snapshot at \(target)")
+        }
+        if let globalRows {
+            guard globalRows.count >= target, globalRows.count <= configuration.maxContext else {
+                throw PrefixSnapshotError.outOfRange(
+                    "restore of global rows 0..<\(globalRows.count) to \(target) with maxContext \(configuration.maxContext)")
+            }
+            let needed = Self.globalRowBytes(tokens: globalRows.count)
+            guard globalRows.region.byteCount >= needed else {
+                throw PrefixSnapshotError.regionTooSmall(needed: needed, available: globalRows.region.byteCount)
+            }
+        } else {
+            guard target <= position else {
+                throw PrefixSnapshotError.outOfRange("rewind to \(target) with the cursor at \(position)")
+            }
+        }
+    }
+
+    /// Restores the prefix ending at `target` from `light`, a snapshot taken
+    /// there without global rows (`takeSnapshot(into:includeGlobalRows: false)`),
+    /// whose record is read from its header. With `globalRows`, its rows
+    /// `[0, count)` (`copyGlobalRows`) are copied in first, and `target <=
+    /// count`. Without, the caller vouches that the live global rows below
+    /// `target` are still the prefix's, and `target <=` the cursor. Every
+    /// check (`checkPrefixRestore`) runs before the first copy, and nothing
+    /// throws after it. The caller has drained GPU work.
+    public func restorePrefix(globalRows: (region: PrefixSnapshotRegion, count: Int)?, position target: Int,
+                              light: PrefixSnapshotRegion) throws {
+        try checkPrefixRestore(globalRows: globalRows, position: target, light: light)
+        if let globalRows {
+            try ensureCapacity(tokens: globalRows.count)
+            var offset = 0
             for i in 0..<globalKeys.count {
                 for buffer in [globalKeys[i], globalValues[i]] {
-                    memcpy(buffer.contents(), region.base + offset, target * Self.rowBytes)
-                    offset += target * Self.rowBytes
+                    memcpy(buffer.contents(), globalRows.region.base + offset, globalRows.count * Self.rowBytes)
+                    offset += globalRows.count * Self.rowBytes
                 }
             }
         }
-        // Global rows restored from a snapshot come from another timeline as
-        // far as later light snapshots know: every global row was rewritten.
-        noteRewind(to: snapshot.includesGlobalRows ? 0 : target)
+        _ = copyTailsAndRings(from: light, at: target)
+        noteRewind(to: globalRows == nil ? target : 0)
         position = target
     }
 }
