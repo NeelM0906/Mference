@@ -4,10 +4,12 @@ import Testing
 @testable import Mference
 import MferenceValidationSupport
 
-/// The NVFP4 expert decode (`inkling2_moe_decode_gate_up` / `_down`), which
-/// turns codes into FP16 bit patterns two at a time and walks each lane's
-/// 32-weight groups two per step, against the CPU reference
-/// (`Inkling2ExpertRef.routedSum`):
+/// The NVFP4 expert decode (`inkling2_moe_decode_gate_up` / `_down`) against
+/// the CPU reference (`Inkling2ExpertRef.routedSum`), in both of its paths:
+/// the table decode always, and the pair decode (codes as FP16 bit patterns
+/// two at a time, lanes walking their 32-weight groups two per step) where
+/// this GPU's probe passes, with the two paths' outputs equal to the bit.
+/// Cases:
 /// - shapes whose group counts leave lanes with odd and unequal numbers of
 ///   groups, so the paired loop and its tail both run (random blocks, scale
 ///   bytes drawn from all 256 values, where the largest scales carry the
@@ -29,7 +31,10 @@ import MferenceValidationSupport
     private static func check(_ context: MetalContext, _ synthetic: Inkling2SyntheticPool, seed: UInt64,
                               label: String) throws {
         let shape = synthetic.shape
-        let kernels = try Inkling2MoEKernels(context: context)
+        let probed = try Inkling2MoEKernels(context: context)
+        var paths: [(Inkling2MoEKernels.NVFP4Decode, Inkling2MoEKernels)] =
+            [(.table, try Inkling2MoEKernels(context: context, nvfp4Decode: .table))]
+        if probed.nvfp4Decode == .pairs { paths.append((.pairs, probed)) }
         let (x, rows) = Inkling2MoETestSupport.halfBuffer(context.device, rows: 1, stride: shape.d, d: shape.d,
                                                           seed: seed &+ 1)
         let routes = Inkling2MoETestSupport.randomRoutes(tokens: 1, experts: shape.experts, topK: shape.topK,
@@ -38,25 +43,34 @@ import MferenceValidationSupport
         let weights = context.device.makeBuffer(length: shape.topK * 4, options: .storageModeShared)!
         Inkling2MoETestSupport.write(routes.ids, to: ids)
         Inkling2MoETestSupport.write(routes.weights, to: weights)
-        let activation = context.device.makeBuffer(length: shape.topK * shape.f * 2, options: .storageModeShared)!
-        let out = context.device.makeBuffer(length: shape.d * 4, options: .storageModeShared)!
-        let cb = Inkling2MoETestSupport.run(context) {
-            kernels.encodeDecode($0, shape: shape, x: x, ids: ids, routeWeights: weights, pool: synthetic.pool,
-                                 activation: activation, out: out)
-        }
-        #expect(cb.status == .completed)
-        let got = Inkling2MoETestSupport.read(out, as: Float.self, count: shape.d)
         let experts = (0..<shape.experts).map { synthetic.expert($0) }
         let want = Inkling2ExpertRef.routedSum(experts: { experts[$0] }, ids: routes.ids.map { Int($0) },
                                                weights: routes.weights, x: rows[0])
-        let finite = got.allSatisfy { $0.isFinite }
-        #expect(finite)
-        let err = RelError.computeStrict(actual: got, reference: want)
-        #expect(err < Tolerance.fp16Reduction, "rel err \(err)")
-        let l1 = zip(got, want).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / want.reduce(Float(0)) { $0 + abs($1) }
-        #expect(l1 < Tolerance.fp16Reduction, "L1 rel err \(l1)")
-        print(String(format: "[ink2-nvfp4-decode] %@, d %d f %d experts %d top-%d: rel err %.2e, L1 %.2e",
-                     label, shape.d, shape.f, shape.experts, shape.topK, err, l1))
+        var bits: [(activation: [UInt16], out: [UInt32])] = []
+        for (path, kernels) in paths {
+            let activation = context.device.makeBuffer(length: shape.topK * shape.f * 2, options: .storageModeShared)!
+            let out = context.device.makeBuffer(length: shape.d * 4, options: .storageModeShared)!
+            let cb = Inkling2MoETestSupport.run(context) {
+                kernels.encodeDecode($0, shape: shape, x: x, ids: ids, routeWeights: weights, pool: synthetic.pool,
+                                     activation: activation, out: out)
+            }
+            #expect(cb.status == .completed)
+            let got = Inkling2MoETestSupport.read(out, as: Float.self, count: shape.d)
+            let finite = got.allSatisfy { $0.isFinite }
+            #expect(finite, "\(path)")
+            let err = RelError.computeStrict(actual: got, reference: want)
+            #expect(err < Tolerance.fp16Reduction, "\(path) rel err \(err)")
+            let l1 = zip(got, want).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / want.reduce(Float(0)) { $0 + abs($1) }
+            #expect(l1 < Tolerance.fp16Reduction, "\(path) L1 rel err \(l1)")
+            print(String(format: "[ink2-nvfp4-decode] %@, %@ decode, d %d f %d experts %d top-%d: rel err %.2e, L1 %.2e",
+                         label, "\(path)", shape.d, shape.f, shape.experts, shape.topK, err, l1))
+            bits.append((Inkling2MoETestSupport.read(activation, as: UInt16.self, count: shape.topK * shape.f),
+                         got.map(\.bitPattern)))
+        }
+        if bits.count == 2 {
+            #expect(bits[0].activation == bits[1].activation, "the pair and table decodes' activations differ")
+            #expect(bits[0].out == bits[1].out, "the pair and table decodes' outputs differ")
+        }
     }
 
     /// UE4M3 as the kernels read it (`i2_ue4m3`): bit 7 ignored, the byte 0x7F zero.
@@ -64,6 +78,34 @@ import MferenceValidationSupport
         if byte == 0 || byte == 0x7F { return 0 }
         let e = Int(byte >> 3) & 15, m = Float(byte & 7)
         return e == 0 ? m * 0.001953125 : Float(sign: .plus, exponent: e - 7, significand: 1 + m / 8)
+    }
+
+    /// The probe gives the same answer each time, and one line says which.
+    @Test func probeIsStable() throws {
+        let context = try MetalContext()
+        let first = try Inkling2MoEKernels(context: context).nvfp4Decode
+        let second = try Inkling2MoEKernels(context: context).nvfp4Decode
+        #expect(first == second)
+        print("[ink2-nvfp4-decode] probe on \(context.device.name): \(first) decode")
+    }
+
+    /// The probe's check: the exact values pass; a flushed code 1 or 9 (0.5
+    /// as the FP16 subnormal 2^-15), a flushed subnormal scale byte (0x01,
+    /// 0x87), a NaN or a short read select the table decode.
+    @Test func probeRejectsFlushedSubnormals() {
+        let exact = Inkling2MoEKernels.nvfp4ProbeExpected
+        #expect(exact.count == 16 + 256)
+        #expect(exact[1] == 16 * 0.5 / 16384 && exact[16 + 0x01] == 0.001953125 * 16384)
+        #expect(Inkling2MoEKernels.nvfp4ProbeIsExact(exact))
+        for index in [1, 9, 16 + 0x01, 16 + 0x87] {
+            var flushed = exact
+            flushed[index] = 0
+            #expect(!Inkling2MoEKernels.nvfp4ProbeIsExact(flushed), "flushed output \(index) passed")
+        }
+        var nan = exact
+        nan[100] = .nan
+        #expect(!Inkling2MoEKernels.nvfp4ProbeIsExact(nan))
+        #expect(!Inkling2MoEKernels.nvfp4ProbeIsExact(Array(exact.dropLast())))
     }
 
     /// d 384: 12 groups, three per lane (one pair and the tail). f 320: 10
