@@ -167,6 +167,10 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
     /// The product slot this model fills, or nil for a model listed only by
     /// the developer scope `EngineCatalogScope.all`.
     public let product: EngineProductSlot?
+    /// The most context this Mac's memory allows the model, below its native
+    /// context, or nil for none (`ModelFamily.memoryContextCap`: Inkling 2 on
+    /// hosts under 48 GB). Any request, `max` included, is lowered to it.
+    public let hostContextCap: Int?
 
     /// The context a GGUF model runs with when none is requested (spec
     /// section 3); a backend may still lower it where memory requires.
@@ -176,11 +180,12 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
     /// `/v1/models` before anything is loaded. Nil asks for the default: the
     /// native maximum of a `.gturbo` install (the server's `--max-context
     /// max`), `defaultGGUFContext` for a GGUF. A GGUF never runs past its
-    /// native context.
+    /// native context; a `.gturbo` model never past its `hostContextCap`.
     public func resolvedContext(requested: Int?) -> Int {
         switch format {
         case .gturbo:
-            return requested ?? contextLength
+            let context = requested ?? contextLength
+            return hostContextCap.map { min(context, $0) } ?? context
         case .gguf:
             return min(requested ?? Self.defaultGGUFContext, contextLength)
         }
@@ -202,7 +207,8 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
                 location: URL,
                 sizeBytes: UInt64,
                 contextLength: Int,
-                product: EngineProductSlot?) {
+                product: EngineProductSlot?,
+                hostContextCap: Int? = nil) {
         self.id = id
         self.displayName = displayName
         self.engine = engine
@@ -211,6 +217,7 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
         self.sizeBytes = sizeBytes
         self.contextLength = contextLength
         self.product = product
+        self.hostContextCap = hostContextCap
     }
 }
 

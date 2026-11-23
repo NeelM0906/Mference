@@ -140,12 +140,24 @@ public actor NativeEngineModel: EngineModel {
     private var promptCache = PromptPrefixCache()
     private let onNotice: @Sendable (NativeBackendNotice) -> Void
 
+    /// The context a load runs with: the descriptor's resolution (the
+    /// request, or the native context for `max`, lowered to its host cap),
+    /// lowered again by the family's cap for this Mac's memory, so a
+    /// descriptor not built by discovery is capped too. For every family
+    /// without a host cap this is `options.nativeMaxContext ??
+    /// family.maximumContext`, as before.
+    static func loadContext(descriptor: EngineModelDescriptor, options: EngineLoadOptions, family: ModelFamily,
+                            physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let resolved = descriptor.resolvedContext(options: options)
+        return family.memoryContextCap(physicalMemory: physicalMemory).map { min(resolved, $0) } ?? resolved
+    }
+
     static func load(descriptor: EngineModelDescriptor,
                      options: EngineLoadOptions,
                      onNotice: @escaping @Sendable (NativeBackendNotice) -> Void) async throws -> NativeEngineModel {
         let modelDirectory = descriptor.location
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
-        let maxContext = options.nativeMaxContext ?? family.maximumContext
+        let maxContext = loadContext(descriptor: descriptor, options: options, family: family)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw MFTokenizerError.missingTokenizerSidecar(

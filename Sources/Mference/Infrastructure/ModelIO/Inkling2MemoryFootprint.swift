@@ -73,3 +73,38 @@ public struct Inkling2MemoryFootprint: Sendable, Equatable {
                                        globalKVBytesPerToken: kvPerToken)
     }
 }
+
+extension Inkling2MemoryFootprint {
+    /// The context Inkling 2 runs with at most on a host where the residency
+    /// plan stages layers (it cannot hold every layer's experts): 40,960
+    /// tokens, whose global KV is 1.25 GiB beside the about 12.2 GB the plan
+    /// keeps resident. Room for the acceptance run's longest case (about 26K
+    /// prompt tokens and a 4,096-token completion) with margin; the program
+    /// coordinator's choice (2026-11-23), reversible here alone.
+    public static let stagedHostContextCap = 40_960
+
+    /// `stagedHostContextCap` when `Inkling2ExpertResidencyPlan.make` stages
+    /// any layer on a host with `physicalMemory` (under 48 GB today), else
+    /// nil: the threshold is the plan's, not restated here.
+    public static func contextCap(physicalMemory: UInt64, config: ArchConfig = .inkling2Mini) -> Int? {
+        guard let layerBytes = expertLayerBytes(config: config) else { return nil }
+        let ink = config.inkling2
+        let plan = Inkling2ExpertResidencyPlan.make(layerBytes: layerBytes.map { Int($0) },
+                                                    loopedLayers: ink.loopCoreStart..<ink.loopCoreEnd,
+                                                    physicalMemory: physicalMemory)
+        return plan.placements.contains(.staged) ? stagedHostContextCap : nil
+    }
+}
+
+extension ModelFamily {
+    /// The context a host with `physicalMemory` allows this family when that
+    /// is below its native context, else nil. Only Inkling 2 has one
+    /// (`Inkling2MemoryFootprint.contextCap`); every other family runs to its
+    /// native context.
+    public func memoryContextCap(physicalMemory: UInt64) -> Int? {
+        switch self {
+        case .inkling2Loop: Inkling2MemoryFootprint.contextCap(physicalMemory: physicalMemory)
+        case .qwen36, .qwen38, .maple, .minicpm5: nil
+        }
+    }
+}

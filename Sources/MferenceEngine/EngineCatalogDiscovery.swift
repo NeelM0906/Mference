@@ -208,7 +208,7 @@ public enum EngineCatalogDiscovery {
             }) else { continue }
             winners[slot.modelID] = winner
             models.append(nativeDescriptor(winner, id: slot.modelID, displayName: slot.displayName,
-                                           product: slot, fileSystem: fileSystem))
+                                           product: slot, fileSystem: fileSystem, physicalMemory: physicalMemory))
         }
         let others = found.filter { winners[$0.identifier]?.directory != $0.directory }
         switch scope {
@@ -230,7 +230,8 @@ public enum EngineCatalogDiscovery {
         case .all:
             for (install, id) in assignIdentifiers(others, reserved: Set(winners.keys)) {
                 models.append(nativeDescriptor(install, id: id, displayName: id,
-                                               product: nil, fileSystem: fileSystem))
+                                               product: nil, fileSystem: fileSystem,
+                                               physicalMemory: physicalMemory))
             }
         }
 
@@ -344,9 +345,12 @@ public enum EngineCatalogDiscovery {
         }
     }
 
+    /// A native install's descriptor. `hostContextCap` is the family's cap
+    /// for this Mac's memory, if it has one (Inkling 2 under 48 GB).
     private static func nativeDescriptor(_ install: NativeInstall, id: String, displayName: String,
                                          product: EngineProductSlot?,
-                                         fileSystem: FileSystem) -> EngineModelDescriptor {
+                                         fileSystem: FileSystem,
+                                         physicalMemory: UInt64) -> EngineModelDescriptor {
         EngineModelDescriptor(
             id: id,
             displayName: displayName,
@@ -355,7 +359,8 @@ public enum EngineCatalogDiscovery {
             location: install.directory,
             sizeBytes: fileSystem.size(install.directory),
             contextLength: install.family.maximumContext,
-            product: product)
+            product: product,
+            hostContextCap: install.family.memoryContextCap(physicalMemory: physicalMemory))
     }
 
     /// The server's rule: the family identifier when alone, else

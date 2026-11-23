@@ -138,7 +138,8 @@ public final class ServerModelLibrary: Sendable {
         arguments: ServerArguments,
         ggufDirectories: [URL]? = nil,
         fileSystem: EngineCatalogDiscovery.FileSystem = .live,
-        backends: [any EngineBackend]? = nil
+        backends: [any EngineBackend]? = nil,
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) -> ServerModelLibrary {
         // Production: the engine's native backend (its notices in the server
         // log) and llama.cpp for GGUF models. Tests pass scripted backends.
@@ -149,7 +150,8 @@ public final class ServerModelLibrary: Sendable {
             ggufDirectories: ggufDirectories ?? EngineCatalogDiscovery.defaultGGUFDirectories(roots: roots),
             scope: arguments.catalogScope,
             explicitModel: explicitModel,
-            fileSystem: fileSystem)
+            fileSystem: fileSystem,
+            physicalMemory: physicalMemory)
         let catalog = ServerEngineCatalog.servable(discovered, engines: Set(backends.map(\.engine)))
         return ServerModelLibrary(catalog: catalog,
                                   backends: backends,

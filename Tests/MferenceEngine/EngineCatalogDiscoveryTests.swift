@@ -74,6 +74,7 @@ struct EngineCatalogDiscoveryTests {
         #expect(qwen36.format == .gturbo(family: .qwen36, checkpointID: nil))
         #expect(qwen36.contextLength == ModelFamily.qwen36.maximumContext)
         #expect(qwen36.sizeBytes == 42)
+        #expect(catalog.models.filter { $0.hostContextCap != nil }.map(\.id) == [])
         let inkling = try #require(catalog.descriptor(for: "inkling-2-mini-ud-q4_k_xl"))
         #expect(inkling.product == .inkling2Mini && inkling.engine == .mference)
         #expect(inkling.displayName == "Inkling 2 Mini")
@@ -202,6 +203,17 @@ struct EngineCatalogDiscoveryTests {
             #expect(catalog.models.first?.location == Self.dir("/first/inkling2mini.gturbo"))
             #expect(catalog.skipped.count == 2)
         }
+        // Under 48 GB its context is capped at 40,960 (any request, `max`
+        // included); from 48 GB it runs to its native context.
+        let at32 = try #require(EngineCatalogDiscovery.discover(
+            roots: roots, ggufDirectories: [], fileSystem: disk, physicalMemory: 32 << 30).models.first)
+        #expect(at32.hostContextCap == 40_960 && at32.contextLength == 262_144)
+        #expect(at32.resolvedContext(requested: nil) == 40_960)
+        #expect(at32.resolvedContext(requested: 16_384) == 16_384)
+        #expect(at32.resolvedContext(requested: 65_536) == 40_960)
+        let at64 = try #require(EngineCatalogDiscovery.discover(
+            roots: roots, ggufDirectories: [], fileSystem: disk, physicalMemory: 64 << 30).models.first)
+        #expect(at64.hostContextCap == nil && at64.resolvedContext(requested: nil) == 262_144)
         // Below the floor, the floor is the reason a request gets, even with a
         // gated copy found first.
         let mixed = Self.fileSystem(
