@@ -68,8 +68,10 @@ struct MFDetokenizer {
     /// `tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)`, kept
     /// current by `push(_:)`.
     @usableFromInline var decoded: String = ""
-    /// Indices in `stableIDs` of the IDs that contribute text: byte-fallback
-    /// tokens, and tokens whose push changed the decode.
+    /// Indices in `stableIDs` of the pushed tokens whose push changed the
+    /// decode. Byte-fallback IDs moved in with a push are not counted on their
+    /// own: the library drops one that is flagged special, so counting them
+    /// could narrow the window. Leaving them out can only widen it.
     @usableFromInline var contentIndices: [Int] = []
     /// Start in `stableIDs` of a byte-fallback run that only IDs with no text
     /// of their own follow (unknown IDs, skipped specials). The library drops
@@ -102,8 +104,6 @@ struct MFDetokenizer {
         let floor = danglingByteRunStart
         let movedBytes = trailingByteIDs.count
         if movedBytes > 0 {
-            // Byte-fallback tokens always contribute.
-            contentIndices.append(contentsOf: stableIDs.count..<(stableIDs.count + movedBytes))
             stableIDs.append(contentsOf: trailingByteIDs)
             trailingByteIDs.removeAll(keepingCapacity: true)
         }

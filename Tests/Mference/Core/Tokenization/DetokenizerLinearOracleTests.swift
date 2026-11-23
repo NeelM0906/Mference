@@ -205,7 +205,7 @@ struct DetokenizerLinearOracleTests {
     /// given. With clean-up on, `MFDetokenizer` takes the full decode on every
     /// push; with it off, byte fallback and the strip go through the window.
     /// ChatML specials make it a supported dialect.
-    static func sentencePieceFixture(cleanUp: Bool = true) throws -> URL {
+    static func sentencePieceFixture(cleanUp: Bool = true, specialBytes: Bool = false) throws -> URL {
         let folder = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("mference-detok-sp-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -215,13 +215,21 @@ struct DetokenizerLinearOracleTests {
                       "?", "▁?", "'", "▁'", "m", "▁'m", "'m", "ve", "'ve", "▁'ve", "re", "'re", "▁'re",
                       "▁it", "▁is", "▁a", "▁test", "▁don", "t", "▁hello", "▁world", "e", "a", "s", "▁x",
                       "▁中", "文", "字", "▁日本", "語", "é", "▁café", "▁naïve", "ห", "้", "า", "ม", "▁ห้าม",
-                      "\n", "▁\n", "\t", "▁end", "▁ok", "ok", "▁'", "▁▁▁"]
+                      "\n", "▁\n", "\t", "▁end", "▁ok", "ok", "▁'", "▁▁▁", "\u{301}"]
         for p in pieces where vocab[p] == nil { vocab[p] = vocab.count }
         let specials = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>",
                         "<tool_response>", "</tool_response>", "<think>", "</think>"]
-        let added: [[String: Any]] = specials.enumerated().map { i, content in
+        var added: [[String: Any]] = specials.enumerated().map { i, content in
             ["id": vocab.count + i, "content": content, "single_word": false, "lstrip": false,
              "rstrip": false, "normalized": false, "special": true]
+        }
+        if specialBytes {
+            // Byte-fallback tokens flagged special: the library then drops
+            // them from a skipping decode, though they look like bytes.
+            added += (0..<256).map { b in
+                ["id": 3 + b, "content": String(format: "<0x%02X>", b), "single_word": false, "lstrip": false,
+                 "rstrip": false, "normalized": false, "special": true]
+            }
         }
         let tokenizer: [String: Any] = [
             "version": "1.0", "truncation": NSNull(), "padding": NSNull(), "added_tokens": added,
@@ -301,6 +309,74 @@ struct DetokenizerLinearOracleTests {
                          label: "\(label), dangling spaces, specials, quotes \(n)")
         }
         Self.run(tok, name: label, randomLength: 3_000, seed: cleanUp ? 0x55 : 0x56)
+    }
+
+    /// The second review's case: byte-fallback tokens flagged special (so the
+    /// library drops them) between pieces, with the leading-space strip and
+    /// clean-up off. Counting such bytes toward the window would narrow it.
+    @Test func specialFlaggedByteTokens() async throws {
+        let folder = try Self.sentencePieceFixture(cleanUp: false, specialBytes: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let tok = try await MFTokenizer.load(from: folder, family: nil)
+        #expect(MFDetokenizer(tokenizer: tok).decodesIncrementally)
+        let t = tok.tokenizer
+        func id(_ piece: String) throws -> Int32 { Int32(try #require(t.convertTokenToId(piece), "\(piece)")) }
+        let letterA = Int32(3 + 0x41)
+        for n in [14, 15, 16, 17, 24, 40] {
+            var ids: [Int32] = Array(repeating: try id("▁ok"), count: 20)
+            for _ in 0..<3 {
+                ids += [try id("▁a")] + Array(repeating: letterA, count: n) + [try id("▁"), try id("\u{301}")]
+            }
+            Self.compare(tok, ids, label: "special-flagged bytes \(n)")
+        }
+        Self.run(tok, name: "SentencePiece with special-flagged bytes", randomLength: 1_500, seed: 0x58)
+    }
+
+    /// A WordPiece tokenizer (its decoder traps on an empty token list): a
+    /// skipped special after text must stream exactly as before, without a
+    /// single-token decode. Streams start with a real token, because the old
+    /// implementation traps too when everything so far is filtered.
+    @Test func wordPieceSkipsSpecials() async throws {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mference-detok-wp-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let words = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "hello", "world", "##s", ".", "it", "'", "s", "##ing",
+                     "un", "##able", "!", "do", "n't", ",", "?", "##ly", "a", "##b"]
+        var vocab: [String: Int] = [:]
+        for w in words { vocab[w] = vocab.count }
+        let specials = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>",
+                        "<tool_response>", "</tool_response>", "<think>", "</think>"]
+        let added: [[String: Any]] = specials.enumerated().map { i, content in
+            ["id": vocab.count + i, "content": content, "single_word": false, "lstrip": false,
+             "rstrip": false, "normalized": false, "special": true]
+        }
+        let tokenizer: [String: Any] = [
+            "version": "1.0", "truncation": NSNull(), "padding": NSNull(), "added_tokens": added,
+            "normalizer": NSNull(), "pre_tokenizer": ["type": "BertPreTokenizer"], "post_processor": NSNull(),
+            "decoder": ["type": "WordPiece", "prefix": "##", "cleanup": true],
+            "model": ["type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##",
+                      "max_input_chars_per_word": 100, "vocab": vocab],
+        ]
+        try JSONSerialization.data(withJSONObject: tokenizer, options: [.sortedKeys])
+            .write(to: folder.appendingPathComponent("tokenizer.json"))
+        let config: [String: Any] = ["tokenizer_class": "BertTokenizer", "do_lower_case": true,
+                                     "eos_token": "<|im_end|>", "unk_token": "[UNK]",
+                                     "clean_up_tokenization_spaces": false]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: folder.appendingPathComponent("tokenizer_config.json"))
+        let tok = try await MFTokenizer.load(from: folder, family: nil)
+        #expect(MFDetokenizer(tokenizer: tok).decodesIncrementally)
+        let total = vocab.count + specials.count
+        let imEnd = Int32(vocab.count + 2)
+        var g = Generator(state: 0x59)
+        for length in [40, 400, 2_000] {
+            var ids: [Int32] = [4]
+            while ids.count < length {
+                ids += g.below(4) == 0 ? Array(repeating: imEnd, count: 1 + g.below(20)) : [Int32(g.below(total))]
+            }
+            Self.compare(tok, ids, label: "WordPiece \(length)")
+        }
     }
 
     /// The ChatML fixture with clean-up switched on: every push takes the full
