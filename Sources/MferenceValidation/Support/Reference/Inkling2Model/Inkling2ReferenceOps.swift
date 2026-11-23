@@ -27,6 +27,28 @@ public enum Inkling2ReferenceOps {
         return Float(s)
     }
 
+    /// The Q8_0 activation quantization of ggml's ARM vector dot products
+    /// (`quantize_row_q8_0`, NEON): per 32 values `d = amax / 127`, codes
+    /// rounded to nearest, ties to even (`vcvtnq`), read back with the FP16
+    /// scale. `Inkling2Q8_0.roundTrip` mirrors the reference encoder
+    /// (`roundf`) instead; the two differ only on exact halves.
+    public static func q8_0ActivationRound(_ x: [Float]) -> [Float] {
+        precondition(x.count % 32 == 0)
+        var out = [Float](repeating: 0, count: x.count)
+        for b in stride(from: 0, to: x.count, by: 32) {
+            var amax: Float = 0
+            for j in 0..<32 { amax = max(amax, abs(x[b + j])) }
+            let d = amax / 127
+            let id: Float = d != 0 ? 1 / d : 0
+            let stored = Float(Float16(d))
+            for j in 0..<32 {
+                let q = (x[b + j] * id).rounded(.toNearestOrEven)
+                out[b + j] = (q.isFinite ? max(-128, min(127, q)) : 0) * stored
+            }
+        }
+        return out
+    }
+
     /// ggml's FP32 to BF16 conversion (`ggml_compute_fp32_to_bf16`): round
     /// to nearest, ties to even; a NaN stays a (quiet) NaN.
     public static func bf16Round(_ x: Float) -> Float {

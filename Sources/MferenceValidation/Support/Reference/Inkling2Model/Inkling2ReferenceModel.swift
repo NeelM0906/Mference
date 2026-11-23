@@ -36,8 +36,13 @@ public final class Inkling2ReferenceModel {
     /// product (dense projections, experts' input and activation, the head)
     /// to Q8_0 blocks (ggml's `vec_dot_type`), the input of a BF16 product
     /// (sink and tap projections) to BF16, and the cached keys and values
-    /// to FP16 (llama.cpp's default cache type). F32 products (router, loop
-    /// gates) stay FP32.
+    /// to FP16 (the traces' cache type, f16). F32 products (router, loop
+    /// gates) stay FP32. Attention is otherwise FP32 there (K0, from the
+    /// b12641 source): inkling2 always passes its relative bias as `kq_b`,
+    /// which turns flash attention off, so queries stay FP32, K and V are
+    /// widened, and the probabilities and V accumulation are FP32. Valid
+    /// below 32 tokens: from 32 up ggml's BLAS backend takes the dense
+    /// products with dequantized weights and unrounded inputs.
     public enum Precision: Sendable { case fp32, metalRunner, llamaCPU }
     public var precision: Precision = .fp32
     /// The trace of the most recent `forward` with `captureTrace` set.
@@ -126,19 +131,21 @@ public final class Inkling2ReferenceModel {
         var blocks = [[[Float]]](repeating: [], count: n)
 
         func run(_ visit: Inkling2ReferenceVisit, messages: [[[Float]]]?) {
-            var routes: [Inkling2Route] = []
+            var routes: [Inkling2Route] = [], ownRoutes: [Inkling2Route] = []
             var shortfalls: [Float] = []
             for t in 0..<n {
-                let (out, route, shortfall) = layerStep(visit: visit, token: t, chunkStart: start,
-                                                        cur: cur[t], blocks: &blocks[t],
-                                                        messages: messages?[t],
-                                                        forcedExperts: forced?[visit.order][t])
+                let (out, route, shortfall, own) = layerStep(visit: visit, token: t, chunkStart: start,
+                                                             cur: cur[t], blocks: &blocks[t],
+                                                             messages: messages?[t],
+                                                             forcedExperts: forced?[visit.order][t])
                 cur[t] = out
                 routes.append(route)
+                ownRoutes.append(own)
                 shortfalls.append(shortfall)
             }
             trace?.visitOutputs.append(cur)
             trace?.routes.append(routes)
+            trace?.ownRoutes.append(ownRoutes)
             trace?.routeShortfalls.append(shortfalls)
             if let forcedOutputs { cur = forcedOutputs[visit.order] }
         }
@@ -204,7 +211,7 @@ public final class Inkling2ReferenceModel {
     /// Head over a final hidden state: the first `vocabUnpadded` rows of
     /// `output`, then the logit softcap.
     public func logits(hidden: [Float]) -> [Float] {
-        let input = precision == .llamaCPU ? Inkling2Q8_0.roundTrip(hidden) : hidden
+        let input = precision == .llamaCPU ? Inkling2ReferenceOps.q8_0ActivationRound(hidden) : hidden
         return (0..<config.vocabUnpadded).map {
             let raw = Inkling2ReferenceOps.dot(weights.output.row($0), input)
             if config.finalLogitSoftcap > 0 && abs(raw) > config.finalLogitSoftcap {
@@ -218,7 +225,8 @@ public final class Inkling2ReferenceModel {
 
     private func layerStep(visit: Inkling2ReferenceVisit, token t: Int, chunkStart: Int,
                            cur: [Float], blocks: inout [[Float]],
-                           messages: [[Float]]?, forcedExperts: [Int]?) -> ([Float], Inkling2Route, Float) {
+                           messages: [[Float]]?, forcedExperts: [Int]?)
+        -> ([Float], Inkling2Route, Float, Inkling2Route) {
         typealias Op = Inkling2ReferenceOps
         let c = config
         let il = visit.layer
@@ -235,7 +243,7 @@ public final class Inkling2ReferenceModel {
             switch precision {
             case .fp32: return v
             case .metalRunner: return toHalf(v)
-            case .llamaCPU: return Inkling2Q8_0.roundTrip(v)
+            case .llamaCPU: return Op.q8_0ActivationRound(v)
             }
         }
         /// The input of a BF16 product.
@@ -253,7 +261,7 @@ public final class Inkling2ReferenceModel {
             switch precision {
             case .fp32: return nil
             case .metalRunner: return { $0.map { Float(Float16($0)) } }
-            case .llamaCPU: return { Inkling2Q8_0.roundTrip($0) }
+            case .llamaCPU: return { Op.q8_0ActivationRound($0) }
             }
         }()
 
@@ -370,7 +378,8 @@ public final class Inkling2ReferenceModel {
             coverage.messageGates += 1
         }
         m = Op.rmsNorm(m, weight: lw.ffnNorm, eps: c.rmsEps)
-        var route = Op.route(m, router: lw.router, bias: lw.routerBias, topK: c.topK, routeScale: c.routeScale)
+        let own = Op.route(m, router: lw.router, bias: lw.routerBias, topK: c.topK, routeScale: c.routeScale)
+        var route = own
         let unbiased = Op.route(m, router: lw.router, bias: [Float](repeating: 0, count: c.numExperts),
                                 topK: c.topK, routeScale: c.routeScale)
         if Set(unbiased.experts) != Set(route.experts) { coverage.biasChangedRoutes += 1 }
@@ -395,7 +404,7 @@ public final class Inkling2ReferenceModel {
         sum = Op.add(ffnInp, ffnOut)
 
         state.slots[visit.cacheSlot] = slot
-        return (sum, route, shortfall)
+        return (sum, route, shortfall, own)
     }
 }
 
@@ -435,6 +444,9 @@ public struct Inkling2ReferenceTrace: Sendable {
     public var visitOutputs: [[[Float]]] = []
     /// `[visit order][token]`: the experts each token's router used.
     public var routes: [[Inkling2Route]] = []
+    /// `[visit order][token]`: the experts the reference's own router chose
+    /// (its top-k), whatever `forcedRoutes` made it use.
+    public var ownRoutes: [[Inkling2Route]] = []
     /// `[visit order][token]`: each forced route's shortfall below the
     /// reference's own top-k cutoff (0 without `forcedRoutes`).
     public var routeShortfalls: [[Float]] = []

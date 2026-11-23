@@ -178,6 +178,17 @@ struct Inkling2ReferenceOpsTests {
         #expect(Op.bf16Round(.infinity) == .infinity)
     }
 
+    /// The NEON activation quantization rounds codes to nearest, ties to even.
+    @Test func q8_0ActivationRoundsTiesToEven() {
+        var x = [Float](repeating: 0, count: 32)
+        x[0] = 127   // d = 1, id = 1
+        x[1] = 2.5
+        x[2] = 3.5
+        x[3] = -2.5
+        let r = Op.q8_0ActivationRound(x)
+        #expect(r[0] == 127 && r[1] == 2 && r[2] == 4 && r[3] == -2)
+    }
+
     @Test func routerTiesGoToTheLowerIndex() {
         let router = Inkling2DenseMatrix(rows: 4, cols: 1, values: [1, 1, 1, 1])
         #expect(Op.route([1], router: router, bias: [0, 0, 0, 0], topK: 2, routeScale: 1).experts == [0, 1])
