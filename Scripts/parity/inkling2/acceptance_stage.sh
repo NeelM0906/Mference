@@ -10,8 +10,9 @@
 # <server-dir> holds a release MferenceServer with its resource bundles beside
 # it and a SOURCE.txt (first line: the source commit). The server binds
 # 127.0.0.1 only, serves the library's default roots (the Inkling install in
-# scratch/, Deep's GGUF in ~/llm-models/gguf) with --max-context 40960 (Inkling
-# runs at its 40,960 cap; Deep stays at 32,768, coordinator ruling) and
+# scratch/, Deep's GGUF in ~/llm-models/gguf) with --max-context 16384 (Inkling's
+# cap below 48 GB and the program's tested context, spec v1.17; Deep stays at
+# 32,768 in library mode, coordinator ruling) and
 # --prompt-cache-mode off, and is stopped on every exit: SIGINT, then KILL
 # (the server ignores a TERM after INT). Under the swap guard's TERM the server
 # gets 20 s before KILL, inside the guard's 30 s before it KILLs this script,
@@ -20,7 +21,7 @@
 # time; the server swaps between them.
 #
 # Stages (client: agent_acceptance.py, corpus $INK/acceptance/agent-acceptance-v1):
-#   load-inkling     first real load of Inkling at 40,960 and its longest prompt:
+#   load-inkling     first real load of Inkling at 16,384 and its longest prompt (a 30K case: beyond the cap):
 #                    full tier, block C, c09-30k-cross-doc (Inkling only)
 #   swap             one short A case on Inkling, then the same on Deep: the swap
 #   slice1-inkling   gate tier block A without tool cases (16 cases), Inkling
@@ -119,7 +120,7 @@ trap 'stop_server' EXIT
 # whole stop inside the guard's 30 s before its KILL of this script.
 trap 'BUDGET=20; log "interrupted"; exit 130' INT TERM
 
-"$SRV_DIR/MferenceServer" --library --port "$PORT" --max-context 40960 --prompt-cache-mode off \
+"$SRV_DIR/MferenceServer" --library --port "$PORT" --max-context 16384 --prompt-cache-mode off \
   > "$D/server.log" 2>&1 &
 SPID=$!
 ready=0
