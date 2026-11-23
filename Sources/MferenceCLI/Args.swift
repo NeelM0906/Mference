@@ -4,10 +4,27 @@ import Mference
 /// Prefill chunk selection. `.fixed` must name an allowed size;
 /// `.auto` resolves to the smallest allowed size covering the prompt,
 /// which minimizes routed-expert re-reads (expert I/O scales with
-/// prompt_tokens / chunk_tokens).
+/// prompt_tokens / chunk_tokens), up to the family's own chunk
+/// (`RuntimeConfiguration.autoPrefillChunkTokens`).
 public enum PrefillChunkChoice: Equatable, Sendable {
     case fixed(Int)
     case auto
+
+    /// A raw run knows its prompt before prefill, so `auto` takes the
+    /// smallest allowed chunk covering it, up to the family's own chunk
+    /// (`RuntimeConfiguration.autoPrefillChunkTokens`). The family comes
+    /// from the install's manifest; when that cannot be read, the allowed
+    /// sizes alone bound it, as before the family cap, and the load reports
+    /// the error. A fixed size is used as given.
+    func rawChunkTokens(promptTokens: Int, modelDirectory: URL) -> Int {
+        switch self {
+        case .fixed(let n): return n
+        case .auto:
+            return RuntimeConfiguration.autoPrefillChunkTokens(
+                promptTokens: promptTokens,
+                family: try? ManifestReader.peekFamily(directoryURL: modelDirectory))
+        }
+    }
 
     /// Interactive chat has no prompt at load time, so `auto` takes the
     /// family's server chunk: both prefill a growing conversation turn after
@@ -248,8 +265,9 @@ extension Args {
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to
-                                the prompt (--chat uses the server's chunk
-                                for the model family). Allowed:
+                                the prompt, at most 2048 for Inkling 2 Mini
+                                (--chat uses the server's chunk for the
+                                model family). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
       --flash-head              Enable Maple's approximate sparse decode head.
                                 Prefill remains exact; unsupported models use

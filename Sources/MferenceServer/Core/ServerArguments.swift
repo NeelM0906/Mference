@@ -118,9 +118,9 @@ public struct ServerArguments: Equatable, Sendable {
                              Prompt tokens per prefill chunk: auto (default) or
                              32, 64, 128, 256, 512, 1024, 2048, 4096. Larger
                              chunks re-read routed experts less often but hold
-                             more memory. auto is 2048 for Qwen 3.6 on hosts
-                             with at least 16 GiB, 128 elsewhere. Overrides
-                             MFERENCE_SERVER_PREFILL_CHUNK.
+                             more memory. auto is 2048 for Inkling 2 Mini, and
+                             for Qwen 3.6 on hosts with at least 16 GiB; 128
+                             elsewhere. Overrides MFERENCE_SERVER_PREFILL_CHUNK.
       --verify <mode>        Model integrity on load and model swap: auto
                              (default) checks file sizes against the install
                              receipt when it validates and hashes otherwise;
