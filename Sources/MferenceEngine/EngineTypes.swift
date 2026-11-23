@@ -335,19 +335,24 @@ public struct EngineRequest: Sendable {
     public var maximumCompletionTokens: Int
     public var reasoningEffort: QwenReasoningEffort?
     public var preserveThinking: Bool
+    /// Inkling 2's own effort names beyond the four `reasoningEffort` has
+    /// (`minimal`, `high`, `max`); used by that dialect only.
+    public var inkling2Effort: MFTokenizer.Inkling2Effort?
 
     public init(messages: [MFTokenizer.Message],
                 tools: [MFTokenizer.FunctionDefinition] = [],
                 generationConfig: GenerationConfig = .defaults,
                 maximumCompletionTokens: Int,
                 reasoningEffort: QwenReasoningEffort? = nil,
-                preserveThinking: Bool = false) {
+                preserveThinking: Bool = false,
+                inkling2Effort: MFTokenizer.Inkling2Effort? = nil) {
         self.messages = messages
         self.tools = tools
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.reasoningEffort = reasoningEffort
         self.preserveThinking = preserveThinking
+        self.inkling2Effort = inkling2Effort
     }
 
     /// Whether the prompt needs the tool-aware template and decoder: tools are

@@ -25,7 +25,8 @@ extension EngineRequest {
                   generationConfig: request.generationConfig,
                   maximumCompletionTokens: request.maximumCompletionTokens,
                   reasoningEffort: request.reasoningEffort,
-                  preserveThinking: request.preserveThinking)
+                  preserveThinking: request.preserveThinking,
+                  inkling2Effort: request.inkling2Effort)
     }
 }
 
@@ -36,6 +37,7 @@ extension ValidatedChatRequest {
     init(_ request: EngineRequest) {
         self.init(reasoningEffort: request.reasoningEffort,
                   preserveThinking: request.preserveThinking,
+                  inkling2Effort: request.inkling2Effort,
                   messages: request.messages,
                   tools: request.tools,
                   stream: false,

@@ -53,7 +53,8 @@ extension ValidatedChatRequest {
         PromptPrefixCacheTurn(messages: messages,
                               tools: tools,
                               reasoningEffort: reasoningEffort,
-                              preserveThinking: preserveThinking)
+                              preserveThinking: preserveThinking,
+                              inkling2Effort: inkling2Effort)
     }
 }
 
