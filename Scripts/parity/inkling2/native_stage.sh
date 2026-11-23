@@ -15,9 +15,16 @@
 #   native-16k   prompt-16k.txt,  --max-context 20480, --max-new 32
 # The prompts are $INK/results/k0/baseline/prompts/prompt-*.txt, checked
 # against the SHA-256 recorded in baseline.md; any difference refuses.
-# Default CLI controls otherwise (prefill chunking, --verify, expert
-# streaming). If the runner's expert plan does not fit the host budget the
-# CLI exits with `error: ...`; this script surfaces that line and its exit.
+# Default CLI controls otherwise (prefill chunking, expert streaming), except
+# `--verify trusted-receipt`: the expert pool is checked against the install
+# receipt's sizes, and an invalid receipt refuses the run instead of falling
+# back to hashing the pool inside the timed prefill. No warm-up run: unlike
+# llama-completion (whose warm-up decode falls in its excluded load time), the
+# native prefill includes first-use costs (first expert reads, pipeline
+# builds). If the runner's expert plan does not fit the host budget the CLI
+# exits with `error: ...`; this script surfaces that line and its exit.
+# Build the CLI from a tree with the Inkling 2 runner (inkling/trunk); its
+# SOURCE.txt, if present beside it, is recorded.
 # native_table.py writes the table from <out-dir>.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -41,6 +48,13 @@ case "$STAGE" in
   *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
 D=$OUT/$STAGE
+# A rerun starts clean: an earlier attempt's files move to prev-<UTC>/ so a
+# refused attempt never leaves the last attempt's numbers in the table.
+if [ -d "$D" ] && [ -n "$(ls -A "$D" 2>/dev/null | grep -v '^prev-')" ]; then
+  prev=$D/prev-$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$prev"
+  for x in "$D"/*; do case "$(basename "$x")" in prev-*) ;; *) mv "$x" "$prev/" ;; esac; done
+fi
 mkdir -p "$D"
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$D/checks.log"; }
 refuse() { log "REFUSED: $*"; exit 71; }
@@ -55,6 +69,8 @@ got=$(shasum -a 256 "$P/$f" | cut -d' ' -f1)
 [ "$got" = "$sha" ] || refuse "$f SHA-256 $got is not the baseline's $sha"
 log "stage $STAGE: $f (SHA-256 $got), max-context $ctx, max-new $n, greedy"
 log "cli: $CLI (SHA-256 $(shasum -a 256 "$CLI" | cut -d' ' -f1))"
+if [ -f "$CLI_DIR/SOURCE.txt" ]; then log "cli source: $(head -1 "$CLI_DIR/SOURCE.txt")"
+else log "cli source: no SOURCE.txt beside the CLI"; fi
 log "install: $INST (manifest SHA-256 $(shasum -a 256 "$INST/manifest.json" | cut -d' ' -f1))"
 if pgrep -f 'Mference.app/Contents/MacOS/' > /dev/null; then
   log "app open check: the Mference app is open"   # guarded_run.sh --timing refuses below
@@ -75,11 +91,12 @@ echo "$(date -u +%FT%TZ) swift build/test jobs at start: $j" | tee -a "$D/jobs.l
 
 "$HERE/guarded_run.sh" --timing "$D" "$INST/manifest.json" -- \
   "$HERE/native_stage.sh" --exec "$CLI" "$P/$f" \
-  --model "$INST" --max-context "$ctx" --max-new "$n" --temperature 0 --seed 7
+  --model "$INST" --max-context "$ctx" --max-new "$n" --temperature 0 --seed 7 \
+  --verify trusted-receipt
 rc=$?
 echo "$(date -u +%FT%TZ) swift build/test jobs at end: $(swift_jobs)" | tee -a "$D/jobs.log"
-if [ $rc != 0 ]; then
-  err=$(grep '^error:' "$D/stderr.log" 2>/dev/null | tail -1)
-  log "exit $rc${err:+; CLI: $err}"
-fi
+# The stage's exit (70: swap grew, even after a clean CLI exit; 71: refused
+# before the CLI ran, reason in run.log) and the CLI's error line, if any.
+err=$(grep '^error:' "$D/stderr.log" 2>/dev/null | tail -1)
+log "stage exit $rc${err:+; CLI: $err}"
 exit $rc

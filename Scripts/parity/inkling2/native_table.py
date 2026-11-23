@@ -5,8 +5,9 @@
 
 Reads, per native_stage.sh stage directory (native-512, native-4k,
 native-16k): run.json (guarded_run.sh: exit, wall, swap, peak footprint, max
-RSS), jobs.log (other swift jobs at start), checks.log (app-open check, the
-CLI's error line on failure) and stderr.log (MferenceCLI's footer
+RSS), jobs.log (other swift jobs at start), checks.log (app-open check, CLI
+source, the stage's exit and the CLI's error line), run.log (guarded_run.sh's
+refusal reasons) and stderr.log (MferenceCLI's footer
 `[stop=... prefill=<N>tok/<s>s new=<N>tok decode=<s>s tok/s=<x>]`). Prints a
 Markdown table with exactly baseline.md's columns plus one ratio column
 against the llama.cpp text-* row of the same prompt, then the app-open
@@ -15,13 +16,22 @@ checks, any CLI errors and every raw footer.
 Definitions, matched to baseline.md's text-* rows:
 - Prefill tok/s = prompt tokens / prefill seconds.
 - TTFT s = prefill seconds. The first token is sampled from the prefill
-  logits, as in llama-completion; model load is excluded on both sides.
+  logits, as in llama-completion. Model load is excluded on both sides, but
+  llama-completion's warm-up decode is inside its (excluded) load time while
+  the native CLI has none: native prefill includes first-use costs (first
+  expert reads, pipeline builds), most visible in the 512-token row.
 - Decode tok/s = (new tokens - 1) / decode seconds. n new tokens take n - 1
   forward steps on both sides; llama-completion's "eval time" counts those
   n - 1 runs. The CLI footer's own tok/s divides n by the same seconds; it is
   kept in the raw lines.
 - Ratio = native / llama.cpp for prefill and decode (above 1 is faster) and
   for TTFT (below 1 is faster).
+- Exit = the stage's exit (checks.log); when it differs from the CLI's own
+  exit (run.json) both show, e.g. "0 / stage 70" for swap growth found after
+  a clean CLI exit.
+- Peak footprint counts anonymous memory: the native runner's resident
+  experts and staging slabs are anonymous, llama.cpp's experts file-mapped
+  (RSS only), so that column is not like for like.
 """
 
 import json
@@ -72,13 +82,21 @@ def stage_row(d, stage, base):
         ttft = pre_s
     fmt = lambda x, n=2: f"{x:.{n}f}" if x is not None else "-"
     gb = lambda x: f"{x / 1e9:.2f}" if isinstance(x, (int, float)) else "?"
+    checks = read(os.path.join(p, "checks.log"))
+    st = re.findall(r"stage exit (\d+)", checks)
+    cli_exit = rj.get("exit")
+    if st and str(cli_exit) != st[-1]:
+        exit_cell = f"{cli_exit if cli_exit is not None else '-'} / stage {st[-1]}"
+    else:
+        exit_cell = str(cli_exit if cli_exit is not None else (f"stage {st[-1]}" if st else "?"))
     b = base.get(stage)
     vs = " / ".join(ratio(x, y) for x, y in zip((pp, tg, ttft), b)) if b else "no baseline row"
     cells = [stage, str(ptok) if ptok is not None else "?", fmt(pp), fmt(tg), fmt(ttft),
              gb(rj.get("peak_footprint_bytes")), gb(rj.get("max_rss_bytes")),
              f"{rj.get('swap_start_mb', '?')} / {rj.get('swap_end_mb', '?')}", str(rj.get("swap_delta_mb", "?")),
-             str(rj.get("exit", "?")), str(rj.get("wall_s", "?")), jstart, vs]
-    return "| " + " | ".join(cells) + " |", [f.group(0) for f in footers]
+             exit_cell, str(rj.get("wall_s", "?")), jstart, vs]
+    stop = (footers[-1].group(1), int(footers[-1].group(4))) if footers else None
+    return "| " + " | ".join(cells) + " |", [f.group(0) for f in footers], stop
 
 
 def main():
@@ -89,16 +107,27 @@ def main():
         p = os.path.join(d, stage)
         if not os.path.isdir(p):
             continue
-        row, footers = stage_row(d, stage, {stage: base[text]} if text in base else {})
+        row, footers, stop = stage_row(d, stage, {stage: base[text]} if text in base else {})
         rows.append(row)
         raw += [f"{stage}: {f}" for f in footers]
+        if stop:
+            want = {"native-512": 128, "native-4k": 64, "native-16k": 32}[stage]
+            flag = "" if stop == ("maxTokens", want) else \
+                f" (NOT comparable: llama.cpp generated {want}; decode covers {stop[1] - 1} steps)"
+            notes.append(f"{stage}: stop={stop[0]}, {stop[1]} new tokens{flag}")
         for line in read(os.path.join(p, "checks.log")).splitlines():
-            if "app open check" in line or "REFUSED" in line or "CLI: error:" in line:
+            if any(k in line for k in ("app open check", "cli source", "REFUSED", "stage exit")):
                 notes.append(f"{stage}: {line.split(' ', 1)[-1]}")
+        for line in read(os.path.join(p, "run.log")).splitlines():
+            if "REFUSED" in line or "SWAP GUARD" in line:
+                notes.append(f"{stage}: guarded_run: {line.split(' ', 1)[-1]}")
     print(HEADER)
     print(RULE)
     for r in rows:
         print(r)
+    print("\nNative prefill and TTFT include first-use costs (no warm-up run; llama-completion's"
+          " warm-up is in its excluded load time). Peak footprint: the native experts are anonymous"
+          " memory, llama.cpp's file-mapped (RSS only).")
     print("\nChecks and errors:\n")
     for n in notes:
         print(f"- {n}")
