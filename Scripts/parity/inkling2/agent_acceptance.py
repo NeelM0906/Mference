@@ -532,7 +532,7 @@ def cmd_summarize(a):
     header, rows = measured(a.run)
     groups = {}
     for r in rows:
-        if r.get("unpaired"):
+        if r.get("unpaired") or r["case"] in INKLING_ONLY:  # the case id too: runs from before the flag
             keys = ((r["profile"], r["block"] + ", Inkling only"),)
         else:
             keys = ((r["profile"], r["block"]), (r["profile"], "all"))
@@ -557,8 +557,9 @@ def cmd_paired(a):
     _, ra = measured(a.run_a)
     _, rb = measured(a.run_b)
     key = lambda r: (r["profile"], r["block"], r["case"], r["seed"])
-    ia = {key(r): r["passed"] for r in ra if not r.get("unpaired")}
-    ib = {key(r): r["passed"] for r in rb if not r.get("unpaired")}
+    unpaired = lambda r: r.get("unpaired") or r["case"] in INKLING_ONLY  # the id too: runs from before the flag
+    ia = {key(r): r["passed"] for r in ra if not unpaired(r)}
+    ib = {key(r): r["passed"] for r in rb if not unpaired(r)}
     common = sorted(set(ia) & set(ib))
     table = {}
     for k in common:

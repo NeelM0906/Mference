@@ -12,8 +12,11 @@
 # 127.0.0.1 only, serves the library's default roots (the Inkling install in
 # scratch/, Deep's GGUF in ~/llm-models/gguf) with --max-context 40960 (Inkling
 # runs at its 40,960 cap; Deep stays at 32,768, coordinator ruling) and
-# --prompt-cache-mode off, and is stopped (SIGINT, then TERM) on every exit,
-# including the swap guard's TERM to this script. One model is resident at a
+# --prompt-cache-mode off, and is stopped on every exit: SIGINT, then KILL
+# (the server ignores a TERM after INT). Under the swap guard's TERM the server
+# gets 20 s before KILL, inside the guard's 30 s before it KILLs this script,
+# so the server can never outlive the hold; on a normal end it gets 120 s.
+# A server that dies during the stage fails the stage (exit 75). One model is resident at a
 # time; the server swaps between them.
 #
 # Stages (client: agent_acceptance.py, corpus $INK/acceptance/agent-acceptance-v1):
@@ -47,8 +50,10 @@ case "$STAGE" in
   slice1-deep)    RUNS=("$DEEP_ID gate A $SLICE1") ;;
   gate-inkling)   RUNS=("$INK_ID gate A,B,C -") ;;
   gate-deep)      RUNS=("$DEEP_ID gate A,B,C -") ;;
-  gate:inkling:*) RUNS=("$INK_ID gate ${STAGE#gate:inkling:} -") ;;
-  gate:deep:*)    RUNS=("$DEEP_ID gate ${STAGE#gate:deep:} -") ;;
+  gate:inkling:*|gate:deep:*)
+    blk=${STAGE##*:}
+    [[ "$blk" =~ ^[A-E](,[A-E])*$ ]] || { echo "bad blocks '$blk' in $STAGE (want e.g. A or B,C)" >&2; exit 2; }
+    if [[ "$STAGE" == gate:inkling:* ]]; then RUNS=("$INK_ID gate $blk -"); else RUNS=("$DEEP_ID gate $blk -"); fi ;;
   *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
 
@@ -72,21 +77,45 @@ if pgrep -f 'Mference.app/Contents/MacOS/' > /dev/null; then refuse "the Mferenc
   echo "server sha256: $(shasum -a 256 "$SRV_DIR/MferenceServer" | cut -d' ' -f1)"; } > "$D/machine.txt"
 log "stage $STAGE; server $ENGINE_COMMIT; port $PORT"
 
-SPID=""; CPID=""
+# Deep's file SHA-256, before the server starts: hashing reads 12 GB (about 40 s,
+# inside this hold), and a TERM that arrives during a foreground command waits
+# for it, so no server may be running yet. Cached beside the results, keyed by
+# size and modification time.
+DEEP_SHA=""
+if printf '%s\n' "${RUNS[@]}" | grep -q "^$DEEP_ID "; then
+  key="$(stat -f '%z %m' "$DEEP_GGUF")"
+  cache=$OUT/deep-gguf.sha256
+  if [ -f "$cache" ] && [ "$(head -1 "$cache")" = "$key" ]; then
+    DEEP_SHA=$(sed -n 2p "$cache")
+  else
+    log "hashing $(basename "$DEEP_GGUF")"
+    DEEP_SHA=$(shasum -a 256 "$DEEP_GGUF" | cut -d' ' -f1)
+    printf '%s\n%s\n' "$key" "$DEEP_SHA" > "$cache"
+  fi
+  log "deep: $(basename "$DEEP_GGUF") sha256 $DEEP_SHA"
+fi
+
+SPID=""; CPID=""; BUDGET=120
 stop_server() {
-  # TERM, not INT: a command started with & by a non-interactive shell (as
-  # guarded_run.sh starts this script) inherits SIGINT ignored, so only its
-  # TERM step reaches this script and its children
+  # TERM to the client: a command started with & by a non-interactive shell
+  # (as guarded_run.sh starts this script) inherits SIGINT ignored
   [ -n "$CPID" ] && kill -0 "$CPID" 2>/dev/null && kill -TERM "$CPID" 2>/dev/null
-  [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null || return 0
-  kill -INT "$SPID" 2>/dev/null
-  for _ in $(seq 1 60); do kill -0 "$SPID" 2>/dev/null || break; sleep 1; done
-  kill -0 "$SPID" 2>/dev/null && { log "server ignored INT for 60 s; TERM"; kill -TERM "$SPID" 2>/dev/null; }
-  wait "$SPID" 2>/dev/null
-  log "server stopped"
+  if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null; then
+    kill -INT "$SPID" 2>/dev/null
+    for _ in $(seq 1 "$BUDGET"); do kill -0 "$SPID" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$SPID" 2>/dev/null; then
+      log "server still running ${BUDGET} s after INT; KILL"
+      kill -KILL "$SPID" 2>/dev/null
+    fi
+    wait "$SPID" 2>/dev/null
+    log "server stopped"
+  fi
+  grep -E "swap|release|load|unload" "$D/server.log" 2>/dev/null | tail -40 > "$D/server-swaps.log"
 }
 trap 'stop_server' EXIT
-trap 'log "interrupted"; exit 130' INT TERM   # INT may be ignored on entry (see stop_server)
+# INT may be ignored on entry; TERM is the swap guard's signal. 20 s keeps the
+# whole stop inside the guard's 30 s before its KILL of this script.
+trap 'BUDGET=20; log "interrupted"; exit 130' INT TERM
 
 "$SRV_DIR/MferenceServer" --library --port "$PORT" --max-context 40960 --prompt-cache-mode off \
   > "$D/server.log" 2>&1 &
@@ -99,31 +128,30 @@ for _ in $(seq 1 900); do
 done
 [ $ready = 1 ] || refuse "server not ready (see server.log)"
 log "ready: $(grep 'MferenceServer ready' "$D/server.log" | tail -1)"
+# provenance: which install or file the server discovered for each model
+grep -E "$INK_ID|$DEEP_ID" "$D/server.log" | head -10 | while read -r line; do log "server: $line"; done
 curl -sS "http://127.0.0.1:$PORT/v1/models" -o "$D/models.json" || refuse "GET /v1/models failed"
 for id in $(echo "${RUNS[@]}" | tr ' ' '\n' | grep -E "^($INK_ID|$DEEP_ID)$" | sort -u); do
   grep -q "\"$id\"" "$D/models.json" || refuse "$id not listed by /v1/models"
 done
 
+server_alive() {
+  kill -0 "$SPID" 2>/dev/null && return 0
+  wait "$SPID" 2>/dev/null; local st=$?
+  log "SERVER DIED (exit $st) during the stage; see server.log"
+  SPID=""
+  return 1
+}
 n=0; rc=0
 for spec in "${RUNS[@]}"; do
+  server_alive || { rc=75; break; }
   read -r model tier blocks cases extra <<< "$spec"
   n=$((n + 1))
   prof=$D/profile-$n.json
   if [ "$model" = "$INK_ID" ]; then
     rev="$(basename "$INK_INSTALL") manifest sha256 $(shasum -a 256 "$INK_INSTALL/manifest.json" | cut -d' ' -f1)"
   else
-    # hashed inside this hold (it pulls 12 GB through the file cache), once:
-    # cached beside the results, keyed by size and modification time
-    key="$(stat -f '%z %m' "$DEEP_GGUF")"
-    cache=$OUT/deep-gguf.sha256
-    if [ -f "$cache" ] && [ "$(head -1 "$cache")" = "$key" ]; then
-      sha=$(sed -n 2p "$cache")
-    else
-      log "hashing $(basename "$DEEP_GGUF")"
-      sha=$(shasum -a 256 "$DEEP_GGUF" | cut -d' ' -f1)
-      printf '%s\n%s\n' "$key" "$sha" > "$cache"
-    fi
-    rev="$(basename "$DEEP_GGUF") $(stat -f %z "$DEEP_GGUF") bytes sha256 $sha"
+    rev="$(basename "$DEEP_GGUF") $(stat -f %z "$DEEP_GGUF") bytes sha256 $DEEP_SHA"
   fi
   printf '[{"label": "product-default", "model": "%s", "source_revision": "%s"}]\n' "$model" "$rev" > "$prof"
   args=(run --corpus "$CORPUS" --tier "$tier" --blocks "$blocks" --profiles "$prof"
@@ -140,7 +168,9 @@ for spec in "${RUNS[@]}"; do
   CPID=""
   log "run $n exit $r"
   [ $r = 0 ] || { rc=$r; break; }
-  python3 -I "$HERE/agent_acceptance.py" summarize "$D/run-$n-$model.jsonl" > "$D/run-$n-summary.md" 2>&1
+  # a client finishes with transport_error rows when the server is gone: that is a failed stage
+  server_alive || { rc=75; break; }
+  python3 -I "$HERE/agent_acceptance.py" summarize "$D/run-$n-$model.jsonl" > "$D/run-$n-summary.md" 2>&1 \
+    || log "summarize of run $n failed (see run-$n-summary.md)"
 done
-grep -E "swap|release|load" "$D/server.log" | tail -20 > "$D/server-swaps.log" || true
 exit $rc
