@@ -112,7 +112,18 @@ for spec in "${RUNS[@]}"; do
   if [ "$model" = "$INK_ID" ]; then
     rev="$(basename "$INK_INSTALL") manifest sha256 $(shasum -a 256 "$INK_INSTALL/manifest.json" | cut -d' ' -f1)"
   else
-    rev="$(basename "$DEEP_GGUF") $(stat -f %z "$DEEP_GGUF") bytes"
+    # hashed inside this hold (it pulls 12 GB through the file cache), once:
+    # cached beside the results, keyed by size and modification time
+    key="$(stat -f '%z %m' "$DEEP_GGUF")"
+    cache=$OUT/deep-gguf.sha256
+    if [ -f "$cache" ] && [ "$(head -1 "$cache")" = "$key" ]; then
+      sha=$(sed -n 2p "$cache")
+    else
+      log "hashing $(basename "$DEEP_GGUF")"
+      sha=$(shasum -a 256 "$DEEP_GGUF" | cut -d' ' -f1)
+      printf '%s\n%s\n' "$key" "$sha" > "$cache"
+    fi
+    rev="$(basename "$DEEP_GGUF") $(stat -f %z "$DEEP_GGUF") bytes sha256 $sha"
   fi
   printf '[{"label": "product-default", "model": "%s", "source_revision": "%s"}]\n' "$model" "$rev" > "$prof"
   args=(run --corpus "$CORPUS" --tier "$tier" --blocks "$blocks" --profiles "$prof"
