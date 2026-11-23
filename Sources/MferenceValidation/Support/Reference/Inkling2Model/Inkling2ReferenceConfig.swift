@@ -145,20 +145,20 @@ public struct Inkling2ReferenceConfig: Sendable, Equatable {
 
     /// The fixed per-token schedule, in execution order: prelude, pass 1,
     /// pass 2, ..., coda.
-    public var schedule: [Inkling2Visit] {
-        var visits: [Inkling2Visit] = []
+    public var schedule: [Inkling2ReferenceVisit] {
+        var visits: [Inkling2ReferenceVisit] = []
         visits.reserveCapacity(numVisits)
         for layer in 0..<coreStart {
-            visits.append(Inkling2Visit(order: visits.count, layer: layer, pass: 0, cacheSlot: layer))
+            visits.append(Inkling2ReferenceVisit(order: visits.count, layer: layer, pass: 0, cacheSlot: layer))
         }
         for pass in 0..<numPasses {
             for layer in coreStart..<coreEnd {
-                visits.append(Inkling2Visit(order: visits.count, layer: layer, pass: pass,
+                visits.append(Inkling2ReferenceVisit(order: visits.count, layer: layer, pass: pass,
                                             cacheSlot: cacheSlot(layer: layer, pass: pass)))
             }
         }
         for layer in coreEnd..<numLayers {
-            visits.append(Inkling2Visit(order: visits.count, layer: layer, pass: 0, cacheSlot: layer))
+            visits.append(Inkling2ReferenceVisit(order: visits.count, layer: layer, pass: 0, cacheSlot: layer))
         }
         return visits
     }
@@ -197,7 +197,7 @@ public struct Inkling2ReferenceConfig: Sendable, Equatable {
 }
 
 /// One layer visit of the per-token schedule.
-public struct Inkling2Visit: Sendable, Equatable {
+public struct Inkling2ReferenceVisit: Sendable, Equatable {
     /// Index in execution order (0 ..< numVisits).
     public let order: Int
     /// Stored layer whose weights run.
