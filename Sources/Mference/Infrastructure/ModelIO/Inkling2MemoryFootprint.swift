@@ -99,12 +99,12 @@ public struct Inkling2MemoryFootprint: Sendable, Equatable {
 
 extension Inkling2MemoryFootprint {
     /// The context Inkling 2 runs with at most on a host where the residency
-    /// plan stages layers (it cannot hold every layer's experts): 40,960
-    /// tokens, whose global KV is 1.25 GiB beside the about 12.2 GB the plan
-    /// keeps resident. Room for the acceptance run's longest case (about 26K
-    /// prompt tokens and a 4,096-token completion) with margin; the program
-    /// coordinator's choice (2026-11-23), reversible here alone.
-    public static let stagedHostContextCap = 40_960
+    /// plan stages layers (it cannot hold every layer's experts): 16,384
+    /// tokens, the most the program tested on a 32 GB Mac, whose global KV is
+    /// 0.5 GiB beside the about 12.2 GB the plan keeps resident. The
+    /// maintainer's decision (2026-11-23, "Yes, cap at 16K"; it was 40,960);
+    /// reversible here alone.
+    public static let stagedHostContextCap = 16_384
 
     /// `stagedHostContextCap` when `Inkling2ExpertResidencyPlan.make` stages
     /// any layer on a host with `physicalMemory` (under 48 GB today), else

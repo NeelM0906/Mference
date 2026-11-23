@@ -317,7 +317,7 @@ struct ServerHostLogTests {
 
 /// K0's acceptance checklist, items 1 and 10: Inkling 2 Mini served by
 /// `--library` under its product identifier beside Deep and the other native
-/// models, one model resident across swaps, and its context capped at 40,960 on
+/// models, one model resident across swaps, and its context capped at 16,384 on
 /// Macs under 48 GB.
 @Suite("Inkling 2 Mini in library mode")
 struct ServerInkling2LibraryTests {
@@ -358,14 +358,16 @@ struct ServerInkling2LibraryTests {
             let list = try Self.library(arguments, memory: memory).snapshot.modelList.data
             return Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.maxModelLen) })
         }
-        // The default --max-context (16,384) is below the cap.
+        // The default --max-context (16,384) is the cap itself.
         let byDefault = try contexts(["--library"], memory: 32 << 30)
         #expect(byDefault[Self.inkling] == 16_384 && byDefault["qwen3.6-35b-a3b"] == 16_384)
-        // `max` and larger values stop at 40,960 for Inkling 2 Mini only.
+        // `max` and larger values stop at 16,384 for Inkling 2 Mini only.
         let max32 = try contexts(["--library", "--max-context", "max"], memory: 32 << 30)
-        #expect(max32[Self.inkling] == 40_960 && max32["qwen3.6-35b-a3b"] == 262_144)
+        #expect(max32[Self.inkling] == 16_384 && max32["qwen3.6-35b-a3b"] == 262_144)
         let large = try contexts(["--library", "--max-context", "65536"], memory: 36 << 30)
-        #expect(large[Self.inkling] == 40_960 && large["maple-preview-2bit-mlx"] == 65_536)
+        #expect(large[Self.inkling] == 16_384 && large["maple-preview-2bit-mlx"] == 65_536)
+        let smaller = try contexts(["--library", "--max-context", "8192"], memory: 32 << 30)
+        #expect(smaller[Self.inkling] == 8_192)
         // From 48 GB every layer is resident and the native context applies.
         let max64 = try contexts(["--library", "--max-context", "max"], memory: 64 << 30)
         #expect(max64[Self.inkling] == 262_144)
@@ -382,7 +384,7 @@ struct ServerInkling2LibraryTests {
             #expect(loaded.modelID == id)
         }
         let loaded = try await library.host.withModel(Self.inkling) { $0.traits.maxContext }
-        #expect(loaded == 40_960)
+        #expect(loaded == 16_384)
         let lifecycle = journal.entries.filter {
             switch $0 {
             case .loadStarted, .unloaded: true

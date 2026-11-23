@@ -12,7 +12,7 @@ import Testing
 @Suite struct CLIContextCapTests {
     /// The default, explicit values below, at, between and above the cap and
     /// the native contexts, and `max`.
-    static let settings: [String?] = [nil, "4096", "16384", "40960", "40961", "65536", "131072", "200000",
+    static let settings: [String?] = [nil, "4096", "16384", "16385", "40960", "40961", "65536", "131072", "200000",
                                       "262144", "max"]
     static let memories: [UInt64] = [8 << 30, 16 << 30, 32 << 30, 36 << 30, 47 << 30, 48 << 30, 64 << 30]
 
@@ -66,7 +66,7 @@ import Testing
 
     @Test func inkling2IsCappedOnlyWhereLayersAreStaged() throws {
         let cap = Inkling2MemoryFootprint.stagedHostContextCap
-        #expect(cap == 40_960)
+        #expect(cap == 16_384)
         for memory in Self.memories {
             let staged = memory < 48 << 30
             for setting in Self.settings {
@@ -103,7 +103,7 @@ import Testing
                                                      pin: Inkling2InstallerTests.pin(for: gguf.data))
         for setting in ["max", "65536"] {
             let args = try Args.parse(["--model", output, "--prompt", "hi", "--max-context", setting])
-            #expect(try args.resolvingModelMaxContext(physicalMemory: 32 << 30).maxContext == 40_960)
+            #expect(try args.resolvingModelMaxContext(physicalMemory: 32 << 30).maxContext == 16_384)
             #expect(try args.resolvingModelMaxContext(physicalMemory: 48 << 30).maxContext
                     == (setting == "max" ? 262_144 : 65_536))
         }

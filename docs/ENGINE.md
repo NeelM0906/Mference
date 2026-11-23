@@ -150,8 +150,9 @@ backend per kind and calls `load` only with no other model resident.
 - `nativeMaxContext`: the context of `.gturbo` models. It defaults to the
   server's `--max-context` default of 16,384, and nil means each model's
   native maximum (`--max-context max`). A descriptor's `hostContextCap`
-  lowers either: Inkling 2 Mini runs at most 40,960 tokens on a Mac under
-  48 GB, where its expert residency plan stages layers.
+  lowers either: Inkling 2 Mini runs at most 16,384 tokens (the tested
+  maximum on 32 GB) on a Mac under 48 GB, where its expert residency plan
+  stages layers.
 - `ggufMaxContext`: the context of GGUF models. Nil means 32,768 tokens, and
   a GGUF never runs past its native context.
 - `EngineModelDescriptor.resolvedContext(options:)` gives the value before

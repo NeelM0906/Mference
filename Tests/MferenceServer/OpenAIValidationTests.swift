@@ -580,17 +580,19 @@ struct ServerArgumentTests {
     }
 
     /// Inkling 2 Mini on a Mac under 48 GB (the residency plan stages layers)
-    /// runs at most 40,960 tokens, whatever `--max-context` asks; from 48 GB it has
+    /// runs at most 16,384 tokens, whatever `--max-context` asks; from 48 GB it has
     /// its native 262,144. No other family is capped by the host.
     @Test func inkling2ContextIsCappedUnderFortyEightGigabytes() {
         let small: UInt64 = 32 << 30, big: UInt64 = 64 << 30
-        #expect(ServerModelSession.resolvedMaxContext(nil, family: .inkling2Loop, physicalMemory: small) == 40_960)
-        #expect(ServerModelSession.resolvedMaxContext(65_536, family: .inkling2Loop, physicalMemory: small) == 40_960)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .inkling2Loop, physicalMemory: small) == 16_384)
+        #expect(ServerModelSession.resolvedMaxContext(65_536, family: .inkling2Loop, physicalMemory: small) == 16_384)
         #expect(ServerModelSession.resolvedMaxContext(16_384, family: .inkling2Loop, physicalMemory: small) == 16_384)
+        #expect(ServerModelSession.resolvedMaxContext(8_192, family: .inkling2Loop, physicalMemory: small) == 8_192)
         #expect(ServerModelSession.resolvedMaxContext(nil, family: .inkling2Loop, physicalMemory: big) == 262_144)
         #expect(ServerModelSession.resolvedMaxContext(nil, family: .qwen36, physicalMemory: small) == 262_144)
         #expect(ServerModelSession.resolvedMaxContext(100_000, family: .maple, physicalMemory: small) == 100_000)
-        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .inkling2Loop, physicalMemory: small) == 32_768)
+        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .inkling2Loop, physicalMemory: small) == 16_384)
+        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .inkling2Loop, physicalMemory: big) == 32_768)
     }
 
     /// The single-model server path resolves every existing family's context
