@@ -539,7 +539,7 @@ struct Inkling2G6cTests {
                 let dir = outURL.appendingPathComponent("traces").appendingPathComponent(id)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 // [48][n][d] F32 little-endian, straight from the trace buffer.
-                try Data(bytesNoCopy: trace.outputs.contents(), count: 48 * n * d * 4, deallocator: .none)
+                try Data(bytesNoCopy: try #require(trace.outputs).contents(), count: 48 * n * d * 4, deallocator: .none)
                     .write(to: dir.appendingPathComponent("hidden_after_visit.f32"))
                 let routes = trace.routes.contents().bindMemory(to: UInt32.self, capacity: 48 * n * topK)
                 // Eight distinct experts of 128 per visit and token.

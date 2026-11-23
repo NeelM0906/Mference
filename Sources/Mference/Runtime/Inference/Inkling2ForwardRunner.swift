@@ -356,10 +356,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// `[48][rows][experts]`) it also writes each token's router logits
     /// `W x` for the visit's MoE input, recomputed by K3's one-token logits
     /// kernel (within about 3e-7 of either router's own sums), from which the
-    /// selection margin (8th minus 9th of sigmoid plus bias) follows. Off on
-    /// every production path.
+    /// selection margin (8th minus 9th of sigmoid plus bias) follows. Without
+    /// `outputs` only the routes (and logits) are copied, for long traces
+    /// where `[48][rows][d]` would be large. Off on every production path.
     struct VisitTrace {
-        let outputs: MTLBuffer
+        let outputs: MTLBuffer?
         let routes: MTLBuffer
         let rows: Int
         var routerLogits: MTLBuffer? = nil
@@ -741,7 +742,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         }
         let topK = moeShape.topK
         if let trace = visitTrace {
-            precondition(start + t <= trace.rows && trace.outputs.length >= 48 * trace.rows * d * 4
+            precondition(start + t <= trace.rows && (trace.outputs?.length ?? .max) >= 48 * trace.rows * d * 4
                          && trace.routes.length >= 48 * trace.rows * topK * 4, "visit trace too small")
             precondition((trace.routerLogits?.length ?? .max) >= 48 * trace.rows * moeShape.experts * 4,
                          "visit trace router logits too small")
@@ -755,8 +756,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             defer { visitIndex += 1 }
             guard let trace = visitTrace, let blit = cb.makeBlitCommandEncoder() else { return }
             let row = visitIndex * trace.rows + start
-            blit.copy(from: s.arena, sourceOffset: s.arenaRef(output).offset, to: trace.outputs,
-                      destinationOffset: row * d * 4, size: t * d * 4)
+            if let outputs = trace.outputs {
+                blit.copy(from: s.arena, sourceOffset: s.arenaRef(output).offset, to: outputs,
+                          destinationOffset: row * d * 4, size: t * d * 4)
+            }
             blit.copy(from: s.moeScratch.ids, sourceOffset: 0, to: trace.routes,
                       destinationOffset: row * topK * 4, size: t * topK * 4)
             blit.endEncoding()
