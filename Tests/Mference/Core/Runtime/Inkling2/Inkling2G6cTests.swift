@@ -319,6 +319,9 @@ struct Inkling2TraceMarginsToyTests {
 /// separated ids) picks the prompts, in that order; all by default.
 /// `MFERENCE_INKLING2_G6C_TRACE_ALL` also traces every teacher-forced prompt
 /// of up to 512 tokens (rule (a)'s coverage), into `<out>/traces/<id>/`.
+/// `MFERENCE_INKLING2_G6C_TRACE_LOGPROBS` also writes log-probs at every
+/// position of a trace prompt with no teacher-forced golden, into
+/// `<out>/tf-trace/<id>/` (outside `tf/`, so the gate does not count them).
 @Suite("Inkling2 G6c: the runner's teacher-forced output", .serialized)
 struct Inkling2G6cTests {
     static let environment = ProcessInfo.processInfo.environment
@@ -448,6 +451,7 @@ struct Inkling2G6cTests {
         let configuration = RuntimeConfiguration(
             prefillChunkTokens: RuntimeConfiguration.familyPrefillChunkTokens(for: c.family) ?? 128)
         let traceAll = Self.environment["MFERENCE_INKLING2_G6C_TRACE_ALL"] != nil
+        let traceLogProbs = Self.environment["MFERENCE_INKLING2_G6C_TRACE_LOGPROBS"] != nil
         let experts = c.numExperts
         let biases = try (0..<c.numLayers).map { layer -> [Float] in
             let t = try model.inkling2RouterSelectionBias(layer: layer)
@@ -480,6 +484,7 @@ struct Inkling2G6cTests {
             try #require(n > 0 && n <= 4096)
             // As ink-golden reads it: `logprobs_last` absent or 0 means every position.
             let first = tf.map { n - 1 - (($0.logprobs_last ?? 0) > 0 ? $0.logprobs_last! : n - 1) }
+                ?? (traceLogProbs && Self.traceGoldens[id] != nil ? 0 : nil)
             try #require(first.map { (0..<n).contains($0) } ?? true)
 
             var logitRows: MTLBuffer?
@@ -510,7 +515,7 @@ struct Inkling2G6cTests {
             runner.visitTrace = nil
 
             if let first, let logitRows {
-                let dir = outURL.appendingPathComponent("tf").appendingPathComponent(id)
+                let dir = outURL.appendingPathComponent(tf == nil ? "tf-trace" : "tf").appendingPathComponent(id)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 // The hook's last row is the production head's, bit for bit.
                 let lastRow = logitRows.contents() + (n - 1 - first) * vocabRows * 2
