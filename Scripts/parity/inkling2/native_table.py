@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native side of the K0 baseline table (stdlib only).
 
-    python3 -I Scripts/parity/inkling2/native_table.py <native-dir> <baseline.md>
+    python3 -I Scripts/parity/inkling2/native_table.py <native-dir> <baseline.md> [--metal-baseline <md>]
 
 Reads, per native_stage.sh stage directory (native-512, native-4k,
 native-16k): run.json (guarded_run.sh: exit, wall, swap, peak footprint, max
@@ -9,9 +9,12 @@ RSS), jobs.log (other swift jobs at start), checks.log (app-open check, CLI
 source, the stage's exit and the CLI's error line), run.log (guarded_run.sh's
 refusal reasons) and stderr.log (MferenceCLI's footer
 `[stop=... prefill=<N>tok/<s>s new=<N>tok decode=<s>s tok/s=<x>]`). Prints a
-Markdown table with exactly baseline.md's columns plus one ratio column
-against the llama.cpp text-* row of the same prompt, then the app-open
-checks, any CLI errors and every raw footer.
+Markdown table with exactly baseline.md's columns plus two ratio columns:
+against baseline.md, and against stock llama.cpp on an all-Metal GGUF
+(`--metal-baseline`: a table with baseline.md's columns and its text-*
+rows; "pending" until that measurement exists), each against the text-*
+row of the same prompt. After the table: the app-open checks, any CLI
+errors and every raw footer.
 
 Definitions, matched to baseline.md's text-* rows:
 - Prefill tok/s = prompt tokens / prefill seconds.
@@ -43,8 +46,8 @@ STAGES = [("native-512", "text-512"), ("native-4k", "text-4k"), ("native-16k", "
 FOOTER = re.compile(r"^\[stop=(\S+) prefill=(\d+)tok/([\d.]+)s(?:[^\]]*?) new=(\d+)tok decode=([\d.]+)s tok/s=([\d.]+)\]$")
 HEADER = ("| Stage | Prompt tok | Prefill tok/s | Decode tok/s | TTFT s | Peak footprint GB | Max RSS GB "
           "| Swap before / after MB | Delta | Exit | Wall s | Other swift jobs at start "
-          "| vs llama.cpp (prefill / decode / TTFT) |")
-RULE = "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|"
+          "| vs llama.cpp (prefill / decode / TTFT) | vs llama.cpp, all-Metal file (prefill / decode / TTFT) |")
+RULE = "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---|"
 
 
 def read(path, default=""):
@@ -66,7 +69,7 @@ def ratio(a, b):
     return f"{a / b:.2f}x" if a is not None and b else "-"
 
 
-def stage_row(d, stage, base):
+def stage_row(d, stage, base, metal=None):
     p = os.path.join(d, stage)
     rj = json.loads(read(os.path.join(p, "run.json"), "{}"))
     jobs = read(os.path.join(p, "jobs.log")).splitlines()
@@ -91,23 +94,44 @@ def stage_row(d, stage, base):
         exit_cell = str(cli_exit if cli_exit is not None else (f"stage {st[-1]}" if st else "?"))
     b = base.get(stage)
     vs = " / ".join(ratio(x, y) for x, y in zip((pp, tg, ttft), b)) if b else "no baseline row"
+    if metal is None:
+        vs_metal = "pending"
+    else:
+        m = metal.get(stage)
+        vs_metal = " / ".join(ratio(x, y) for x, y in zip((pp, tg, ttft), m)) if m else "no baseline row"
     cells = [stage, str(ptok) if ptok is not None else "?", fmt(pp), fmt(tg), fmt(ttft),
              gb(rj.get("peak_footprint_bytes")), gb(rj.get("max_rss_bytes")),
              f"{rj.get('swap_start_mb', '?')} / {rj.get('swap_end_mb', '?')}", str(rj.get("swap_delta_mb", "?")),
-             exit_cell, str(rj.get("wall_s", "?")), jstart, vs]
+             exit_cell, str(rj.get("wall_s", "?")), jstart, vs, vs_metal]
     stop = (footers[-1].group(1), int(footers[-1].group(4))) if footers else None
     return "| " + " | ".join(cells) + " |", [f.group(0) for f in footers], stop
 
 
 def main():
-    d, baseline = sys.argv[1], sys.argv[2]
+    args, mb = sys.argv[1:], None
+    usage = "usage: native_table.py <native-dir> <baseline.md> [--metal-baseline <md>]"
+    for i, a in enumerate(list(args)):
+        if a == "--metal-baseline" or a.startswith("--metal-baseline="):
+            mb = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            del args[i:i + (1 if "=" in a else 2)]
+            if not mb:
+                sys.exit(usage + "\n--metal-baseline needs a file")
+            break
+    if len(args) != 2 or any(x.startswith("--") for x in args):
+        sys.exit(usage)
+    d, baseline = args
+    for path, what in ((d, "native dir"), (baseline, "baseline"), (mb, "metal baseline")):
+        if path is not None and not os.path.exists(path):
+            sys.exit(f"native_table.py: {what} {path} does not exist")
     base = baseline_rows(baseline)
+    metal_rows = baseline_rows(mb) if mb else None
     rows, raw, notes = [], [], []
     for stage, text in STAGES:
         p = os.path.join(d, stage)
         if not os.path.isdir(p):
             continue
-        row, footers, stop = stage_row(d, stage, {stage: base[text]} if text in base else {})
+        metal = None if metal_rows is None else ({stage: metal_rows[text]} if text in metal_rows else {})
+        row, footers, stop = stage_row(d, stage, {stage: base[text]} if text in base else {}, metal)
         rows.append(row)
         raw += [f"{stage}: {f}" for f in footers]
         if stop:
