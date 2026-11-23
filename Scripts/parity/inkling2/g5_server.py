@@ -69,6 +69,17 @@ def cases(family):
            ("P2", base(p1, 48, **STREAM)),
            ("P3", lambda got: base(p1 + [{"role": "assistant", "content": got["P1"].get("content") or ""},
                                          {"role": "user", "content": "Now name one fruit of each color."}], 64))]
+    # a turn cut at the token cap (finish "length" on every family), then a follow-up that continues it:
+    # the prompt cache's bridge after a capped turn; cached_tokens is compared
+    k1 = [{"role": "system", "content": SYSTEM},
+          {"role": "user", "content": "Describe a river in detail, in several long paragraphs."}]
+    def capped_followup(got):
+        r = got["K1"]
+        a = {"role": "assistant", "content": r.get("content") or ""}
+        if r.get("reasoning"):
+            a["reasoning_content"] = r["reasoning"]
+        return base(k1 + [a, {"role": "user", "content": "Now say it in one sentence."}], 48)
+    out += [("K1", base(k1, 16)), ("K2", capped_followup)]
     t1 = [{"role": "user", "content": "What is 17 * 23? Answer with the number only."}]
     think = {"chat_template_kwargs": {"enable_thinking": True}}
     if THINKING[family]:

@@ -32,6 +32,7 @@ A difference in the arguments string alone, with the parsed JSON equal, is repor
 | P1 | system + user "List three primary colors, one per line.", 48 tokens | all | the plain turn |
 | P2 | P1 streaming, `include_usage` | all | the SSE writer |
 | P3 | P1 + P1's reply as returned + user "Now name one fruit of each color.", 64 tokens | all | prompt reuse (`cached_tokens`) |
+| K1, K2 | system + user "Describe a river in detail, in several long paragraphs.", 16 tokens (finish `length`); then K1's messages + K1's reply as returned (content and reasoning) + user "Now say it in one sentence.", 48 tokens | all | the prompt cache after a turn cut at the cap (`cached_tokens` compared) |
 | T1, T2 | user "What is 17 * 23? Answer with the number only.", `chat_template_kwargs.enable_thinking: true`, 384 tokens; non-streaming, streaming | Qwen 3.6, MiniCPM5 | thinking on Qwen 3.6; MiniCPM5 answers 400 (it thinks by default, hidden) |
 | E1 | T1's request | Maple | the 400 refusal |
 | U1, U2 | user "What is the weather in Paris in celsius? Use the tool." with `tools`, 128 tokens | all | tool calls (non-streaming, streaming) |
