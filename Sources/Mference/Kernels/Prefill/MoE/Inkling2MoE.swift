@@ -21,6 +21,20 @@ enum Inkling2MoEEncoding: UInt32, CaseIterable, Sendable {
     }
 }
 
+/// What the experts' products see of their inputs (the GPU side of
+/// `Inkling2ExpertInputQuantization` in the CPU reference). Off by default;
+/// K0's measurement against the base reference sets the shipped value.
+enum Inkling2MoEInputQuantization: UInt32, CaseIterable, Sendable {
+    /// The FP16 inputs as given.
+    case none = 0
+    /// ggml's Q8_0 round trip per 32 values (what the reference's CPU product
+    /// does for its NVFP4 layers).
+    case q8_0Blocks = 1
+    /// The vendor's required activation format: NVFP4 four-over-six (NVFP4
+    /// layers) or MXFP8 (8-bit layers), route weight before the down input.
+    case vendorRequired = 2
+}
+
 /// Shape of one routed-expert layer.
 struct Inkling2MoEShape: Equatable, Sendable {
     var d: Int
@@ -138,6 +152,16 @@ struct Inkling2MoEParams {
     var downOffset: UInt32
     var experts: UInt32
     var workTailBase: UInt32
+    var flags: UInt32
+}
+
+/// Layout-identical to `I2QuantParams`.
+private struct Inkling2InputQuantParams {
+    var width: UInt32
+    var srcStride: UInt32
+    var dstStride: UInt32
+    var mode: UInt32
+    var weightStride: UInt32
 }
 
 /// Layout-identical to `I2PlanParams`.
@@ -185,6 +209,8 @@ final class Inkling2MoEPrefillScratch {
     let dispatch: MTLBuffer
     let activation: MTLBuffer
     let partials: MTLBuffer
+    /// The chunk's expert inputs after an input-quantization pass.
+    let quantizedHidden: MTLBuffer
 
     /// Upper bound of full (up to 64-row) blocks: every expert's last block
     /// may be partial. Tail blocks start at this index.
@@ -197,7 +223,8 @@ final class Inkling2MoEPrefillScratch {
     static func bytes(shape: Inkling2MoEShape, maxTokens: Int) -> Int {
         let pairs = maxTokens * shape.topK
         let work = (pairs + Inkling2MoEKernels.rowsPerBlock - 1) / Inkling2MoEKernels.rowsPerBlock + 2 * shape.experts
-        return pairs * (4 + 4 + 16 + 2 * shape.f + 4 * shape.d) + shape.experts * 8 + work * 16 + 8 + 48
+        return pairs * (4 + 4 + 16 + 2 * shape.f + 4 * shape.d) + maxTokens * shape.d * 2
+            + shape.experts * 8 + work * 16 + 8 + 48
     }
 
     init(device: MTLDevice, shape: Inkling2MoEShape, maxTokens: Int) throws {
@@ -223,6 +250,7 @@ final class Inkling2MoEPrefillScratch {
         dispatch = try buffer(12 * 4, "dispatch")
         activation = try buffer(pairs * shape.f * 2, "activation")
         partials = try buffer(pairs * shape.d * 4, "partials")
+        quantizedHidden = try buffer(maxTokens * shape.d * 2, "quantized-hidden")
     }
 }
 
@@ -251,6 +279,7 @@ final class Inkling2MoEKernels {
         let downTail: MTLComputePipelineState
         let decodeGateUp: MTLComputePipelineState
         let decodeDown: MTLComputePipelineState
+        let inputQuant: MTLComputePipelineState
     }
 
     private let router: MTLComputePipelineState
@@ -289,17 +318,41 @@ final class Inkling2MoEKernels {
                 down: try make("inkling2_moe_down", encoding: encoding),
                 downTail: try make("inkling2_moe_down_tail", encoding: encoding),
                 decodeGateUp: try make("inkling2_moe_decode_gate_up", encoding: encoding),
-                decodeDown: try make("inkling2_moe_decode_down", encoding: encoding))
+                decodeDown: try make("inkling2_moe_decode_down", encoding: encoding),
+                inputQuant: try make("inkling2_moe_input_quant", encoding: encoding))
         }
         self.encoded = encoded
     }
 
     private static func params(_ shape: Inkling2MoEShape, pool: Inkling2ExpertPool, hiddenStride: Int,
-                               workTailBase: Int = 0) -> Inkling2MoEParams {
+                               workTailBase: Int = 0, routeWeightInDownInput: Bool = false) -> Inkling2MoEParams {
         Inkling2MoEParams(d: UInt32(shape.d), f: UInt32(shape.f), topK: UInt32(shape.topK),
                           hiddenStride: UInt32(hiddenStride), expertStride: UInt32(pool.expertStride),
                           gateUpOffset: UInt32(pool.gateUpOffset), downOffset: UInt32(pool.downOffset),
-                          experts: UInt32(pool.experts), workTailBase: UInt32(workTailBase))
+                          experts: UInt32(pool.experts), workTailBase: UInt32(workTailBase),
+                          flags: routeWeightInDownInput ? 1 : 0)
+    }
+
+    /// Rounds `rows` rows of FP16 expert inputs (`width` values each) as a
+    /// quantized product would see them; `rowWeights` (buffer, offset,
+    /// stride in floats) multiplies each row first (the vendor's down input).
+    func encodeInputQuantization(_ encoder: MTLComputeCommandEncoder, encoding: Inkling2MoEEncoding,
+                                 mode: Inkling2MoEInputQuantization,
+                                 source: MTLBuffer, sourceOffset: Int = 0, sourceStride: Int,
+                                 destination: MTLBuffer, destinationOffset: Int = 0, destinationStride: Int,
+                                 rows: Int, width: Int, rowWeights: (MTLBuffer, Int, Int)? = nil) {
+        precondition(mode != .none && width % 32 == 0 && width <= 4096 && rows > 0)
+        guard let kernels = encoded[encoding] else { preconditionFailure("encoding") }
+        var q = Inkling2InputQuantParams(width: UInt32(width), srcStride: UInt32(sourceStride),
+                                         dstStride: UInt32(destinationStride), mode: mode.rawValue,
+                                         weightStride: UInt32(rowWeights?.2 ?? 0))
+        encoder.setComputePipelineState(kernels.inputQuant)
+        encoder.setBuffer(source, offset: sourceOffset, index: 0)
+        encoder.setBuffer(destination, offset: destinationOffset, index: 1)
+        encoder.setBuffer(rowWeights?.0 ?? source, offset: rowWeights?.1 ?? 0, index: 2)
+        encoder.setBytes(&q, length: MemoryLayout<Inkling2InputQuantParams>.stride, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: Self.threads, height: 1, depth: 1))
     }
 
     /// Router logits (FP32, `weight` is `[experts][d]` F32, up to 128 experts), sigmoid, top-k of
@@ -385,20 +438,34 @@ final class Inkling2MoEKernels {
     }
 
     /// Grouped gate-up (SITU fused) and down GEMMs over the planned work
-    /// list: `hidden` holds the chunk's FP16 expert inputs, `hiddenStride`
-    /// halves apart; the result is `scratch.partials`, one FP32 row per
-    /// (token, rank), already scaled by the expert scale and route weight.
+    /// list: `hidden` holds the chunk's `tokens` FP16 expert inputs,
+    /// `hiddenStride` halves apart; the result is `scratch.partials`, one
+    /// FP32 row per (token, rank), already scaled by the expert scale and
+    /// route weight. `inputQuantization` adds a pass over the inputs before
+    /// each product.
     func encodeGroupedExperts(_ encoder: MTLComputeCommandEncoder, hidden: MTLBuffer, hiddenOffset: Int = 0,
-                              hiddenStride: Int, pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch) {
+                              hiddenStride: Int, pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch,
+                              tokens: Int, inputQuantization: Inkling2MoEInputQuantization = .none) {
         let shape = scratch.shape
         precondition(pool.shape == shape, "pool and scratch shapes differ")
         precondition(hiddenStride % 4 == 0 && hiddenStride >= shape.d && hiddenOffset % 8 == 0)
+        precondition(tokens > 0 && tokens <= scratch.maxTokens)
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
-        var p = Self.params(shape, pool: pool, hiddenStride: hiddenStride, workTailBase: scratch.fullBlockCapacity)
+        let vendor = inputQuantization == .vendorRequired
+        var input = (buffer: hidden, offset: hiddenOffset, stride: hiddenStride)
+        if inputQuantization != .none {
+            encodeInputQuantization(encoder, encoding: pool.encoding, mode: inputQuantization,
+                                    source: hidden, sourceOffset: hiddenOffset, sourceStride: hiddenStride,
+                                    destination: scratch.quantizedHidden, destinationStride: shape.d,
+                                    rows: tokens, width: shape.d)
+            input = (scratch.quantizedHidden, 0, shape.d)
+        }
+        var p = Self.params(shape, pool: pool, hiddenStride: input.stride, workTailBase: scratch.fullBlockCapacity,
+                            routeWeightInDownInput: vendor)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)
 
         encoder.setComputePipelineState(kernels.gateUp)
-        encoder.setBuffer(hidden, offset: hiddenOffset, index: 0)
+        encoder.setBuffer(input.buffer, offset: input.offset, index: 0)
         encoder.setBuffer(scratch.pairs, offset: 0, index: 1)
         encoder.setBuffer(scratch.work, offset: 0, index: 2)
         encoder.setBuffer(scratch.workCount, offset: 0, index: 3)
@@ -411,6 +478,21 @@ final class Inkling2MoEKernels {
         encoder.setComputePipelineState(kernels.gateUpTail)
         encoder.dispatchThreadgroups(indirectBuffer: scratch.dispatch, indirectBufferOffset: 12,
                                      threadsPerThreadgroup: threads)
+
+        if inputQuantization != .none {
+            // Activation rows are the sorted pairs; the vendor's rule takes
+            // each pair's route weight first (`I2Pair.weight` at byte 8).
+            encodeInputQuantization(encoder, encoding: pool.encoding, mode: inputQuantization,
+                                    source: scratch.activation, sourceStride: shape.f,
+                                    destination: scratch.activation, destinationStride: shape.f,
+                                    rows: tokens * shape.topK, width: shape.f,
+                                    rowWeights: vendor ? (scratch.pairs, 8, MemoryLayout<Inkling2RoutedPair>.stride / 4) : nil)
+            encoder.setBuffer(scratch.pairs, offset: 0, index: 1)
+            encoder.setBuffer(scratch.work, offset: 0, index: 2)
+            encoder.setBuffer(scratch.workCount, offset: 0, index: 3)
+            encoder.setBuffer(pool.buffer, offset: pool.offset, index: 5)
+            encoder.setBytes(&p, length: MemoryLayout<Inkling2MoEParams>.stride, index: 7)
+        }
 
         encoder.setComputePipelineState(kernels.down)
         encoder.setBuffer(scratch.activation, offset: 0, index: 0)
@@ -443,10 +525,11 @@ final class Inkling2MoEKernels {
     /// router's ids and weights already in `scratch`, grouped experts, reduce.
     func encodePrefill(_ encoder: MTLComputeCommandEncoder, hidden: MTLBuffer, hiddenOffset: Int = 0, hiddenStride: Int,
                        pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch, tokens: Int,
-                       out: MTLBuffer, outOffset: Int = 0, outStride: Int) {
+                       out: MTLBuffer, outOffset: Int = 0, outStride: Int,
+                       inputQuantization: Inkling2MoEInputQuantization = .none) {
         encodeRoutePlan(encoder, scratch: scratch, tokens: tokens)
         encodeGroupedExperts(encoder, hidden: hidden, hiddenOffset: hiddenOffset, hiddenStride: hiddenStride,
-                             pool: pool, scratch: scratch)
+                             pool: pool, scratch: scratch, tokens: tokens, inputQuantization: inputQuantization)
         encodeReduce(encoder, scratch: scratch, tokens: tokens, out: out, outOffset: outOffset, outStride: outStride)
     }
 
@@ -472,21 +555,43 @@ final class Inkling2MoEKernels {
     /// `routeWeights` (`topK` each, as the router writes them), `activation`
     /// scratch of `topK * f` halves; `out` gets `d` FP32 values, the experts
     /// summed in rank order.
+    /// `inputQuantization` other than `.none` needs `inputScratch`, room for
+    /// `d` halves (8-byte aligned), for the rounded input.
     func encodeDecode(_ encoder: MTLComputeCommandEncoder, shape: Inkling2MoEShape,
                       x: MTLBuffer, xOffset: Int = 0, ids: MTLBuffer, idsOffset: Int = 0,
                       routeWeights: MTLBuffer, routeWeightsOffset: Int = 0, pool: Inkling2ExpertPool,
-                      activation: MTLBuffer, activationOffset: Int = 0, out: MTLBuffer, outOffset: Int = 0) {
+                      activation: MTLBuffer, activationOffset: Int = 0, out: MTLBuffer, outOffset: Int = 0,
+                      inputQuantization: Inkling2MoEInputQuantization = .none,
+                      inputScratch: (buffer: MTLBuffer, offset: Int)? = nil) {
         precondition(pool.shape == shape, "pool and decode shapes differ")
         precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0
                      && shape.d % Self.decodeRowsPerThreadgroup == 0)
         precondition(xOffset % 8 == 0 && activationOffset % 8 == 0, "the decode kernels read half4")
         precondition(idsOffset % 4 == 0 && routeWeightsOffset % 4 == 0 && outOffset % 4 == 0)
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
-        var p = Self.params(shape, pool: pool, hiddenStride: shape.d)
+        let vendor = inputQuantization == .vendorRequired
+        var p = Self.params(shape, pool: pool, hiddenStride: shape.d, routeWeightInDownInput: vendor)
         let threads = MTLSize(width: Self.threads, height: 1, depth: 1)
 
-        encodeDecodeGateUp(encoder, shape: shape, x: x, xOffset: xOffset, ids: ids, idsOffset: idsOffset,
+        var input = (buffer: x, offset: xOffset)
+        if inputQuantization != .none {
+            guard let inputScratch else { preconditionFailure("input quantization needs inputScratch") }
+            precondition(inputScratch.offset % 8 == 0 && inputScratch.buffer.length >= inputScratch.offset + shape.d * 2)
+            encodeInputQuantization(encoder, encoding: pool.encoding, mode: inputQuantization,
+                                    source: x, sourceOffset: xOffset, sourceStride: shape.d,
+                                    destination: inputScratch.buffer, destinationOffset: inputScratch.offset,
+                                    destinationStride: shape.d, rows: 1, width: shape.d)
+            input = inputScratch
+        }
+        encodeDecodeGateUp(encoder, shape: shape, x: input.buffer, xOffset: input.offset, ids: ids, idsOffset: idsOffset,
                            pool: pool, activation: activation, activationOffset: activationOffset)
+        if inputQuantization != .none {
+            encodeInputQuantization(encoder, encoding: pool.encoding, mode: inputQuantization,
+                                    source: activation, sourceOffset: activationOffset, sourceStride: shape.f,
+                                    destination: activation, destinationOffset: activationOffset, destinationStride: shape.f,
+                                    rows: shape.topK, width: shape.f,
+                                    rowWeights: vendor ? (routeWeights, routeWeightsOffset, 1) : nil)
+        }
 
         encoder.setComputePipelineState(kernels.decodeDown)
         encoder.setBuffer(activation, offset: activationOffset, index: 0)

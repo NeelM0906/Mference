@@ -287,4 +287,111 @@ import MferenceValidationSupport
         let err = RelError.compute(actual: got, reference: want.flatMap { $0 })
         #expect(err < Self.routedTolerance, "rel err \(err)")
     }
+
+    /// The input-quantization flag end to end against the reference's switch,
+    /// with the same FP16 inputs and FP16-rounded activations. The quantizer
+    /// kernel itself is checked exactly below; here the activations come from
+    /// different summation orders and a fast `tanh`, and a coarse quantizer
+    /// turns an ulp on a rounding boundary into a whole step (E2M1: up to a
+    /// third of the block maximum; Q8_0: 1/127). So both modes keep the
+    /// aggregate (L1) error within `Tolerance.fp16Reduction`; the largest
+    /// element error has the same bound for Q8_0 blocks and 0.1 for the
+    /// vendor rule.
+    @Test(arguments: [(Inkling2MoEEncoding.nvfp4, Inkling2MoEInputQuantization.q8_0Blocks),
+                      (.nvfp4, .vendorRequired), (.q8_0, .q8_0Blocks), (.q8_0, .vendorRequired)])
+    func inputQuantizationMatchesReference(_ c: (encoding: Inkling2MoEEncoding, mode: Inkling2MoEInputQuantization)) throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let shape = Self.small
+        let synthetic = try Inkling2SyntheticPool.make(device: context.device, encoding: c.encoding, shape: shape,
+                                                       seed: 0x2A20, quantized: true)
+        let tokens = 40
+        let (hidden, rows) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2A21)
+        let routes = Inkling2MoETestSupport.randomRoutes(tokens: tokens, experts: shape.experts, topK: shape.topK, seed: 0x2A22)
+        let scratch = try Inkling2MoEPrefillScratch(device: context.device, shape: shape, maxTokens: tokens)
+        Inkling2MoETestSupport.write(routes.ids, to: scratch.ids)
+        Inkling2MoETestSupport.write(routes.weights, to: scratch.routeWeights)
+        let out = context.device.makeBuffer(length: tokens * shape.d * 4, options: .storageModeShared)!
+        let decodeOut = context.device.makeBuffer(length: shape.d * 4, options: .storageModeShared)!
+        let activation = context.device.makeBuffer(length: shape.topK * shape.f * 2, options: .storageModeShared)!
+        let inputScratch = context.device.makeBuffer(length: shape.d * 2, options: .storageModeShared)!
+        let cb = Inkling2MoETestSupport.run(context) { encoder in
+            kernels.encodePrefill(encoder, hidden: hidden, hiddenStride: shape.d, pool: synthetic.pool, scratch: scratch,
+                                  tokens: tokens, out: out, outStride: shape.d, inputQuantization: c.mode)
+        }
+        #expect(cb.status == .completed)
+        _ = Inkling2MoETestSupport.run(context) {
+            kernels.encodeDecode($0, shape: shape, x: hidden, ids: scratch.ids, routeWeights: scratch.routeWeights,
+                                 pool: synthetic.pool, activation: activation, out: decodeOut,
+                                 inputQuantization: c.mode, inputScratch: (inputScratch, 0))
+        }
+        let mode: Inkling2ExpertInputQuantization = c.mode == .q8_0Blocks ? .q8_0Blocks : .vendorRequired
+        let experts = (0..<shape.experts).map { synthetic.expert($0) }
+        let want: [[Float]] = rows.indices.map { t in
+            var sum = [Float](repeating: 0, count: shape.d)
+            for r in 0..<shape.topK {
+                let expert = experts[Int(routes.ids[t * shape.topK + r])]
+                let w = routes.weights[t * shape.topK + r]
+                let act = Inkling2ExpertRef.activation(expert, x: rows[t], mode: mode).map { Float(Float16($0)) }
+                let y = mode == .vendorRequired
+                    ? Inkling2ExpertRef.down(expert, activation: act, preScale: w, mode: mode)
+                    : Inkling2ExpertRef.down(expert, activation: act, mode: mode).map { $0 * w }
+                for i in 0..<shape.d { sum[i] += y[i] }
+            }
+            return sum
+        }
+        let vendor = c.mode == .vendorRequired
+        let bound = vendor ? 0.1 : Tolerance.fp16Reduction
+        let got = Inkling2MoETestSupport.read(out, as: Float.self, count: tokens * shape.d)
+        let flat = want.flatMap { $0 }
+        let err = RelError.compute(actual: got, reference: flat)
+        #expect(err < bound, "prefill rel err \(err)")
+        let l1 = zip(got, flat).reduce(Float(0)) { $0 + abs($1.0 - $1.1) } / flat.reduce(Float(0)) { $0 + abs($1) }
+        #expect(l1 < Tolerance.fp16Reduction, "prefill L1 rel err \(l1)")
+        let decodeErr = RelError.compute(actual: Inkling2MoETestSupport.read(decodeOut, as: Float.self, count: shape.d),
+                                         reference: want[0])
+        #expect(decodeErr < bound, "decode rel err \(decodeErr)")
+        // The pass changes the result: the unquantized output differs.
+        let plain = Self.expectedRows(synthetic, hidden: rows, ids: routes.ids, weights: routes.weights, topK: shape.topK)
+        #expect(RelError.compute(actual: got, reference: plain.flatMap { $0 }) > 1e-4)
+    }
+
+    /// The input-quantization kernel on its own: many rows, with and without
+    /// row weights (read at a 16-byte stride as from `I2Pair`), against the
+    /// reference quantizer on the same FP16 inputs.
+    @Test(arguments: [(Inkling2MoEEncoding.nvfp4, Inkling2MoEInputQuantization.vendorRequired),
+                      (.nvfp4, .q8_0Blocks), (.q8_0, .vendorRequired)])
+    func inputQuantizationKernelMatchesReference(_ c: (encoding: Inkling2MoEEncoding, mode: Inkling2MoEInputQuantization)) throws {
+        let context = try MetalContext()
+        let kernels = try Inkling2MoEKernels(context: context)
+        let rows = 160, width = 128
+        let (source, values) = Inkling2MoETestSupport.halfBuffer(context.device, rows: rows, stride: width, d: width,
+                                                                 seed: 0x2A30, range: 3)
+        var rng = SeedTree(0x2A31).key("row-weights")
+        let weights = (0..<rows).map { _ in rng.uniform(0.2, 2) }
+        var records = [Float](repeating: 0, count: rows * 4)
+        for r in 0..<rows { records[r * 4 + 2] = weights[r] }
+        let weightBuffer = records.withUnsafeBytes {
+            context.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)!
+        }
+        let mode: Inkling2ExpertInputQuantization = c.mode == .q8_0Blocks ? .q8_0Blocks : .vendorRequired
+        let encoding: Inkling2ExpertEncoding = c.encoding == .nvfp4 ? .nvfp4 : .q8_0
+        for weighted in [false, true] {
+            let destination = context.device.makeBuffer(length: rows * width * 2, options: .storageModeShared)!
+            _ = Inkling2MoETestSupport.run(context) {
+                kernels.encodeInputQuantization($0, encoding: c.encoding, mode: c.mode, source: source, sourceStride: width,
+                                                destination: destination, destinationStride: width, rows: rows, width: width,
+                                                rowWeights: weighted ? (weightBuffer, 8, 4) : nil)
+            }
+            let got = Inkling2MoETestSupport.read(destination, as: Float16.self, count: rows * width).map(Float.init)
+            var worst: Float = 0, worstRow = -1
+            for r in 0..<rows {
+                let input = weighted ? values[r].map { $0 * weights[r] } : values[r]
+                let want = Inkling2ExpertRef.quantizedInput(input, encoding: encoding, mode: mode).map { Float(Float16($0)) }
+                let err = RelError.compute(actual: Array(got[(r * width)..<((r + 1) * width)]), reference: want)
+                if err > worst { worst = err; worstRow = r }
+            }
+            #expect(worst < 2e-3, "weighted \(weighted): worst row \(worstRow) rel err \(worst)")
+        }
+    }
 }

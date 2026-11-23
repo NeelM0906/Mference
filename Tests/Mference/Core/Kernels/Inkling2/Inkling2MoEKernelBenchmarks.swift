@@ -122,7 +122,8 @@ import MferenceValidationSupport
                 for pool in pools {
                     let plan = Self.best(context) { kernels.encodeRoutePlan($0, scratch: scratch, tokens: tokens) }
                     let experts = Self.best(context) {
-                        kernels.encodeGroupedExperts($0, hidden: hidden, hiddenStride: Self.shape.d, pool: pool, scratch: scratch)
+                        kernels.encodeGroupedExperts($0, hidden: hidden, hiddenStride: Self.shape.d, pool: pool,
+                                                     scratch: scratch, tokens: tokens)
                     }
                     let reduce = Self.best(context) {
                         kernels.encodeReduce($0, scratch: scratch, tokens: tokens, out: out, outStride: Self.shape.d)
@@ -138,6 +139,19 @@ import MferenceValidationSupport
                                  tokens, skewed ? "skewed" : "uniform", pool.encoding == .nvfp4 ? "nvfp4" : "q8_0", work, tails,
                                  plan * 1000, experts * 1000, flops / experts / 1e12, reduce * 1000,
                                  total * 1000, flops / total / 1e12))
+                    if !skewed {
+                        for mode in [Inkling2MoEInputQuantization.q8_0Blocks, .vendorRequired] {
+                            let quantized = Self.best(context) {
+                                kernels.encodePrefill($0, hidden: hidden, hiddenStride: Self.shape.d, pool: pool,
+                                                      scratch: scratch, tokens: tokens, out: out, outStride: Self.shape.d,
+                                                      inputQuantization: mode)
+                            }
+                            print(String(format: "[inkling2-moe-kbench] rows=%d enc=%@ input %@ total %.3f ms (+%.3f ms)",
+                                         tokens, pool.encoding == .nvfp4 ? "nvfp4" : "q8_0",
+                                         mode == .q8_0Blocks ? "q8_0" : "vendor", quantized * 1000,
+                                         (quantized - total) * 1000))
+                        }
+                    }
                 }
             }
         }

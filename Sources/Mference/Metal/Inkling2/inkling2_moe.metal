@@ -54,6 +54,7 @@ struct I2Params {
     uint down_offset;       // bytes from a blob to down row 0
     uint experts;
     uint work_tail_base;    // index of the first tail block in the work list
+    uint flags;             // bit 0: route weights are already in the down input
 };
 
 static inline uint i2_row_bytes(uint k) {
@@ -280,10 +281,11 @@ static inline void i2_down_block(
         const uint r = sg_m + i * 8u + fc.x;
         if (r >= w.row_count) continue;
         const I2Pair pair = pairs[w.pair_start + r];
+        const float weight = (p.flags & 1u) != 0u ? 1.0f : pair.weight;
         device float* dst = partials + ulong(pair.token * p.top_k + pair.rank) * p.D + n_base + sg_n + fc.y;
         I2_UNROLL for (uint j = 0; j < NJ; ++j) {
             const float2 v = float2(acc[i][j].thread_elements()[0], acc[i][j].thread_elements()[1]);
-            *reinterpret_cast<device float2*>(dst + j * 8u) = (v * scale) * pair.weight;
+            *reinterpret_cast<device float2*>(dst + j * 8u) = (v * scale) * weight;
         }
     }
 }
@@ -589,6 +591,128 @@ kernel void inkling2_route_scatter(
     sorted[at] = I2Pair{p / top_k, p % top_k, route_weights[p], 0u};
 }
 
+// MARK: - Expert-input quantization (opt-in; `Inkling2ExpertInputQuantization`)
+
+// Rounds rows of FP16 expert inputs the way a quantized product would see
+// them, writing FP16 results (in place is allowed): mode 1 is ggml's Q8_0
+// round trip per 32 values (its CPU NVFP4 and Q8_0 products); mode 2 the
+// vendor's required activation format: NVFP4 four-over-six with a per-row
+// outer scale amax / 1536 (NVFP4 layers) or MXFP8 per 32 values (8-bit
+// layers). With a weight stride (the vendor's down input), row r is first
+// multiplied by weights[r * weight_stride], its route weight, as the
+// vendor's serving code does before the down quantizer; the down epilogue
+// then skips the weight (`I2Params.flags` bit 0). One threadgroup of 128
+// threads per row; `width` <= 4096 and a multiple of 32. Arithmetic follows
+// the CPU reference: no contraction, and every division precise (a fast
+// reciprocal moves values that sit on a rounding boundary by a whole step).
+
+struct I2QuantParams {
+    uint width;
+    uint src_stride;      // halves
+    uint dst_stride;      // halves
+    uint mode;            // 1: Q8_0 blocks, 2: vendor
+    uint weight_stride;   // floats between row weights; 0: no row weight
+};
+
+static inline float i2_round_e4m3(float x) {
+    const uint exponent = (as_type<uint>(x) >> 23) & 255u;
+    const float spacing = as_type<float>((max(exponent, 121u) - 3u) << 23);
+    return rint(precise::divide(x, spacing)) * spacing;
+}
+
+static inline float i2_round_e2m1(float x) {
+    const float m = fabs(x);
+    float q = m > 0.25f ? 0.5f : 0.0f;
+    if (m >= 0.75f) q = 1.0f;
+    if (m > 1.25f) q = 1.5f;
+    if (m >= 1.75f) q = 2.0f;
+    if (m > 2.5f) q = 3.0f;
+    if (m >= 3.5f) q = 4.0f;
+    if (m > 5.0f) q = 6.0f;
+    return x < 0.0f ? -q : q;
+}
+
+kernel void inkling2_moe_input_quant(
+    device const half* src               [[buffer(0)]],
+    device half* dst                     [[buffer(1)]],
+    device const float* weights          [[buffer(2)]],
+    constant I2QuantParams& q            [[buffer(3)]],
+    uint row    [[threadgroup_position_in_grid]],
+    ushort tid  [[thread_index_in_threadgroup]],
+    ushort sg   [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+    #pragma clang fp contract(off)
+    threadgroup float values[4096];
+    threadgroup float maxima[4];
+    const float weight = q.weight_stride != 0u ? weights[ulong(row) * q.weight_stride] : 1.0f;
+    device const half* in = src + ulong(row) * q.src_stride;
+    device half* out = dst + ulong(row) * q.dst_stride;
+    float local_max = 0.0f;
+    for (uint i = tid; i < q.width; i += kI2Threads) {
+        const float v = float(in[i]) * weight;
+        values[i] = v;
+        local_max = max(local_max, fabs(v));
+    }
+    local_max = simd_max(local_max);
+    if (lane == 0) maxima[sg] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float row_max = max(max(maxima[0], maxima[1]), max(maxima[2], maxima[3]));
+
+    if (q.mode == 1u || (q.mode == 2u && kI2Encoding != kI2NVFP4)) {
+        // 32-value blocks: Q8_0 (ggml quantize_row_q8_0_ref) or MXFP8.
+        for (uint b = tid; b < q.width / 32u; b += kI2Threads) {
+            float amax = 0.0f;
+            for (uint i = 0; i < 32; ++i) amax = max(amax, fabs(values[b * 32u + i]));
+            if (q.mode == 1u) {
+                const float d = precise::divide(amax, 127.0f);
+                const float id = d != 0.0f ? precise::divide(1.0f, d) : 0.0f;
+                const float stored = float(half(d));
+                for (uint i = 0; i < 32; ++i) {
+                    out[b * 32u + i] = half(round(values[b * 32u + i] * id) * stored);
+                }
+            } else {
+                const float raw = amax * precise::divide(1.0f, 448.0f);
+                int exponent = int(as_type<uint>(raw) >> 23);
+                if ((as_type<uint>(raw) & 0x7FFFFFu) != 0u) exponent += 1;
+                exponent = min(exponent, 254);
+                const float minimum = as_type<float>(0x00400000u);
+                if (!(raw > minimum)) exponent = 0;
+                const float scale = max(as_type<float>(uint(exponent) << 23), minimum);
+                const float inverse = exponent == 0 ? as_type<float>(0x7F000000u) : precise::divide(1.0f, scale);
+                for (uint i = 0; i < 32; ++i) {
+                    const float s = clamp(values[b * 32u + i] * inverse, -448.0f, 448.0f);
+                    const float r = i2_round_e4m3(fabs(s));
+                    out[b * 32u + i] = half((s < 0.0f ? -r : r) * scale);
+                }
+            }
+        }
+        return;
+    }
+    // NVFP4 four-over-six (Ollama's port of the vendor's quantizer).
+    const float normalizer = min(precise::divide(1536.0f, row_max), FLT_MAX);
+    const float decoder = precise::divide(1.0f, normalizer);
+    const float outer = row_max * precise::divide(1.0f, 1536.0f);
+    for (uint b = tid; b < q.width / 16u; b += kI2Threads) {
+        float block_max = 0.0f;
+        for (uint i = 0; i < 16; ++i) block_max = max(block_max, fabs(values[b * 16u + i]));
+        const float scale_a = i2_round_e4m3(min(block_max * (normalizer * precise::divide(1.0f, 6.0f)), 448.0f));
+        const float scale_b = i2_round_e4m3(min(block_max * (normalizer * 0.25f), 448.0f));
+        const float inv_a = min(precise::divide(1.0f, scale_a * decoder), FLT_MAX);
+        const float inv_b = min(precise::divide(1.0f, scale_b * decoder), FLT_MAX);
+        float error_a = 0.0f, error_b = 0.0f;
+        for (uint i = 0; i < 16; ++i) {
+            const float v = values[b * 16u + i];
+            error_a += fabs(v - i2_round_e2m1(v * inv_a) * scale_a * outer);
+            error_b += fabs(v - i2_round_e2m1(v * inv_b) * scale_b * outer);
+        }
+        const bool four = error_b < error_a;
+        const float inv = four ? inv_b : inv_a, scale = four ? scale_b : scale_a;
+        for (uint i = 0; i < 16; ++i) {
+            out[b * 16u + i] = half(i2_round_e2m1(values[b * 16u + i] * inv) * scale * outer);
+        }
+    }
+}
+
 // MARK: - Decode (one token)
 
 // Doubled E2M1 magnitudes (0, 1, 2, 3, 4, 6, 8, 12) as the nibbles of one
@@ -693,7 +817,8 @@ kernel void inkling2_moe_decode_down(
         for (uint g = lane % 4u; g < groups; g += 4u) acc += i2_group_dot(w, g, act);
         acc += simd_shuffle_xor(acc, 1);
         acc += simd_shuffle_xor(acc, 2);
-        if (lane % 4u == 0u) partial[r * 8u + local] = (acc * down_scales[expert]) * route_weights[r];
+        const float weight = (p.flags & 1u) != 0u ? 1.0f : route_weights[r];
+        if (lane % 4u == 0u) partial[r * 8u + local] = (acc * down_scales[expert]) * weight;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane < 8u) {
