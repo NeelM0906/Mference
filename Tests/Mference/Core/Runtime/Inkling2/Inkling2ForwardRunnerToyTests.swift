@@ -254,13 +254,15 @@ struct Inkling2ForwardRunnerToyTests {
                                                  readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
                                                  decodeSlots: .perLayer(24))
 
-        func run(_ weights: Inkling2RunnerWeights, shortPrefill: Int? = nil, deferredReadbacks: Bool = false) async throws
+        func run(_ weights: Inkling2RunnerWeights, shortPrefill: Int? = nil, deferredReadbacks: Bool = false,
+                 coldMisses: Int? = nil) async throws
             -> (logits: [[UInt16]], outputs: [Float], routes: [UInt32], routerLogits: [Float],
                 cache: Inkling2ForwardRunner.DecodeCacheStats, short: Inkling2ForwardRunner.ShortPrefillStats) {
             let runner = try Inkling2ForwardRunner(weights: weights, context: context,
                                                    maxContext: 64, maxChunkTokens: 4)
             if let shortPrefill { runner.shortPrefillMaxTokens = shortPrefill }
             runner.defersDecodeReadback = deferredReadbacks
+            runner.shortPrefillColdMisses = coldMisses
             let device = context.device
             let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
             let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
@@ -299,6 +301,12 @@ struct Inkling2ForwardRunnerToyTests {
         let swept = try await run(stored, shortPrefill: 0)
         #expect(swept.logits == fixed.logits && swept.outputs == fixed.outputs)
         #expect(swept.short.visits == 0 && staged.short.visits > staged.short.fallbacks)
+        // The cold-chunk rule at a cap of 0: a short chunk whose first staged
+        // visit misses at all reads the rest of its staged layers whole, with
+        // no further readbacks. The same bits.
+        let cold = try await run(stored, coldMisses: 0)
+        #expect(cold.logits == fixed.logits && cold.outputs == fixed.outputs && cold.routerLogits == fixed.routerLogits)
+        #expect(cold.short.coldChunks > 0 && staged.short.coldChunks == 0)
         // Decode visits deferred (the GPU waits on a CPU-signalled event; the
         // switch's other arm) against split readbacks (the default): the same
         // bits, the same caching.
@@ -316,6 +324,32 @@ struct Inkling2ForwardRunnerToyTests {
         #expect(staged.routes == fixed.routes)
         #expect(staged.routerLogits == fixed.routerLogits)
         #expect(fixed.routerLogits.allSatisfy(\.isFinite) && fixed.routerLogits.contains { $0 != 0 })
+        // Seeding (`Inkling2SlotSeeding`). The 24 slots above sit wholly under
+        // the fill line (the toy's slabs are a Q8_0 layer's size), so a store
+        // of 64 slots a layer, whose slabs reach past it: with the sweep
+        // forced, the prompts of two or more chunks seed the surviving slots
+        // before their last chunk; with seeding off the fills empty every
+        // slot of their slabs. The same bits either way. (Nothing is resident
+        // at 24 GB, so nothing hides the seed reads and none are made.)
+        if plan.placements.contains(.resident) {
+            let roomy = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan,
+                                                readMode: .forHost(physicalMemory: UInt64(hostGigabytes) << 30),
+                                                decodeSlots: .perLayer(64), seeding: .seed)
+            var weights = toy.runnerWeights
+            weights.experts = roomy
+            let seeded = try await run(weights, shortPrefill: 0)
+            let report = try #require(roomy.seedReport)
+            roomy.seeding = .off
+            let unseeded = try await run(weights, shortPrefill: 0)
+            #expect(seeded.logits == fixed.logits && seeded.outputs == fixed.outputs)
+            #expect(unseeded.logits == fixed.logits && unseeded.outputs == fixed.outputs)
+            #expect(seeded.routerLogits == fixed.routerLogits && unseeded.routerLogits == fixed.routerLogits)
+            #expect(report.layers > 0 && report.loaded > 0 && !report.cancelled && !report.failed)
+            print("inkling2 toy seeding at \(hostGigabytes) GB, 64 slots: last seed \(report.layers) layers, "
+                  + "\(report.loaded) experts read, \(report.kept) in place; decode \(seeded.cache.hits) hits, "
+                  + "\(seeded.cache.misses) misses seeded against \(unseeded.cache.hits) hits, "
+                  + "\(unseeded.cache.misses) misses off")
+        }
         // Every decode step's staged visits went through the slot caches.
         let decodeSteps = steps.filter(\.decode).count
         /// The stored layer of visit `v`: prelude 0-5, three passes of 6-17, coda 18-23.

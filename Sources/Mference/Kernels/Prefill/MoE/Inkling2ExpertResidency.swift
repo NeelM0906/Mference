@@ -47,6 +47,33 @@ enum Inkling2StagedReadMode: String, Equatable, Sendable {
     static func decodeMissForHost(physicalMemory: UInt64) -> Self? { nil }
 }
 
+/// What the staged layers' decode slots keep across a prefill, and whether a
+/// long prompt seeds them for the decode that follows (K2, coordinator
+/// ruling 2026-11-23). Every mode gives the same bytes out; they differ only
+/// in which experts the slots hold when decode starts.
+///
+/// A whole-layer fill writes bytes `0 ..< layer bytes` of its slab, never
+/// more than the largest staged layer (a Q8_0 layer, 1.08 GB). Slots whose
+/// bytes start at or above that line survive every prefill; on a 32 GB host
+/// about 3.6 GB of the three 2.28 GB slabs.
+enum Inkling2SlotSeeding: String, Equatable, Sendable {
+    /// A fill empties every cache in its slab (the behavior before seeding).
+    case off
+    /// A fill empties only the slots it overwrote; nothing is seeded.
+    case keep
+    /// As `keep`, and before the last chunk of a prompt of two or more
+    /// chunks the surviving slots are loaded with each staged layer's most
+    /// routed experts of the chunk before, in the background, after the
+    /// last chunk's early fills (while its looped layers compute).
+    case seed
+
+    /// The `MFERENCE_INKLING2_SEED` switch (`off`, `keep` or `seed`), else
+    /// `seed`.
+    static var fromEnvironment: Self {
+        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_SEED"].flatMap(Self.init(rawValue:)) ?? .seed
+    }
+}
+
 /// How the staged layers' decode slots are laid out in the staging slabs.
 enum Inkling2DecodeSlots: Equatable, Sendable {
     /// The slabs as prefill needs them (each the size of the largest staged
@@ -65,11 +92,21 @@ enum Inkling2DecodeSlots: Equatable, Sendable {
     /// 32 GB).
     case fill(slabBytes: Int)
 
-    /// `.perLayer(n)` from the `MFERENCE_INKLING2_DECODE_SLOTS` experiment
-    /// toggle (`0` for `.evenBytes`), if set.
+    /// The `MFERENCE_INKLING2_DECODE_SLOTS` experiment toggle, if set: `n`
+    /// for `.perLayer(n)` (`0` for `.evenBytes`), or `fill:<bytes>` for
+    /// `.fill(slabBytes:)` with slabs of at most that many bytes (to measure
+    /// a smaller staging size than the plan's on one host; the plan, and so
+    /// the product's memory estimate, does not move).
     static var fromEnvironment: Self? {
-        ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"].flatMap(Int.init)
-            .map { $0 > 0 ? .perLayer($0) : .evenBytes }
+        guard let value = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_SLOTS"] else { return nil }
+        return parse(value)
+    }
+
+    static func parse(_ value: String) -> Self? {
+        if value.hasPrefix("fill:") {
+            return Int(value.dropFirst(5)).flatMap { $0 > 0 ? .fill(slabBytes: $0) : nil }
+        }
+        return Int(value).map { $0 > 0 ? .perLayer($0) : .evenBytes }
     }
 
     /// Where each staged layer's slots go: equal counts per layer (capped at
@@ -641,6 +678,25 @@ final class Inkling2ExpertStore: @unchecked Sendable {
             for i in 0..<slots { expertIn[i] = -1; lastUse[i] = 0 }
         }
 
+        /// The first slot whose bytes start at or above `line` in the slab:
+        /// slots from it on are never written by a fill of at most `line` bytes.
+        func firstSlot(atOrAbove line: Int) -> Int {
+            guard line > offset else { return 0 }
+            let above = line - offset
+            return above >= slots * stride ? slots : (above + stride - 1) / stride
+        }
+
+        /// Empties the slots a fill of the slab's first `bytes` overwrote.
+        func invalidate(below bytes: Int) {
+            for i in 0..<firstSlot(atOrAbove: bytes) { empty(i) }
+        }
+
+        func empty(_ slot: Int) {
+            if expertIn[slot] >= 0, slotOf[expertIn[slot]] == slot { slotOf[expertIn[slot]] = nil }
+            expertIn[slot] = -1
+            lastUse[slot] = 0
+        }
+
         func scale(_ source: (buffer: MTLBuffer, offset: Int)?, expert: Int) -> Float {
             guard let source else { return 1 }
             return (source.buffer.contents() + source.offset).load(fromByteOffset: expert * 4, as: Float.self)
@@ -677,14 +733,69 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// (`prefetchFirstStagedVisit`); that chunk's `beginPrefillVisit` of the
     /// layer takes it over.
     private var prefetched: (layer: Int, ticket: Inkling2StagedExpertLayers.Ticket)?
-    /// Slabs a prefill read has written since their caches were last
-    /// emptied: those caches are emptied before their next use. Caches in
-    /// other slabs keep their experts (a short prefill chunk that falls back
-    /// to a whole-layer read for one layer costs only that slab's caches).
-    private var staleSlabs = Set<ObjectIdentifier>()
+    /// Per slab a prefill read has written since its caches were last
+    /// cleaned, the bytes written from the slab's start (`Int.max`: all of
+    /// it): the slots there are emptied before the next slot use. Other slots
+    /// keep their experts: other slabs' caches, and with `seeding` other than
+    /// `.off` the slots above what the fills wrote (a short prefill chunk
+    /// that falls back to a whole-layer read costs only the slots it
+    /// overwrote).
+    private var staleBytes: [ObjectIdentifier: Int] = [:]
     private func markAllStale() {
-        for cache in caches.values { staleSlabs.insert(ObjectIdentifier(cache.slab)) }
+        for cache in caches.values { staleBytes[ObjectIdentifier(cache.slab)] = Int.max }
     }
+    /// Records a fill of `layer` into `slab` (call with the lock held).
+    private func markWritten(_ slab: MTLBuffer, layer: Int) {
+        let bytes = seedingMode == .off ? Int.max : (caches[layer]?.file.bytes ?? Int.max)
+        staleBytes[ObjectIdentifier(slab), default: 0] = max(staleBytes[ObjectIdentifier(slab)] ?? 0, bytes)
+    }
+
+    /// See `Inkling2SlotSeeding`. Change it only between runs.
+    var seeding: Inkling2SlotSeeding {
+        get { lock.withLock { seedingMode } }
+        set { lock.withLock { seedingMode = newValue } }
+    }
+    private var seedingMode: Inkling2SlotSeeding
+    /// No fill writes a slab at or above this byte (the largest staged
+    /// layer, page-rounded): slots from there up survive every prefill.
+    let fillLine: Int
+    /// Each staged layer's per-expert route counts from its latest
+    /// whole-layer prefill visit (`encodeRouteCounts`), `experts` uint32 a
+    /// row, and the layers counted since the last seed.
+    private let routeCounts: MTLBuffer?
+    private let countRow: [Int: Int]
+    private var counted = Set<Int>()
+    /// The seed job in flight (`seedDecodeSlots`): its reads run on
+    /// `seedQueue`; the first slot use after it waits for it, or cancels it
+    /// if its reads have not started.
+    private let seedQueue = DispatchQueue(label: "inkling2.decode-seeds", qos: .userInitiated)
+    private let seedGroup = DispatchGroup()
+    private var seedPending = false
+    private var seedCancelled = false
+    /// The last seed job, for diagnostics and tests.
+    struct SeedReport: Equatable, Sendable {
+        /// Staged layers seeded, experts read, experts already in place.
+        var layers = 0
+        var loaded = 0
+        var kept = 0
+        var bytes = 0
+        /// From the request to the gate (the last chunk's early fills done),
+        /// and reading.
+        var waitSeconds = 0.0
+        var readSeconds = 0.0
+        /// Cancelled before its reads started, or a read failed (its slots
+        /// are then empty).
+        var cancelled = false
+        var failed = false
+    }
+    private var lastSeed: SeedReport?
+    /// The last seed job's report; a job still waiting for its gate is
+    /// cancelled first, one reading is waited for.
+    var seedReport: SeedReport? {
+        finishSeeding()
+        return lock.withLock { lastSeed }
+    }
+    private let logsSeeding = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_CACHE_LOG"] != nil
     /// Signalled by each ended decode visit's command buffer with its count.
     private let decodeDone: MTLSharedEvent
     private var decodeIssued: UInt64 = 0
@@ -717,12 +828,15 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// `MFERENCE_INKLING2_DECODE_MISS_READS`) and then the plan's choices
     /// apply. Slots larger than the plan's grow the slabs past its
     /// `stagingBytes`; the runner's budget check counts the store's own.
+    /// `seeding` defaults to the `MFERENCE_INKLING2_SEED` switch.
     init(device: MTLDevice, shape: Inkling2MoEShape, layers: [Inkling2ExpertLayerSpec],
          plan: Inkling2ExpertResidencyPlan, readMode: Inkling2StagedReadMode = .forHost(),
          decodeSlots: Inkling2DecodeSlots? = nil,
-         decodeMissReadMode: Inkling2StagedReadMode? = nil) throws {
+         decodeMissReadMode: Inkling2StagedReadMode? = nil,
+         seeding: Inkling2SlotSeeding? = nil) throws {
         precondition(layers.count == plan.placements.count)
         let decodeSlots = decodeSlots ?? Inkling2DecodeSlots.fromEnvironment ?? plan.decodeSlots
+        self.seedingMode = seeding ?? .fromEnvironment
         self.plan = plan
         self.shape = shape
         self.readMode = readMode
@@ -818,6 +932,19 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         }
         guard let decodeDone = device.makeSharedEvent(), let routed = device.makeSharedEvent(),
               let ready = device.makeSharedEvent() else { throw StoreError.allocationFailed("decode events") }
+        let largest = stagedLayers.map { layers[$0].file.bytes }.max() ?? 0
+        self.fillLine = (largest + pageSize - 1) / pageSize * pageSize
+        self.countRow = Dictionary(uniqueKeysWithValues: stagedLayers.enumerated().map { ($1, $0) })
+        if stagedLayers.isEmpty {
+            self.routeCounts = nil
+        } else {
+            guard let counts = device.makeBuffer(length: stagedLayers.count * shape.experts * 4,
+                                                 options: .storageModeShared) else {
+                throw StoreError.allocationFailed("route counts")
+            }
+            counts.label = "inkling2.experts.route-counts"
+            self.routeCounts = counts
+        }
         self.decodeDone = decodeDone
         self.routed = routed
         self.ready = ready
@@ -875,7 +1002,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         }
         staging.encodeWait(ticket, commandBuffer: commandBuffer)
         open[layer, default: []].append(ticket)
-        staleSlabs.insert(ObjectIdentifier(ticket.slab))
+        markWritten(ticket.slab, layer: layer)
         return try template.rebound(to: ticket.slab)
     }
 
@@ -894,7 +1021,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         guard prefetched == nil else { return }
         let ticket = try staging.stage(layer: first, after: (decodeDone, decodeIssued))
         prefetched = (first, ticket)
-        staleSlabs.insert(ObjectIdentifier(ticket.slab))
+        markWritten(ticket.slab, layer: first)
     }
 
     /// Releases a prefetched visit whose chunk will not run (cancelled between
@@ -929,12 +1056,197 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         staging.encodeRelease(ticket, commandBuffer: commandBuffer)
     }
 
+    /// After a whole-layer prefill visit of a staged layer, in the same
+    /// command buffer after the encoder whose route plan wrote `counts`
+    /// (`experts` uint32, the chunk's entries per expert): keeps a copy for
+    /// `seedDecodeSlots`. Nothing unless `seeding` is `.seed`.
+    func encodeRouteCounts(layer: Int, counts: MTLBuffer, commandBuffer: MTLCommandBuffer) {
+        guard let routeCounts, let row = countRow[layer] else { return }
+        lock.lock()
+        let seeds = seedingMode == .seed
+        if seeds { counted.insert(layer) }
+        lock.unlock()
+        guard seeds, let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        blit.label = "inkling2.experts.route-counts"
+        blit.copy(from: counts, sourceOffset: 0, to: routeCounts, destinationOffset: row * shape.experts * 4,
+                  size: shape.experts * 4)
+        blit.endEncoding()
+    }
+
+    /// Seeds the decode slots for the decode after a long prompt. Call it
+    /// before the prompt's last chunk (a long one: it reads every staged
+    /// layer whole), once the chunk before it has completed, and with no
+    /// command buffer in flight. For each staged layer counted in that chunk
+    /// (`encodeRouteCounts`), the slots no fill can reach (from `fillLine`
+    /// up) take its most routed experts, in rank order, those already there
+    /// staying put. The reads run in the background once the last chunk's
+    /// fills up to its first staged layer after the resident ones are done
+    /// (the slab ring is then idle while the resident layers compute), and
+    /// the first slot use waits for them. Nothing unless `seeding` is
+    /// `.seed`, or when no layer is resident (no idle ring to hide them in).
+    func seedDecodeSlots() {
+        finishSeeding()
+        guard let staging, let routeCounts else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        let layers = counted.sorted()
+        counted.removeAll()
+        let staged = plan.placements.indices.filter { plan.placements[$0] == .staged }
+        guard seedingMode == .seed, !layers.isEmpty,
+              let firstResident = plan.placements.firstIndex(of: .resident) else {
+            lock.unlock()
+            return
+        }
+        // The ring's sequence for the last chunk's first staged visit (a
+        // prefetched one, or the next), and the fill to wait for: the one of
+        // the `slabs`-th staged layer after the resident ones, or, with none
+        // after them, the last staged one before them.
+        let firstSequence = prefetched?.ticket.sequence ?? staging.lastSequence + 1
+        let before = staged.filter { $0 < firstResident }.count
+        let after = staged.count - before
+        let gate = firstSequence + UInt64(max(1, before + min(staging.slabs.count, after))) - 1
+        var report = SeedReport()
+        var jobs: [(cache: DecodeCache, loads: [(Int, Int)])] = []
+        let rows = routeCounts.contents().bindMemory(to: UInt32.self, capacity: countRow.count * shape.experts)
+        for layer in layers {
+            guard let cache = caches[layer], let row = countRow[layer] else { continue }
+            let first = cache.firstSlot(atOrAbove: fillLine)
+            let room = cache.slots - first
+            guard room > 0 else { continue }
+            // The layer's most routed experts (ties by id), routed at least once.
+            let base = row * shape.experts
+            var routed: [(expert: Int, count: UInt32)] = []
+            for expert in 0..<shape.experts where rows[base + expert] > 0 {
+                routed.append((expert, rows[base + expert]))
+            }
+            routed.sort { (a: (expert: Int, count: UInt32), b: (expert: Int, count: UInt32)) -> Bool in
+                a.count != b.count ? a.count > b.count : a.expert < b.expert
+            }
+            let ranked: [Int] = routed.prefix(room).map { $0.expert }
+            guard !ranked.isEmpty else { continue }
+            let wanted = Set(ranked)
+            // Empty slots first, then the least recently used.
+            var free: [Int] = []
+            for slot in first..<cache.slots where cache.expertIn[slot] < 0 || !wanted.contains(cache.expertIn[slot]) {
+                free.append(slot)
+            }
+            let lastUse = cache.lastUse
+            free.sort { (a: Int, b: Int) -> Bool in lastUse[a] != lastUse[b] ? lastUse[a] < lastUse[b] : a < b }
+            var loads: [(Int, Int)] = []
+            for expert in ranked {
+                if let slot = cache.slotOf[expert], slot >= first { report.kept += 1; continue }
+                let slot = free.removeFirst()
+                if let other = cache.slotOf[expert] { cache.empty(other) }   // below the line: a fill may overwrite it
+                cache.empty(slot)
+                cache.expertIn[slot] = expert
+                cache.slotOf[expert] = slot
+                loads.append((slot, expert))
+            }
+            // Most routed newest, so the least routed seeds are evicted first.
+            for expert in ranked.reversed() {
+                cache.clock += 1
+                cache.lastUse[cache.slotOf[expert]!] = cache.clock
+            }
+            let gateUp = cache.gateUpScales.contents().bindMemory(to: Float.self, capacity: cache.slots)
+            let down = cache.downScales.contents().bindMemory(to: Float.self, capacity: cache.slots)
+            for (slot, expert) in loads {
+                gateUp[slot] = cache.scale(cache.sourceGateUp, expert: expert)
+                down[slot] = cache.scale(cache.sourceDown, expert: expert)
+            }
+            report.layers += 1
+            report.loaded += loads.count
+            report.bytes += loads.count * cache.blobBytes
+            if !loads.isEmpty { jobs.append((cache, loads)) }
+        }
+        guard !jobs.isEmpty else {
+            lastSeed = report
+            lock.unlock()
+            return
+        }
+        // Entered with the lock held: a slot use that sees the job pending
+        // always waits for it.
+        seedPending = true
+        seedCancelled = false
+        seedGroup.enter()
+        let bypassCache = (decodeMissReadMode ?? readMode) == .uncached
+        lock.unlock()
+        nonisolated(unsafe) let work = jobs
+        let planned = report
+        let deadline = started + waitTimeoutMS * 1_000_000
+        // The job holds the store weakly: a store dropped while its job waits
+        // (a model unloaded after a last chunk that threw before staging) is
+        // freed, and the job ends within a slice.
+        seedQueue.async { [weak self, group = seedGroup] in
+            defer { group.leave() }
+            var report = planned
+            // Wait for the gate in short slices. A slot use, an abandon or a
+            // recovery cancels a job whose chunk never reached it; so does the
+            // deadline (a last chunk that threw before staging its fills).
+            while staging.filled.signaledValue < gate {
+                guard let store = self else { return }
+                if store.lock.withLock({ store.seedCancelled }) || DispatchTime.now().uptimeNanoseconds > deadline {
+                    report.cancelled = true
+                    store.finishSeedJob(work, report: report, emptySlots: true)
+                    return
+                }
+                _ = staging.filled.wait(untilSignaledValue: gate, timeoutMS: 20)
+            }
+            guard let store = self else { return }
+            let reading = DispatchTime.now().uptimeNanoseconds
+            report.waitSeconds = Double(reading - started) / 1e9
+            var failed = false
+            for job in work {
+                do {
+                    try Inkling2ExpertStore.readExperts(cache: job.cache, loads: job.loads, bypassCache: bypassCache)
+                } catch {
+                    failed = true
+                }
+            }
+            report.readSeconds = Double(DispatchTime.now().uptimeNanoseconds - reading) / 1e9
+            report.failed = failed
+            store.finishSeedJob(work, report: report, emptySlots: failed)
+        }
+    }
+
+    /// Ends a seed job: records its report and, if it was cancelled or a read
+    /// failed, empties every slot it was to fill.
+    private func finishSeedJob(_ work: [(cache: DecodeCache, loads: [(Int, Int)])], report: SeedReport,
+                               emptySlots: Bool) {
+        lock.lock()
+        if emptySlots {
+            for job in work {
+                for (slot, expert) in job.loads where job.cache.expertIn[slot] == expert { job.cache.empty(slot) }
+            }
+        }
+        lastSeed = report
+        seedPending = false
+        lock.unlock()
+        if logsSeeding {
+            FileHandle.standardError.write(Data(String(
+                format: "inkling2 seed: %d layers, %d experts read (%.2f GB), %d already in place; gate %.3f s, read %.3f s%@\n",
+                report.layers, report.loaded, Double(report.bytes) / 1e9, report.kept, report.waitSeconds,
+                report.readSeconds, report.cancelled ? ", cancelled" : report.failed ? ", a read failed: slots emptied" : "").utf8))
+        }
+    }
+
+    /// Before any slot use: a seed job whose reads have not started is
+    /// cancelled (its slots emptied); one reading is waited for. Call without
+    /// the lock.
+    private func finishSeeding() {
+        lock.lock()
+        let pending = seedPending
+        if pending { seedCancelled = true }
+        lock.unlock()
+        if pending { seedGroup.wait() }
+    }
+
     /// For a command buffer that will never be committed: releases every
     /// prefill visit begun and not yet ended, in order (see
     /// `Inkling2StagedExpertLayers.abandon`), and marks every decode visit
     /// ended so far as done. Call it only after every committed command
     /// buffer has completed.
     func abandonOpenVisits() throws {
+        finishSeeding()
         lock.lock()
         let tickets = open.values.flatMap { $0 } + (prefetched.map { [$0.ticket] } ?? [])
         open.removeAll()
@@ -949,6 +1261,7 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// so far is marked released and done, and the decode caches start empty
     /// (otherwise the next fill or slot refill would wait out the timeout).
     func recoverAfterFailedCommands() {
+        finishSeeding()
         lock.lock()
         open.removeAll()
         prefetched = nil
@@ -1092,10 +1405,14 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// then reads the layer whole (`beginPrefillVisit`), which empties only
     /// the caches in the slab it overwrites. End a returned visit with
     /// `endDecodeVisit` after the encoder that reads its slots; the slots are
-    /// that command buffer's until it completes.
-    func beginShortPrefillVisit(layer: Int, expertIDs: [Int]) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])? {
+    /// that command buffer's until it completes. With `maxMisses`, also nil
+    /// (still before any slot is assigned) when more than that many of the
+    /// chunk's distinct experts are not in the slots.
+    func beginShortPrefillVisit(layer: Int, expertIDs: [Int],
+                                maxMisses: Int? = nil) throws -> (binding: Inkling2DecodeBinding, slots: [UInt32])? {
         precondition(!expertIDs.isEmpty && expertIDs.count % shape.topK == 0)
-        guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: expertIDs, refuseWhenFull: true) else {
+        guard let (binding, slots) = try assignSlots(layer: layer, expertIDs: expertIDs, refuseWhenFull: true,
+                                                     maxMisses: maxMisses) else {
             return nil
         }
         return (binding, slots.map { UInt32($0) })
@@ -1105,19 +1422,23 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     /// entries): hits keep their slots, misses take the least recently used
     /// slots no entry of this visit needs and are read from the layer file,
     /// the slot scales follow. With `refuseWhenFull`, returns nil before
-    /// touching anything when the distinct experts outnumber the slots.
-    /// Before refilling, waits for the GPU to finish the prefill visits that
-    /// wrote this cache's slab and the last visit that read this layer's slots.
-    private func assignSlots(layer: Int, expertIDs: [Int], refuseWhenFull: Bool,
+    /// touching anything when the distinct experts outnumber the slots, and
+    /// with `maxMisses` when more of them than that are not in the slots
+    /// (counted after a prefill's overwritten slots are emptied, before any
+    /// assignment). Before refilling, waits for the GPU to finish the prefill
+    /// visits that wrote this cache's slab and the last visit that read this
+    /// layer's slots.
+    private func assignSlots(layer: Int, expertIDs: [Int], refuseWhenFull: Bool, maxMisses: Int? = nil,
                              refillAfter: UInt64? = nil) throws -> (Inkling2DecodeBinding, [Int])? {
         guard let cache = caches[layer] else { throw StoreError.notStaged(layer: layer) }
         precondition(expertIDs.allSatisfy { $0 >= 0 && $0 < shape.experts })
+        finishSeeding()
         lock.lock()
         defer { lock.unlock() }
         if refuseWhenFull && Set(expertIDs).count > cache.slots { return nil }
-        if !staleSlabs.isEmpty, let staging {
+        if !staleBytes.isEmpty, let staging {
             // Prefill wrote slabs: wait for its last read into them and for the
-            // GPU to finish reading them, then empty the caches in those slabs.
+            // GPU to finish reading them, then empty the slots it overwrote.
             // A visit prefetched for a chunk that never came is released first.
             do {
                 try releasePrefetched(staging)
@@ -1130,9 +1451,12 @@ final class Inkling2ExpertStore: @unchecked Sendable {
                !staging.released.wait(untilSignaledValue: last, timeoutMS: waitTimeoutMS) {
                 throw StoreError.timedOut("prefill reads of the staging slabs")
             }
-            for c in caches.values where staleSlabs.contains(ObjectIdentifier(c.slab)) { c.clear() }
-            staleSlabs.removeAll()
+            for c in caches.values {
+                if let written = staleBytes[ObjectIdentifier(c.slab)] { c.invalidate(below: written) }
+            }
+            staleBytes.removeAll()
         }
+        if let maxMisses, Set(expertIDs).filter({ cache.slotOf[$0] == nil }).count > maxMisses { return nil }
 
         cache.clock += 1
         var slotFor = [Int](repeating: -1, count: expertIDs.count)
