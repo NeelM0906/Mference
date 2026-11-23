@@ -259,9 +259,12 @@ import MferenceValidationSupport
                      Double(staged.bytesRead) / 1e9 / staged.secondsReading))
     }
 
-    /// Decode on a staged layer without readback or copy: the layer file
-    /// mapped and wrapped whole (`makeBuffer(bytesNoCopy:)`), warm in the
-    /// file cache, against the same bytes in an anonymous buffer. Times one
+    /// Decode reading a layer file mapped and wrapped whole
+    /// (`makeBuffer(bytesNoCopy:)`), warm in the file cache, against the same
+    /// bytes in an anonymous buffer. Warm, the two cost the same; but binding
+    /// a mapping makes Metal page in and pin the whole file (K4's probe: a
+    /// cold 1 GiB file read in full for a 4-byte access), so the store does
+    /// not decode staged layers this way (`prepareDecodeVisit` instead). Times one
     /// step per command buffer (GPU time and wall time from commit to
     /// completion, which includes Metal making the buffer resident) and 32
     /// steps per command buffer.

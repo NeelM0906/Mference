@@ -598,7 +598,8 @@ final class Inkling2MoEKernels {
     func encodeDecodeGateUp(_ encoder: MTLComputeCommandEncoder, shape: Inkling2MoEShape,
                             x: MTLBuffer, xOffset: Int = 0, ids: MTLBuffer, idsOffset: Int = 0,
                             pool: Inkling2ExpertPool, activation: MTLBuffer, activationOffset: Int = 0) {
-        precondition(pool.shape == shape, "pool and decode shapes differ")
+        precondition(pool.shape.d == shape.d && pool.shape.f == shape.f && pool.shape.topK == shape.topK,
+                     "pool and decode shapes differ")  // a decode cache pool holds fewer experts
         precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0)
         precondition(xOffset % 8 == 0 && activationOffset % 8 == 0 && idsOffset % 4 == 0,
                      "the decode kernels read half4 and uint")
@@ -628,7 +629,8 @@ final class Inkling2MoEKernels {
                       activation: MTLBuffer, activationOffset: Int = 0, out: MTLBuffer, outOffset: Int = 0,
                       inputQuantization: Inkling2MoEInputQuantization = .none,
                       inputScratch: (buffer: MTLBuffer, offset: Int)? = nil) {
-        precondition(pool.shape == shape, "pool and decode shapes differ")
+        precondition(pool.shape.d == shape.d && pool.shape.f == shape.f && pool.shape.topK == shape.topK,
+                     "pool and decode shapes differ")  // a decode cache pool holds fewer experts
         precondition(shape.isSupported && shape.f % Self.decodeRowsPerThreadgroup == 0
                      && shape.d % Self.decodeRowsPerThreadgroup == 0)
         precondition(xOffset % 8 == 0 && activationOffset % 8 == 0, "the decode kernels read half4")
