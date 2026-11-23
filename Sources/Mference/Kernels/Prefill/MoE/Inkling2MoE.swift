@@ -575,8 +575,13 @@ final class Inkling2MoEKernels {
     /// and `scratch.routeWeights`, and writes the 64-row work list and the
     /// indirect dispatch arguments the grouped GEMMs read. Nothing returns
     /// to the CPU.
-    func encodeRoutePlan(_ encoder: MTLComputeCommandEncoder, scratch: Inkling2MoEPrefillScratch, tokens: Int) {
+    /// `ids` replaces `scratch.ids` as the routed ids (`tokens x topK`
+    /// uint32): a short prefill chunk on a staged layer's slot pool plans by
+    /// slot, leaving the router's expert ids in `scratch.ids`.
+    func encodeRoutePlan(_ encoder: MTLComputeCommandEncoder, scratch: Inkling2MoEPrefillScratch, tokens: Int,
+                         ids: MTLBuffer? = nil) {
         let shape = scratch.shape
+        let routed = ids ?? scratch.ids
         precondition(tokens > 0 && tokens <= scratch.maxTokens)
         var pairs = UInt32(tokens * shape.topK), experts = UInt32(shape.experts), k = UInt32(shape.topK)
         let expertThreads = MTLSize(width: shape.experts, height: 1, depth: 1)
@@ -589,7 +594,7 @@ final class Inkling2MoEKernels {
         encoder.dispatchThreads(expertThreads, threadsPerThreadgroup: MTLSize(width: min(shape.experts, 256), height: 1, depth: 1))
 
         encoder.setComputePipelineState(count)
-        encoder.setBuffer(scratch.ids, offset: 0, index: 0)
+        encoder.setBuffer(routed, offset: 0, index: 0)
         encoder.setBuffer(scratch.counts, offset: 0, index: 1)
         encoder.setBytes(&pairs, length: 4, index: 2)
         encoder.setBytes(&experts, length: 4, index: 3)
@@ -609,7 +614,7 @@ final class Inkling2MoEKernels {
         encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: expertThreads)
 
         encoder.setComputePipelineState(scatter)
-        encoder.setBuffer(scratch.ids, offset: 0, index: 0)
+        encoder.setBuffer(routed, offset: 0, index: 0)
         encoder.setBuffer(scratch.routeWeights, offset: 0, index: 1)
         encoder.setBuffer(scratch.cursors, offset: 0, index: 2)
         encoder.setBuffer(scratch.pairs, offset: 0, index: 3)
@@ -629,7 +634,9 @@ final class Inkling2MoEKernels {
                               hiddenStride: Int, pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch,
                               tokens: Int, inputQuantization: Inkling2MoEInputQuantization = .none) {
         let shape = scratch.shape
-        precondition(pool.shape == shape, "pool and scratch shapes differ")
+        // A decode cache's slot pool (fewer experts, the ids slots) serves a
+        // short chunk's rows as it serves decode's.
+        precondition(pool.servesDecode(of: shape), "pool and scratch shapes differ")
         precondition(hiddenStride % 4 == 0 && hiddenStride >= shape.d && hiddenOffset % 8 == 0)
         precondition(tokens > 0 && tokens <= scratch.maxTokens)
         guard let kernels = encoded[pool.encoding] else { preconditionFailure("encoding") }
@@ -709,8 +716,8 @@ final class Inkling2MoEKernels {
     func encodePrefill(_ encoder: MTLComputeCommandEncoder, hidden: MTLBuffer, hiddenOffset: Int = 0, hiddenStride: Int,
                        pool: Inkling2ExpertPool, scratch: Inkling2MoEPrefillScratch, tokens: Int,
                        out: MTLBuffer, outOffset: Int = 0, outStride: Int,
-                       inputQuantization: Inkling2MoEInputQuantization = .none) {
-        encodeRoutePlan(encoder, scratch: scratch, tokens: tokens)
+                       inputQuantization: Inkling2MoEInputQuantization = .none, ids: MTLBuffer? = nil) {
+        encodeRoutePlan(encoder, scratch: scratch, tokens: tokens, ids: ids)
         encodeGroupedExperts(encoder, hidden: hidden, hiddenOffset: hiddenOffset, hiddenStride: hiddenStride,
                              pool: pool, scratch: scratch, tokens: tokens, inputQuantization: inputQuantization)
         encodeReduce(encoder, scratch: scratch, tokens: tokens, out: out, outOffset: outOffset, outStride: outStride)
