@@ -67,8 +67,8 @@ all 20 rows). With `generate/` that makes 11 log-prob prompts and 2 traces.
 `trace01/` and `trace02/`: `golden.json` and `trace.json` (and, for
 `trace02`, the `logprobs.json` its golden.json names) from the same
 prompts run with `-ngl 0`, no GPU device, no op offload and no CPU weight
-repacking, so every op runs on the CPU backend with the reference's Q8_0
-rounding of the inputs to NVFP4 and Q8_0 products. `trace.json` holds, per
+repacking, so every op runs on the CPU backend (the precision is described
+under "What the CPU-only traces computed" below). `trace.json` holds, per
 layer visit, the routed expert ids and weights (graph tensors
 `ffn_moe_topk-<slot>`, `ffn_moe_weights_scaled-<slot>`). The FP32 hidden
 states after each visit (`l_out-<slot>`, `[48 x n_prompt x 2304]`) are with
@@ -110,9 +110,33 @@ control also reads the previous pass's bank: the input of its layer-12 visit
 or the embedding, so a per-visit test can be fed entirely from the trace;
 feeding only record `v - 1` is wrong at visits 18 and 30 and leaves out the
 block and bank inputs. Expert ids per visit and
-position are in `trace.json` (compare as sets; weights sum to 8). The CPU-only
-run rounds the inputs of NVFP4 and Q8_0 products to Q8_0. The full
+position are in `trace.json` (compare as sets; weights sum to 8). The full
 definitions are in the program's goldens README ("Trace records").
+
+## What the CPU-only traces computed (the G6a precision)
+
+llama.cpp b12641, `ink-golden --ngl 0`, this repository's build:
+
+1. Attention never uses flash attention, at any length: inkling2 always passes
+   `kq_b` (the relative bias minus the sink logit) to `build_attn`, and
+   `llama-graph.cpp:3134` sets `use_flash_attn = cparams.flash_attn &&
+   kq_b == nullptr` (the log's "Flash Attention enabled" is the context
+   setting only). K and V are cached in F16. KQ is `ggml_vec_dot_f16_f32`: K
+   widened to F32, Q unrounded F32, an F32 dot. The bias is added in F32, then
+   `soft_max_ext` in F32 with the scale 1/sqrt(128) applied to (KQ + bias).
+   KQV is the same F16-by-F32 dot with F32 probabilities.
+2. Under 32 tokens in a batch everything runs on the CPU backend: inputs to
+   Q8_0 products (dense and routed experts) and to NVFP4 expert products
+   are rounded to Q8_0 (32-value blocks, FP16 scale), inputs to BF16
+   products to BF16.
+3. From 32 tokens up, the Accelerate BLAS backend the build links takes the
+   contiguous dense products with all three dimensions >= 32 and the KQV
+   product, as F32 with unrounded activations; KQ, the routed experts and
+   every decode step stay as in 1 and 2.
+
+`trace01`, `trace01b` and `trace02` (5, 6 and 20 tokens) are under rules 1
+and 2. The 300-token tool-prompt trace kept with the program's results is
+under rules 1 and 3.
 
 ## `noise/`: the reference against itself
 
