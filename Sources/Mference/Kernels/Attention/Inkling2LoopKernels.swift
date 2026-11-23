@@ -68,7 +68,9 @@ public final class Inkling2DepthMix {
 }
 
 /// The loop's message gate, `(1 - tanh(F z)) x + tanh(G z) m` with
-/// `z = W_down [rms(x); rms(m)]`, all in FP32 as the vendor computes it, in
+/// `z = W_down [rms(x); rms(m)]`, all in FP32 as llama.cpp's `control` and the
+/// CPU references compute it (the vendor keeps the forget and gain products
+/// in FP32 and runs the down product in the model dtype), in
 /// four dispatches per visit's controllers (query, key, value; the MoE input
 /// controller the same way):
 /// 1. `encodeInputs`: `h = [rms(x); rms(m)]`, FP32 `[rows][2 * width]`, per controller;

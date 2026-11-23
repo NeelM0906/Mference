@@ -7,7 +7,8 @@ public enum Inkling2WeightFormat: UInt32, Sendable {
     case q8_0 = 0
     /// Plain BF16 rows (`attn_sink_proj`, `attn_k_conv_proj`, `attn_v_conv_proj`).
     case bf16 = 1
-    /// Plain F32 rows (the loop gates' `loop_*_ctrl_down`), decoded to half per tile.
+    /// Plain F32 rows, decoded to half per tile on the half-input paths. (The
+    /// loop gates' F32 weights go through `encodeFloat`, which keeps FP32.)
     case f32 = 2
 
     /// Byte alignment the kernels' vector loads need for a segment's weight offset.
@@ -75,7 +76,7 @@ public final class Inkling2Projection {
     /// Small-batch kernels for at most 1, 2, 4 and 8 tokens.
     private let rows: [(tokens: Int, state: MTLComputePipelineState)]
     private let tensor: MTLComputePipelineState?
-    /// Whether the many-token default is `.tensorOps` rather than `.tiled`.
+    /// Whether the many-token default is `.tensorOps` rather than a simdgroup kernel.
     public let prefersTensorOps: Bool
 
     /// `preferTensorOps` defaults to the device's Apple10 tensor support
@@ -96,8 +97,9 @@ public final class Inkling2Projection {
     public func defaultPath(tokens: Int, inputs: Int) -> Path {
         if tokens <= Self.maxRowsPathTokens { return .rows }
         if prefersTensorOps && inputs % 64 == 0 { return .tensorOps }
-        // 64 x 64 tiles measured 7% faster than 64 x 32 from 512 rows up (M1 Max).
-        return tokens >= 64 ? .tiled64 : .tiled
+        // 64 x 64 tiles measured 6-8% faster than 64 x 32 at 512, 1,024 and 2,048
+        // rows (M1 Max); below 512 the 64 x 32 tile stays the default.
+        return tokens >= 512 ? .tiled64 : .tiled
     }
 
     /// Requires `inputs % 32 == 0`, inputs aligned to 4 halves (offsets and

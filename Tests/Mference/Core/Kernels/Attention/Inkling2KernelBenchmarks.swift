@@ -110,21 +110,30 @@ import Testing
             if projection.supportsTensorOps { runs.append((tokens, .tensorOps)) }
         }
         for (tokens, path) in runs {
+            // Decode-sized products chain 48 visits in one command buffer, as a decode step
+            // does; one dispatch per buffer would mostly time the GPU clock ramp.
+            let chain = path == .rows ? 48 : 1
             for (label, segments) in [("window-qkv", windowSegments), ("global-qkv", globalSegments)] {
                 let rows = segments.reduce(0) { $0 + $1.rows }
                 let t = Self.time(ctx) { cb in
-                    projection.encode(commandBuffer: cb, weights: weights, input: input, output: output,
-                                      tokens: tokens, inputs: hidden, outStride: rows, segments: segments, path: path)
+                    for _ in 0..<chain {
+                        projection.encode(commandBuffer: cb, weights: weights, input: input, output: output,
+                                          tokens: tokens, inputs: hidden, outStride: rows, segments: segments, path: path)
+                    }
                 }
-                Self.report("\(label)-\(path.rawValue)", tokens: tokens, rows: rows, inputs: hidden, time: t)
+                Self.report("\(label)-\(path.rawValue)", tokens: tokens, rows: rows, inputs: hidden,
+                            time: (t.best / Double(chain), t.median / Double(chain)))
             }
             let t = Self.time(ctx) { cb in
-                projection.encode(commandBuffer: cb, weights: wo, input: attnIn, output: woOut, tokens: tokens,
-                                  inputs: 3072, outStride: hidden,
-                                  segments: [.init(weightOffset: 0, inputStride: 3072, rows: hidden, outColumn: 0)],
-                                  path: path)
+                for _ in 0..<chain {
+                    projection.encode(commandBuffer: cb, weights: wo, input: attnIn, output: woOut, tokens: tokens,
+                                      inputs: 3072, outStride: hidden,
+                                      segments: [.init(weightOffset: 0, inputStride: 3072, rows: hidden, outColumn: 0)],
+                                      path: path)
+                }
             }
-            Self.report("output-\(path.rawValue)", tokens: tokens, rows: hidden, inputs: 3072, time: t)
+            Self.report("output-\(path.rawValue)", tokens: tokens, rows: hidden, inputs: 3072,
+                        time: (t.best / Double(chain), t.median / Double(chain)))
         }
     }
 
@@ -186,7 +195,9 @@ import Testing
             let a = Inkling2DecodeAttention.Arguments(
                 queries: .init(q), cache: cache, relative: .init(rel), table: .init(table), sink: .init(sink),
                 gate: .init(gate), output: .init(out), partials: .init(partials), position: position, mask: mask)
-            let t = Self.time(ctx, repeats: 20) { decode.encode(commandBuffer: $0, a) }
+            // 48 steps per command buffer (a decode token's visits), per-step time reported.
+            let chained = Self.time(ctx, repeats: 5) { cb in for _ in 0..<48 { decode.encode(commandBuffer: cb, a) } }
+            let t = (best: chained.best / 48, median: chained.median / 48)
             let keys = Inkling2DecodeAttention.keyRange(position: position, mask: mask).count
             let bytes = Double(keys) * 1024 * 2 * 2
             print(String(format: "[ink2-kbench] decode-attn %@ position=%d keys=%d best=%.1f us median=%.1f us %.1f GB/s(kv)",

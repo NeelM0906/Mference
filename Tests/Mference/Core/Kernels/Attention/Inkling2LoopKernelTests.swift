@@ -8,11 +8,12 @@ import MferenceValidationSupport
 @Suite(.serialized) struct Inkling2LoopKernelTests {
     typealias S = Inkling2TestSupport
 
-    @Test(arguments: [(3, 3), (2, 4), (6, 1), (1, 2)])
-    func depthMixMatchesReference(states count: Int, queries queryCount: Int) throws {
+    /// Query scale 0.1 gives a near-uniform softmax; 2.0 a peaked one.
+    @Test(arguments: [(3, 3, Float(0.1)), (2, 4, 0.1), (6, 1, 0.1), (1, 2, 0.1), (6, 3, 2.0), (2, 4, 2.0)])
+    func depthMixMatchesReference(states count: Int, queries queryCount: Int, queryScale: Float) throws {
         let ctx = try MetalContext()
         let mix = try Inkling2DepthMix(library: Inkling2KernelLibrary(context: ctx))
-        var rng = SeedTree(0x6a00 + UInt64(count * 8 + queryCount)).key("ink2-mix")
+        var rng = SeedTree(0x6a00 + UInt64(count * 8 + queryCount)).key("ink2-mix-\(queryScale)")
         let rows = 4, width = 2304
         var dense: [[Float]] = []
         var inputs: [(ref: Inkling2BufferRef, stride: Int)] = []
@@ -22,7 +23,7 @@ import MferenceValidationSupport
             dense.append((0..<rows).flatMap { t in values[(t * stride)..<(t * stride + width)] })
             inputs.append((.init(S.buffer(ctx.device, floats: values)), stride))
         }
-        let queries = S.random(queryCount * width, &rng, -0.1, 0.1)
+        let queries = S.random(queryCount * width, &rng, -queryScale, queryScale)
         let out = ctx.device.makeBuffer(length: rows * queryCount * width * 4, options: .storageModeShared)!
         try S.run(ctx) { cb in
             try mix.encode(commandBuffer: cb, states: inputs, queries: .init(S.buffer(ctx.device, floats: queries)),
@@ -31,6 +32,36 @@ import MferenceValidationSupport
         let reference = Inkling2LoopRef.depthMix(states: dense, queries: queries, queryCount: queryCount,
                                                  rows: rows, hidden: width)
         #expect(RelError.compute(actual: S.readFloats(out, count: rows * queryCount * width), reference: reference) < 2e-5)
+    }
+
+    /// The FP32 product with partial row and token tiles (70 rows, 37 tokens).
+    @Test func floatProductMatchesReference() throws {
+        let ctx = try MetalContext()
+        let projection = try Inkling2Projection(library: Inkling2KernelLibrary(context: ctx))
+        var rng = SeedTree(0x6c00).key("ink2-f32mm")
+        let tokens = 37, inputs = 96, rows = [70, 24]
+        let weights = rows.map { S.random($0 * inputs, &rng, -0.5, 0.5) }
+        let x = S.random(tokens * (inputs + 4), &rng, -2, 2)          // row stride inputs + 4
+        let out = S.buffer(ctx.device, floats: [Float](repeating: -1, count: tokens * 96))
+        S.run(ctx) { cb in
+            projection.encodeFloat(commandBuffer: cb, weights: S.buffer(ctx.device, floats: weights[0] + weights[1]),
+                                   input: S.buffer(ctx.device, floats: x), output: out, tokens: tokens, inputs: inputs,
+                                   outStride: 96, segments: [
+                                       .init(weightOffset: 0, inputOffset: 0, inputStride: inputs + 4, rows: rows[0],
+                                             outColumn: 0, format: .f32),
+                                       .init(weightOffset: rows[0] * inputs * 4, inputOffset: 0, inputStride: inputs + 4,
+                                             rows: rows[1], outColumn: 72, format: .f32)])
+        }
+        let got = S.readFloats(out, count: tokens * 96)
+        for t in 0..<tokens {
+            for c in 0..<96 {
+                guard c < 70 || c >= 72 else { #expect(got[t * 96 + c] == -1); continue }
+                let (w, r) = c < 70 ? (weights[0], c) : (weights[1], c - 72)
+                var dot = 0.0
+                for i in 0..<inputs { dot += Double(w[r * inputs + i]) * Double(x[t * (inputs + 4) + i]) }
+                #expect(abs(got[t * 96 + c] - Float(dot)) < 1e-4 * max(1, abs(Float(dot))))
+            }
+        }
     }
 
     /// Two controllers share one down product; their forget and gain products

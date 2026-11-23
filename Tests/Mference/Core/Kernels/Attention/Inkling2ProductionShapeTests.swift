@@ -54,22 +54,27 @@ import MferenceValidationSupport
         let keys = Inkling2DecodeAttention.keyRange(position: positions - 1, mask: mask).count
         let partials = ctx.device.makeBuffer(length: Inkling2DecodeAttention.partialsLength(keys: keys),
                                              options: .storageModeShared)!
+        var reference = Inkling2AttentionRef.attend(
+            q: q, k: k, v: v, rel: rel, table: table, sink: sink, queryCount: rows, startPosition: start,
+            keyBase: first, window: global ? nil : 1024, logScale: global ? .init() : nil)
+        reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: gate)
+        for variant in Inkling2PrefillAttention.Variant.allCases where prefill.supports(variant) {
+            S.run(ctx) { cb in
+                prefill.encode(commandBuffer: cb, .init(
+                    queries: .init(qBuffer), cache: cache, relative: .init(relBuffer), table: .init(tableBuffer),
+                    sink: .init(sinkBuffer), gate: .init(gateBuffer), output: .init(out), rows: rows,
+                    startPosition: start, mask: mask), variant: variant)
+            }
+            #expect(RelError.compute(actual: S.readHalves(out, count: rows * 3072), reference: reference)
+                    < Tolerance.fp16Reduction, "variant \(variant)")
+        }
         S.run(ctx) { cb in
-            prefill.encode(commandBuffer: cb, .init(
-                queries: .init(qBuffer), cache: cache, relative: .init(relBuffer), table: .init(tableBuffer),
-                sink: .init(sinkBuffer), gate: .init(gateBuffer), output: .init(out), rows: rows,
-                startPosition: start, mask: mask))
             decode.encode(commandBuffer: cb, .init(
                 queries: .init(qBuffer, offset: (rows - 1) * 3072 * 2), cache: cache, relative: .init(relBuffer, offset: (rows - 1) * 384 * 4),
                 table: .init(tableBuffer), sink: .init(sinkBuffer, offset: (rows - 1) * 24 * 4),
                 gate: .init(gateBuffer, offset: (rows - 1) * 3072 * 4), output: .init(last), partials: .init(partials),
                 position: positions - 1, mask: mask))
         }
-        var reference = Inkling2AttentionRef.attend(
-            q: q, k: k, v: v, rel: rel, table: table, sink: sink, queryCount: rows, startPosition: start,
-            keyBase: first, window: global ? nil : 1024, logScale: global ? .init() : nil)
-        reference = Inkling2AttentionRef.sigmoidGate(reference, gateLogits: gate)
-        #expect(RelError.compute(actual: S.readHalves(out, count: rows * 3072), reference: reference) < Tolerance.fp16Reduction)
         #expect(RelError.compute(actual: S.readHalves(last, count: 3072),
                                  reference: Array(reference[((rows - 1) * 3072)...])) < Tolerance.fp16Reduction)
     }

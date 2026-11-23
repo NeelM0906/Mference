@@ -61,9 +61,19 @@ public final class Inkling2PrefillAttention {
     public enum Variant: String, Sendable, CaseIterable {
         case keys16
         case keys32
+        /// 16-key tiles shared by the three query heads of one KV head.
+        case gqa16
         case tensorOps
 
-        var rowsPerThreadgroup: Int { self == .tensorOps ? 8 : 32 }
+        var rowsPerThreadgroup: Int {
+            switch self {
+            case .tensorOps: return 8
+            case .gqa16: return 16
+            default: return 32
+            }
+        }
+
+        var threadsPerThreadgroup: Int { self == .gqa16 ? 192 : 128 }
     }
 
     public struct Arguments {
@@ -117,15 +127,19 @@ public final class Inkling2PrefillAttention {
     public let variant: Variant
 
     /// `variant` defaults to tensor-ops on GPUs with Apple10 tensor support
-    /// (when it builds), else 16-key simdgroup tiles.
+    /// (when it builds), else the shared-tile `gqa16`, else `keys16`.
     public init(library: Inkling2KernelLibrary, variant: Variant? = nil) throws {
         var states: [Variant: MTLComputePipelineState] = [:]
         states[.keys16] = try library.pipeline("inkling2_attention_prefill_bk16")
         states[.keys32] = try library.pipeline("inkling2_attention_prefill_bk32")
+        // The shared-tile form needs 192 threads; register-heavy builds can cap lower.
+        let gqa = try library.pipeline("inkling2_attention_prefill_gqa16")
+        if gqa.maxTotalThreadsPerThreadgroup >= Variant.gqa16.threadsPerThreadgroup { states[.gqa16] = gqa }
         states[.tensorOps] = try? library.pipeline("inkling2_attention_prefill_tensorops")
         pipelines = states
         let tensorDefault = states[.tensorOps] != nil && library.context.device.supportsApple10TensorOps
-        let chosen = variant ?? (tensorDefault ? .tensorOps : .keys16)
+        // Shared K/V tiles measured 8-12% faster than keys16 on the M1 Max.
+        let chosen = variant ?? (tensorDefault ? .tensorOps : states[.gqa16] != nil ? .gqa16 : .keys16)
         precondition(states[chosen] != nil, "variant \(chosen) did not build on this GPU")
         self.variant = chosen
     }
@@ -163,8 +177,9 @@ public final class Inkling2PrefillAttention {
         encoder.setBuffer(a.output.buffer, offset: a.output.offset, index: 8)
         encoder.dispatchThreadgroups(
             MTLSize(width: (a.rows + variant.rowsPerThreadgroup - 1) / variant.rowsPerThreadgroup,
-                    height: Inkling2AttentionShape.numQHeads, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    height: variant == .gqa16 ? Inkling2AttentionShape.numKVHeads : Inkling2AttentionShape.numQHeads,
+                    depth: 1),
+            threadsPerThreadgroup: MTLSize(width: variant.threadsPerThreadgroup, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

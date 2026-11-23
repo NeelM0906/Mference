@@ -516,18 +516,26 @@ static inline void ink2_mv_rows(constant Inkling2ProjParams& p, Inkling2ProjSegm
     const uint part = lane % 4u;
     device const half* xbase = input + seg.inputOffset + 8u * part;
     for (uint b = lane / 4u; b < blocks; b += 8u) {
-        float4 wa0, wb0, wa1, wb1;
-        const float d0 = ink2_mv_weights<FMT>(row0, b, part, wa0, wb0);
-        const float d1 = ink2_mv_weights<FMT>(row1, b, part, wa1, wb1);
+        // Activations once per block, shared by both rows (as the first form of this kernel).
+        float4 xa[NT], xb[NT];
         INK2_UNROLL
         for (short t = 0; t < NT; ++t) {
             if (uint(t) < tokens) {
                 device const half4* x = (device const half4*)(xbase + ulong(t) * seg.inputStride + b * 32u);
-                const float4 xa = float4(x[0]), xb = float4(x[1]);
-                acc0[t] = fma(d0, dot(wa0, xa) + dot(wb0, xb), acc0[t]);
-                acc1[t] = fma(d1, dot(wa1, xa) + dot(wb1, xb), acc1[t]);
+                xa[t] = float4(x[0]);
+                xb[t] = float4(x[1]);
+            } else {
+                xa[t] = float4(0.0f);
+                xb[t] = float4(0.0f);
             }
         }
+        float4 wa, wb;
+        const float d0 = ink2_mv_weights<FMT>(row0, b, part, wa, wb);
+        INK2_UNROLL
+        for (short t = 0; t < NT; ++t) { acc0[t] += d0 * (dot(wa, xa[t]) + dot(wb, xb[t])); }
+        const float d1 = ink2_mv_weights<FMT>(row1, b, part, wa, wb);
+        INK2_UNROLL
+        for (short t = 0; t < NT; ++t) { acc1[t] += d1 * (dot(wa, xa[t]) + dot(wb, xb[t])); }
     }
     INK2_UNROLL
     for (short t = 0; t < NT; ++t) {
@@ -623,7 +631,11 @@ static inline float ink2_tau(constant Inkling2AttnParams& p, uint position) {
 
 static inline float ink2_sigmoid(float x) { return 1.0f / (1.0f + exp(-x)); }
 
-template <short BK>
+// BK keys per tile; BQT query tokens and HG query heads per threadgroup
+// (HG = 1: one head, 32 tokens, 4 simdgroups; HG = 3: the three heads of one
+// KV head share each K/V tile, 16 tokens, 6 simdgroups). Simdgroup s owns 8
+// tokens of head s / (BQT / 8).
+template <short BK, short BQT, short HG>
 [[kernel]] void inkling2_attention_prefill(
     constant Inkling2AttnParams& p [[buffer(0)]],
     device const half*  Q     [[buffer(1)]],
@@ -639,42 +651,54 @@ template <short BK>
     ushort sgitg [[simdgroup_index_in_threadgroup]],
     ushort lane  [[thread_index_in_simdgroup]])
 {
-    constexpr short BQ = 32;
+    constexpr short BQ = BQT;
+    constexpr short SUB = BQT / 8;           // simdgroups per head
+    constexpr uint NT = 32u * uint(HG) * uint(SUB);
     constexpr short D = INK2_D;
     constexpr short DP = INK2_D + 8;     // padded row: 8x8 loads hit distinct banks
     constexpr short R = INK2_R;
     constexpr short NB = BK / 8;
-    // K tile then V tile; Q is staged here first (BQ * DP <= 2 * BK * DP for BK >= 16).
+    // K tile then V tile; one head's Q is staged here first (BQ * DP <= 2 * BK * DP).
+    static_assert(BQ <= 2 * BK, "Q staging must fit the K/V tiles");
     threadgroup half kv[2 * BK * DP];
     threadgroup float pTable[(BQ + BK) * R];
     threadgroup half* kTile = kv;
     threadgroup half* vTile = kv + BK * DP;
 
-    const uint h = tgpig.y;
-    const uint kvh = h / (p.numQHeads / p.numKVHeads);
+    const uint myHead = uint(sgitg) / uint(SUB);
+    const uint sub = uint(sgitg) % uint(SUB);
+    const uint h = HG == 1 ? tgpig.y : tgpig.y * uint(HG) + myHead;
+    const uint kvh = HG == 1 ? h / (p.numQHeads / p.numKVHeads) : tgpig.y;
     const uint q0 = tgpig.x * uint(BQ);
     if (q0 >= p.queryCount) { return; }
     const uint rowsHere = min(uint(BQ), p.queryCount - q0);
     const uint pos0 = p.startPosition + q0;
 
-    for (uint e = tiitg; e < uint(BQ * D / 4); e += 128u) {
-        const uint row = e / uint(D / 4), c4 = e % uint(D / 4);
-        half4 v = half4(0.0h);
-        if (row < rowsHere) {
-            v = ((device const half4*)(Q + ulong(q0 + row) * p.qStride + h * uint(D)))[c4];
-        }
-        ((threadgroup half4*)(kv + row * uint(DP)))[c4] = v;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
     simdgroup_half8x8 qf[D / 8];
     INK2_UNROLL
-    for (short ds = 0; ds < D / 8; ++ds) {
-        simdgroup_load(qf[ds], kv + (8 * sgitg) * DP + ds * 8, DP, 0, false);
+    for (short j = 0; j < HG; ++j) {
+        const uint stagedHead = HG == 1 ? h : tgpig.y * uint(HG) + uint(j);
+        for (uint e = tiitg; e < uint(BQ * D / 4); e += NT) {
+            const uint row = e / uint(D / 4), c4 = e % uint(D / 4);
+            half4 v = half4(0.0h);
+            if (row < rowsHere) {
+                v = ((device const half4*)(Q + ulong(q0 + row) * p.qStride + stagedHead * uint(D)))[c4];
+            }
+            ((threadgroup half4*)(kv + row * uint(DP)))[c4] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (myHead == uint(j)) {
+            INK2_UNROLL
+            for (short ds = 0; ds < D / 8; ++ds) {
+                simdgroup_load(qf[ds], kv + (8 * sub) * DP + ds * 8, DP, 0, false);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     const short fm = ink2_frag_row(lane);
     const short fn = ink2_frag_col(lane);
-    const uint myRow = q0 + 8u * sgitg + uint(fm);
+    const uint myRow = q0 + 8u * sub + uint(fm);
     const bool rowValid = myRow < p.queryCount;
     const uint myPos = p.startPosition + myRow;
     const float tau = ink2_tau(p, myPos);
@@ -699,7 +723,7 @@ template <short BK>
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (uint k0 = keyBegin; k0 < keyEnd; k0 += uint(BK)) {
-        for (uint e = tiitg; e < uint(BK * D / 4); e += 128u) {
+        for (uint e = tiitg; e < uint(BK * D / 4); e += NT) {
             const uint kr = e / uint(D / 4), c4 = e % uint(D / 4);
             const uint key = k0 + kr;
             half4 kk = half4(0.0h), vv = half4(0.0h);
@@ -714,7 +738,7 @@ template <short BK>
         }
         // Distances in this tile: pos0 + i - (k0 + j), i < BQ, j < BK.
         const int dBase = int(pos0) - int(k0) - (BK - 1);
-        for (uint e = tiitg; e < uint((BQ + BK - 1) * R / 4); e += 128u) {
+        for (uint e = tiitg; e < uint((BQ + BK - 1) * R / 4); e += NT) {
             const uint dr = e / uint(R / 4), c4 = e % uint(R / 4);
             const int dist = dBase + int(dr);
             float4 v = float4(0.0f);
@@ -816,9 +840,11 @@ template <short BK>
 }
 
 template [[host_name("inkling2_attention_prefill_bk16")]] [[kernel]]
-decltype(inkling2_attention_prefill<16>) inkling2_attention_prefill<16>;
+decltype(inkling2_attention_prefill<16, 32, 1>) inkling2_attention_prefill<16, 32, 1>;
 template [[host_name("inkling2_attention_prefill_bk32")]] [[kernel]]
-decltype(inkling2_attention_prefill<32>) inkling2_attention_prefill<32>;
+decltype(inkling2_attention_prefill<32, 32, 1>) inkling2_attention_prefill<32, 32, 1>;
+template [[host_name("inkling2_attention_prefill_gqa16")]] [[kernel]]
+decltype(inkling2_attention_prefill<16, 16, 3>) inkling2_attention_prefill<16, 16, 3>;
 
 // ----------------------------------------------------------------------------
 // QKV epilogue: everything between the stacked projection and attention.
@@ -1344,10 +1370,10 @@ void inkling2_depth_mix(
 }
 
 // ----------------------------------------------------------------------------
-// Message gate, around two stacked projections (F32 weight segments):
-//   gate inputs:  h[t] = half([rms(x_c); rms(m_c)])   per controller c (width 2 * 2304)
-//   z = W_down h                 (projection, F32 down [64][4608] per controller)
-//   f, g = W_forget z, W_gain z  (projection, F32 [2304][64])
+// Message gate, around two FP32 products (inkling2_f32_mm64, F32 weights):
+//   gate inputs:  h[t] = [rms(x_c); rms(m_c)] in FP32, per controller c (width 2 * 2304)
+//   z = W_down h                 (F32 down [64][4608] per controller)
+//   f, g = W_forget z, W_gain z  (F32 [2304][64])
 //   out = (1 - tanh f) x + tanh g m
 // ----------------------------------------------------------------------------
 
