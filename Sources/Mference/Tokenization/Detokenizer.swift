@@ -41,11 +41,42 @@ import Tokenizers
 ///
 /// `flush()` is terminal in the generation loop, but pushing afterwards is not a
 /// trap: the committed prefix is clamped so that it can never rewind.
+///
+/// Cost: `push(_:)` needs the decode of every stable ID so far, but decoding
+/// them all on each push made a long generation quadratic (about 0.63 µs per
+/// token of history with Inkling 2's tokenizer: 5 ms a token at position
+/// 8,000). `decoded` keeps that decode instead. Each push re-decodes only
+/// the old IDs from the `contextTokens`-th last one that contributes text
+/// (unknown IDs, skipped specials and empty tokens do not count), with and
+/// without the new ones (`extendedDecode`). The result is the full decode
+/// whenever no new token changes text more than `contextTokens` contributing
+/// tokens back. Clean-up rewrites span at most four characters, a UTF-8
+/// scalar at most four byte tokens, and the leading-space rules touch only the
+/// first token. When the window cannot show that the old text is unchanged,
+/// the push falls back to the full decode. `DetokenizerLinearOracleTests` requires every emitted chunk to
+/// equal the full-decode implementation's on long adversarial streams for
+/// each tokenizer.
 struct MFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
     @usableFromInline var emitted: String = ""
+    /// `tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)`, kept
+    /// current by `push(_:)`.
+    @usableFromInline var decoded: String = ""
+    /// Indices in `stableIDs` of the IDs that contribute text: byte-fallback
+    /// tokens, and tokens whose own decode is not empty.
+    @usableFromInline var contentIndices: [Int] = []
+    /// Start in `stableIDs` of a byte-fallback run that only IDs with no text
+    /// of their own follow (unknown IDs, skipped specials). The library drops
+    /// a byte-fallback run that ends the decoded tokens, so this run is
+    /// missing from `decoded` until text follows it, and then the decode gains
+    /// text from its start. The window never starts after it. A token whose
+    /// own decode is empty never clears it, which can only widen the window.
+    @usableFromInline var danglingByteRunStart: Int?
+    /// Old text-contributing IDs re-decoded with each push (see the type's cost
+    /// note).
+    static let contextTokens = 16
     init(tokenizer: MFTokenizer, skipSpecialTokens: Bool = true) {
         self.tokenizer = tokenizer.tokenizer
     }
@@ -58,14 +89,59 @@ struct MFDetokenizer {
             return ""
         }
 
-        if !trailingByteIDs.isEmpty {
+        let previousCount = stableIDs.count
+        let previousContent = contentIndices.count
+        let floor = danglingByteRunStart
+        let movedBytes = trailingByteIDs.count
+        if movedBytes > 0 {
+            // Byte-fallback tokens always contribute.
+            contentIndices.append(contentsOf: stableIDs.count..<(stableIDs.count + movedBytes))
             stableIDs.append(contentsOf: trailingByteIDs)
             trailingByteIDs.removeAll(keepingCapacity: true)
         }
+        let hasText = !tokenizer.decode(tokens: [tokenID], skipSpecialTokens: true).isEmpty
+        if hasText { contentIndices.append(stableIDs.count) }
         stableIDs.append(tokenID)
 
-        let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        return commitDelta(current)
+        decoded = extendedDecode(previousCount: previousCount, previousContent: previousContent, floor: floor)
+        if hasText {
+            danglingByteRunStart = nil
+        } else if movedBytes > 0, danglingByteRunStart == nil {
+            danglingByteRunStart = previousCount
+        }
+        return commitDelta(decoded)
+    }
+
+    /// The decode of all of `stableIDs`, given `decoded` for its first
+    /// `previousCount`, of which `previousContent` contribute text. The old
+    /// IDs from the `contextTokens`-th last contributing one, or from `floor`
+    /// when that is earlier, are decoded alone (`before`) and with the new
+    /// ones (`after`). When `after` starts with
+    /// `before`, the new IDs changed none of that text and only append to it,
+    /// so `decoded` plus `after`'s remainder is the full decode. Otherwise the
+    /// full decode is computed.
+    ///
+    /// One exception is allowed: a trailing run of U+FFFD in `before`, a
+    /// scalar whose last bytes were still to come. `decoded` ends with the
+    /// same run, and it is replaced along with `after`'s new text. Anything
+    /// else falls back.
+    @usableFromInline
+    func extendedDecode(previousCount: Int, previousContent: Int, floor: Int?) -> String {
+        func fullDecode() -> String { tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true) }
+        guard previousContent > Self.contextTokens else { return fullDecode() }
+        let start = min(contentIndices[previousContent - Self.contextTokens], floor ?? .max)
+        let before = tokenizer.decode(tokens: Array(stableIDs[start..<previousCount]), skipSpecialTokens: true)
+        let after = tokenizer.decode(tokens: Array(stableIDs[start...]), skipSpecialTokens: true)
+        let pending = Self.trailingReplacementByteCount(before)
+        let stem = before.utf8.dropLast(pending)
+        guard after.utf8.starts(with: stem),
+              decoded.utf8.count >= pending,
+              decoded.utf8.suffix(pending).elementsEqual(before.utf8.suffix(pending)) else {
+            return fullDecode()
+        }
+        let appended = String(decoding: after.utf8.dropFirst(stem.count), as: UTF8.self)
+        guard pending > 0 else { return decoded + appended }
+        return String(decoding: decoded.utf8.dropLast(pending), as: UTF8.self) + appended
     }
 
     mutating func flush() -> String {
