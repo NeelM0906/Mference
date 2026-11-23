@@ -190,7 +190,7 @@ struct MFDetokenizer {
             held == 0 ? current : String(decoding: committed, as: UTF8.self)
         }
 
-        guard cur.starts(with: emitted.utf8) else {
+        guard Self.utf8(of: current, startsWith: emitted) else {
             // The decode contradicts what was already handed out (see the
             // clean-up note above). The stale text cannot be retracted, but
             // dropping the divergent tail loses characters outright — "do n't"
@@ -212,6 +212,19 @@ struct MFDetokenizer {
         let delta = String(decoding: committed.dropFirst(emitted.utf8.count), as: UTF8.self)
         emitted = committedText()
         return delta
+    }
+
+    /// `text.utf8.starts(with: prefix.utf8)`, as one contiguous byte compare:
+    /// the element-by-element walk over every emitted byte was most of a
+    /// push's remaining cost on a long generation.
+    @usableFromInline
+    static func utf8(of text: String, startsWith prefix: String) -> Bool {
+        var text = text, prefix = prefix
+        return text.withUTF8 { t in
+            prefix.withUTF8 { p in
+                p.count <= t.count && (p.isEmpty || memcmp(t.baseAddress!, p.baseAddress!, p.count) == 0)
+            }
+        }
     }
 
     /// Byte length of the longest common prefix of `a` and `b`, backed off to a
