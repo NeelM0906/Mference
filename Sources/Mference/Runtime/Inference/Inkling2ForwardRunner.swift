@@ -27,11 +27,15 @@ protocol Inkling2ExpertSource: AnyObject {
     func endDecodeVisit(_ binding: Inkling2DecodeBinding, commandBuffer: MTLCommandBuffer)
     /// Releases visits begun and not ended (their command buffer is lost).
     func abandonOpenVisits() throws
+    /// After a command buffer failed, once every committed one completed:
+    /// releases what its skipped signals would have.
+    func recoverAfterFailedCommands()
     /// Set when staging failed; the source is then unusable.
     var stagingFailure: String? { get }
 }
 
 extension Inkling2ExpertSource {
+    func recoverAfterFailedCommands() {}
     func decodeNeedsRoutes(layer: Int) -> Bool { false }
     func beginDecodeVisit(layer: Int, expertIDs: [Int]) throws -> Inkling2DecodeBinding {
         throw Inkling2ForwardRunnerError.invalidInput("Inkling 2 expert source has no decode slots")
@@ -224,8 +228,10 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
     /// Set once the expert source can no longer be trusted (a staging or
     /// abandon failure); every later chunk refuses until the model reloads.
     private var expertsFailed: String?
-    /// Staged decode visits so far (slot-cache hits and misses, CPU time in
-    /// `beginDecodeVisit`), for diagnostics. With the
+    /// Staged decode visits so far, for diagnostics: slot-cache hits and
+    /// misses, CPU time in `beginDecodeVisit` (the miss reads), and the
+    /// route readbacks (how long the CPU waited for the GPU to finish
+    /// everything before each staged visit's router). With the
     /// `MFERENCE_INKLING2_DECODE_CACHE_LOG` diagnostic set, each visit is
     /// also printed to stderr.
     struct DecodeCacheStats: Equatable {
@@ -233,6 +239,7 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
         var hits = 0
         var misses = 0
         var seconds: Double = 0
+        var readbackSeconds: Double = 0
     }
     private(set) var decodeCacheStats = DecodeCacheStats()
     private let logsDecodeCache = ProcessInfo.processInfo.environment["MFERENCE_INKLING2_DECODE_CACHE_LOG"] != nil
@@ -660,9 +667,11 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
                 expertsFailed = "abandoning open expert visits failed: \(error)"
             }
             finish()
+            if committed.contains(where: { $0.status != .completed }) { w.experts.recoverAfterFailedCommands() }
             throw error
         }
         finish()
+        if committed.contains(where: { $0.status != .completed }) { w.experts.recoverAfterFailedCommands() }
         if let failure = w.experts.stagingFailure {
             expertsFailed = "expert staging failed: \(failure)"
         }
@@ -857,20 +866,23 @@ final class Inkling2ForwardRunner: ContinuableLogitProducer, ChunkedPrefillRunne
             // A staged layer's decode visit: read the router's ids back, load
             // the experts that miss into the layer's slots, decode from the
             // slots. The slots are this command buffer's until it completes.
+            let splitStarted = DispatchTime.now().uptimeNanoseconds
             cb = try split()
             let routed = s.moeScratch.ids.contents().bindMemory(to: UInt32.self, capacity: moeShape.topK)
             let ids = (0..<moeShape.topK).map { Int(routed[$0]) }
             let started = DispatchTime.now().uptimeNanoseconds
             let binding = try w.experts.beginDecodeVisit(layer: layer, expertIDs: ids)
             let seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+            let readback = Double(started - splitStarted) / 1e9
             decodeCacheStats.visits += 1
             decodeCacheStats.hits += binding.hits
             decodeCacheStats.misses += binding.misses
             decodeCacheStats.seconds += seconds
+            decodeCacheStats.readbackSeconds += readback
             if logsDecodeCache {
                 FileHandle.standardError.write(Data(String(
-                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d prepare %.3f ms\n",
-                    start, layer, binding.hits, binding.misses, seconds * 1000).utf8))
+                    format: "inkling2 decode cache: position %d layer %d hits %d misses %d readback %.3f ms prepare %.3f ms\n",
+                    start, layer, binding.hits, binding.misses, readback * 1000, seconds * 1000).utf8))
             }
             encode { enc in
                 moe.encodeDecode(enc, shape: moeShape, x: s.moeInHalf, binding: binding,

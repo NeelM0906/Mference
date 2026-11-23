@@ -156,6 +156,7 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     private var entries: [UInt64: TimelineEntry] = [:]
     private var arrived: MTLSharedEvent?
     private var listener: MTLSharedEventListener?
+    private var listenerQueue: DispatchQueue?
     /// Bytes read so far and the time spent reading, for diagnostics.
     private(set) var bytesRead: Int = 0
     private(set) var secondsReading: Double = 0
@@ -234,9 +235,9 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
             // GPU reached it.
             commandBuffer.encodeSignalEvent(arrived, value: ticket.sequence)
             let sequence = ticket.sequence
-            arrived.notify(listener, atValue: sequence) { [self] _, _ in
+            arrived.notify(listener, atValue: sequence) { [weak self] _, _ in
                 let now = DispatchTime.now().uptimeNanoseconds
-                lock.withLock { entries[sequence]?.gpuArrived = now }
+                self?.lock.withLock { self?.entries[sequence]?.gpuArrived = now }
             }
         }
         commandBuffer.encodeWaitForEvent(filled, value: ticket.sequence)
@@ -247,16 +248,31 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         lock.withLock {
             guard recording else { return nil }
             if arrived == nil {
+                let queue = DispatchQueue(label: "inkling2.expert-staging.timeline")
                 arrived = device.makeSharedEvent()
-                listener = MTLSharedEventListener(dispatchQueue: DispatchQueue(label: "inkling2.expert-staging.timeline"))
+                listener = MTLSharedEventListener(dispatchQueue: queue)
+                listenerQueue = queue
             }
             return arrived
         }
     }
 
-    /// The recorded visits in sequence order.
+    /// The recorded visits in sequence order. Arrival notifications reach
+    /// the listener's queue a little after the GPU's signal, so this waits
+    /// (up to a second) for those of visits the GPU has already reached.
     func timeline() -> [TimelineEntry] {
-        lock.withLock { entries.values.sorted { $0.sequence < $1.sequence } }
+        let (event, queue) = lock.withLock { (arrived, listenerQueue) }
+        if let event, let queue {
+            let deadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+            while DispatchTime.now().uptimeNanoseconds < deadline {
+                queue.sync {}
+                let reached = event.signaledValue
+                let pending = lock.withLock { entries.values.contains { $0.sequence <= reached && $0.gpuArrived == 0 } }
+                if !pending { break }
+                usleep(100)
+            }
+        }
+        return lock.withLock { entries.values.sorted { $0.sequence < $1.sequence } }
     }
 
     /// Forgets the recorded visits (recording continues while set).
@@ -267,6 +283,13 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     /// After the visit's last encoder that reads the slab: hand it back.
     func encodeRelease(_ ticket: Ticket, commandBuffer: MTLCommandBuffer) {
         commandBuffer.encodeSignalEvent(released, value: ticket.sequence)
+    }
+
+    /// Marks every ticket taken so far released, for when a failed command
+    /// buffer skipped its release signals. Only once no command buffer that
+    /// could still read a slab is in flight.
+    func releaseIssued() {
+        lock.withLock { if released.signaledValue < nextSequence { released.signaledValue = nextSequence } }
     }
 
     private func record(_ error: StagingError) {
@@ -668,6 +691,19 @@ final class Inkling2ExpertStore: @unchecked Sendable {
         if decodeDone.signaledValue < decodeIssued { decodeDone.signaledValue = decodeIssued }
         lock.unlock()
         try staging?.abandon(tickets)
+    }
+
+    /// After a command buffer failed, once every committed one has completed:
+    /// its signals never ran, so every staged visit and decode visit issued
+    /// so far is marked released and done, and the decode caches start empty
+    /// (otherwise the next fill or slot refill would wait out the timeout).
+    func recoverAfterFailedCommands() {
+        lock.lock()
+        open.removeAll()
+        if decodeDone.signaledValue < decodeIssued { decodeDone.signaledValue = decodeIssued }
+        cachesStale = true
+        lock.unlock()
+        staging?.releaseIssued()
     }
 
     /// Ends a decode visit: after the encoder that reads `binding.pool`, in

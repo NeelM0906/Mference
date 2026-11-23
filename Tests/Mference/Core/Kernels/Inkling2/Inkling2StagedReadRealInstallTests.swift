@@ -3,24 +3,27 @@ import Foundation
 import Metal
 import Testing
 @testable import Mference
-import MferenceValidationSupport
 
 /// Staged-read measurements on the real Inkling 2 Mini install (K2, for the
 /// C2 table): the uncached and cached read rates of the staged layers, prefill
-/// wall time for short prompts in each mode, how much of a 2,048-token chunk's
-/// staging the GPU waits for, and the decode slot cache's hit rate and miss
-/// cost on real routes. Each stage loads the install, so it runs only with
-/// `MFERENCE_INKLING2_GTURBO` set and `MFERENCE_INKLING2_K2_STAGE` naming the
-/// stage, and then only inside `model-hold.sh` (one stage per hold):
+/// wall time for short prompts in each mode, and how much of a 2,048-token
+/// chunk's staging the GPU waits for. (Decode's slot-cache hit rate and miss
+/// cost are measured through the runner's own decode: the CLI with
+/// `MFERENCE_INKLING2_DECODE_CACHE_LOG`.) Each stage loads the install, so it
+/// runs only with `MFERENCE_INKLING2_GTURBO` set and
+/// `MFERENCE_INKLING2_K2_STAGE` naming the stage, and then only inside
+/// `model-hold.sh` (one stage per hold):
 ///
 /// * `sweep-uncached`, `sweep-cached`: the staging ring alone over the plan's
 ///   staged layers, in visit order (cached: two passes, the first fills the
 ///   file cache);
 /// * `short-uncached`, `short-cached`: the runner's prefill of 16, 128 and
 ///   512 tokens (cached: after a warm-up prefill fills the file cache);
-/// * `chunk2048-uncached`: one 2,048-token chunk with the staging timeline;
-/// * `decode64-uncached`: 64 greedy tokens through the runner with the routes
-///   traced, then the staged visits replayed through `prepareDecodeVisit`.
+/// * `chunk2048-uncached`: one 2,048-token chunk with the staging timeline.
+///
+/// The install loads with the receipt's size checks, not full SHA-256: the
+/// hash would read every layer file through the file cache first and turn
+/// the uncached reads into cache hits.
 ///
 /// Prints `[inkling2-k2-read]` lines; asserts only that runs complete.
 @Suite("Inkling 2 staged reads on the real install", .serialized)
@@ -117,7 +120,8 @@ struct Inkling2StagedReadRealInstallTests {
     func sweep() throws {
         let mode: Inkling2StagedReadMode = Self.stage == "sweep-cached" ? .cached : .uncached
         let context = try MetalContext()
-        let model = try Model.load(directoryURL: try #require(Self.install), device: context.device, expecting: .inkling2Mini)
+        let model = try Model.load(directoryURL: try #require(Self.install), device: context.device, expecting: .inkling2Mini,
+                                   integrityPolicy: .sizeCheckTrustedReceipt)
         let staged = try Self.stagedFiles(model)
         Self.log("staged layers \(staged.map(\.layer)), in the file cache before: "
                  + staged.map { String(format: "%.0f%%", Self.cachedFraction($0.file) * 100) }.joined(separator: " "))
@@ -148,7 +152,8 @@ struct Inkling2StagedReadRealInstallTests {
     /// The runner on the install with the staging timeline on, in `mode`.
     static func runner(_ context: MetalContext, mode: Inkling2StagedReadMode)
         throws -> (Model, Inkling2ForwardRunner, Inkling2ExpertStore) {
-        let model = try Model.load(directoryURL: try #require(install), device: context.device, expecting: .inkling2Mini)
+        let model = try Model.load(directoryURL: try #require(install), device: context.device, expecting: .inkling2Mini,
+                                   integrityPolicy: .sizeCheckTrustedReceipt)
         let weights = try Inkling2RunnerWeights(model: model)
         let store = try #require(weights.experts as? Inkling2ExpertStore)
         store.readMode = mode
@@ -197,72 +202,5 @@ struct Inkling2StagedReadRealInstallTests {
             Self.log("in the file cache at the end: "
                      + staged.map { String(format: "%.0f%%", Self.cachedFraction($0.file) * 100) }.joined(separator: " "))
         }
-    }
-
-    @Test(.enabled(if: enabled && stage == "decode64-uncached", "needs MFERENCE_INKLING2_GTURBO and the decode stage"))
-    func decodeReplay() async throws {
-        let context = try MetalContext()
-        let (model, runner, store) = try Self.runner(context, mode: .uncached)
-        let c = model.config
-        let prompt = try await Self.promptTokens(model, count: 64)
-        let generate = 64, rows = prompt.count + generate, topK = c.topKExperts
-        let out = try #require(context.device.makeBuffer(length: c.vocabSize * 2, options: .storageModeShared))
-        let traceOut = try #require(context.device.makeBuffer(length: 48 * rows * c.hiddenSize * 4, options: .storageModeShared))
-        let routes = try #require(context.device.makeBuffer(length: 48 * rows * topK * 4, options: .storageModeShared))
-        runner.visitTrace = .init(outputs: traceOut, routes: routes, rows: rows)
-        _ = try await Self.prefill(runner, store, prompt, out: out)
-        // Greedy decode through the runner as it stands (it stages whole
-        // layers per decode visit); only the routes are kept.
-        var token = Int32(0), position = prompt.count
-        func argmax() -> Int32 {
-            let p = out.contents().bindMemory(to: Float16.self, capacity: c.unpaddedVocabSize)
-            var best = 0
-            for i in 1..<c.unpaddedVocabSize where p[i] > p[best] { best = i }
-            return Int32(best)
-        }
-        token = argmax()
-        let decodeStart = DispatchTime.now().uptimeNanoseconds
-        for _ in 0..<generate {
-            try await runner.produce(token: token, position: position, into: out)
-            token = argmax()
-            position += 1
-        }
-        store.drainStaging()
-        Self.log(String(format: "runner decode of %d tokens (whole-layer staging): %.2f s", generate,
-                        Double(DispatchTime.now().uptimeNanoseconds - decodeStart) / 1e9))
-        runner.visitTrace = nil
-
-        // Replay the decoded tokens' staged visits through the slot caches,
-        // in visit order, with nothing else running.
-        let ids = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * topK)
-        let schedule = Inkling2ReferenceConfig.mini.schedule
-        var hits = 0, misses = 0, seconds = 0.0, missesByToken: [Int] = [], msByToken: [Double] = []
-        for t in prompt.count..<rows {
-            var tokenMisses = 0, tokenSeconds = 0.0
-            for visit in 0..<48 where store.isStaged(layer: schedule[visit].layer) {
-                let routed = (0..<topK).map { Int(ids[(visit * rows + t) * topK + $0]) }
-                let start = DispatchTime.now().uptimeNanoseconds
-                let binding = try store.prepareDecodeVisit(layer: schedule[visit].layer, expertIDs: routed)
-                tokenSeconds += Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
-                let cb = context.queue.makeCommandBuffer()!
-                store.endDecodeVisit(binding, commandBuffer: cb)
-                cb.commit()
-                await cb.completed()
-                hits += binding.hits
-                misses += binding.misses
-                tokenMisses += binding.misses
-            }
-            seconds += tokenSeconds
-            missesByToken.append(tokenMisses)
-            msByToken.append(tokenSeconds * 1000)
-        }
-        let staged = (0..<48).filter { store.isStaged(layer: schedule[$0].layer) }.count
-        Self.log(String(format: "slot-cache replay of %d tokens x %d staged visits: hit rate %.1f%% (%d hits, %d misses); reads %.2f s, %.2f ms per miss, %.1f ms per token",
-                        generate, staged, Double(hits) * 100 / Double(hits + misses), hits, misses, seconds,
-                        misses > 0 ? seconds * 1000 / Double(misses) : 0, seconds * 1000 / Double(generate)))
-        Self.log("misses per token: \(missesByToken)")
-        Self.log("read ms per token: \(msByToken.map { String(format: "%.1f", $0) })")
-        Self.log("slots per staged layer: \((0..<c.numLayers).filter { store.isStaged(layer: $0) }.map { "L\($0) \(store.decodeSlots(layer: $0))" })")
-        Self.state("end")
     }
 }

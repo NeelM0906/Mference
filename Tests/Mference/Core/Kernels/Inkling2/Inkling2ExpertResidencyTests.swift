@@ -507,6 +507,52 @@ import MferenceValidationSupport
         }
     }
 
+    /// A failed command buffer never runs its signals: a staged prefill
+    /// visit's slab release and a decode visit's done mark. Then the next
+    /// decode visit (after a prefill) and the next slot refill wait out the
+    /// timeout; once every committed buffer has completed,
+    /// `recoverAfterFailedCommands` releases both, and decode and prefill
+    /// carry on.
+    @Test func recoveryAfterFailedCommandsReleasesSlabsAndSlots() throws {
+        let context = try MetalContext()
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let (store, _, directory, _) = try Self.cacheStore(context, shape: shape, encoding: .q8_0)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        store.waitTimeoutMS = 300
+        // Two staged prefill visits encoded into a buffer that never runs
+        // (two: as many as slabs, so the reader never waits on a release).
+        let lostPrefill = context.queue.makeCommandBuffer()!
+        for layer in [1, 2] {
+            _ = try store.beginPrefillVisit(layer: layer, commandBuffer: lostPrefill)
+            try store.endPrefillVisit(layer: layer, commandBuffer: lostPrefill)
+        }
+        #expect(throws: Inkling2ExpertStore.StoreError.self) {
+            try store.prepareDecodeVisit(layer: 1, expertIDs: [0, 1, 2, 3])
+        }
+        store.recoverAfterFailedCommands()
+        let first = try store.prepareDecodeVisit(layer: 1, expertIDs: [0, 1, 2, 3])
+        #expect(first.misses == 4)
+        // A decode visit ended in a buffer that never runs.
+        store.endDecodeVisit(first, commandBuffer: context.queue.makeCommandBuffer()!)
+        #expect(throws: Inkling2ExpertStore.StoreError.self) {
+            try store.prepareDecodeVisit(layer: 1, expertIDs: [4, 5, 6, 7])
+        }
+        store.recoverAfterFailedCommands()
+        let second = try store.prepareDecodeVisit(layer: 1, expertIDs: [4, 5, 6, 7])
+        #expect(second.misses == 4)
+        let decodeBuffer = context.queue.makeCommandBuffer()!
+        store.endDecodeVisit(second, commandBuffer: decodeBuffer)
+        decodeBuffer.commit()
+        // A prefill visit after it fills and completes normally.
+        let cb = context.queue.makeCommandBuffer()!
+        _ = try store.beginPrefillVisit(layer: 3, commandBuffer: cb)
+        try store.endPrefillVisit(layer: 3, commandBuffer: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+        store.drainStaging()
+        #expect(cb.status == .completed && store.stagingError == nil)
+    }
+
     /// A failed read leaves no slot claiming an expert it does not hold.
     @Test func failedDecodeReadRollsBack() throws {
         let context = try MetalContext()
