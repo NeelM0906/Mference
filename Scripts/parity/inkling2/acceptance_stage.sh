@@ -13,7 +13,7 @@
 # scratch/, Deep's GGUF in ~/llm-models/gguf) with --max-context 40960 (Inkling
 # runs at its 40,960 cap; Deep stays at 32,768, coordinator ruling) and
 # --prompt-cache-mode off, and is stopped (SIGINT, then TERM) on every exit,
-# including the swap guard's INT to this script. One model is resident at a
+# including the swap guard's TERM to this script. One model is resident at a
 # time; the server swaps between them.
 #
 # Stages (client: agent_acceptance.py, corpus $INK/acceptance/agent-acceptance-v1):

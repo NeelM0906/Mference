@@ -12,8 +12,9 @@
 # Before: refuses (exit 71) unless `lock.sh preflight` passes, the GGUF exists,
 # (with --timing) the Mference app is not open,
 # no other model process runs and, with --timing, `pmset -g batt` shows AC
-# Power. During: samples swap every 2 s; any growth stops the command (INT,
-# then TERM after 30 s) and exits 70. After: records swap at start and end,
+# Power. During: samples swap every 2 s; any growth stops the command (TERM,
+# then KILL after 30 s) and exits 70. TERM, not INT: the command is started
+# with & from this non-interactive script, so it inherits SIGINT ignored. After: records swap at start and end,
 # exit code, wall time, power source and /usr/bin/time -l's peak memory
 # footprint in <log-dir>/run.json; stdout and stderr in <log-dir>.
 set -uo pipefail
@@ -98,15 +99,12 @@ while kill -0 "$wrapper" 2>/dev/null; do
         note "SWAP GUARD: used ${now} MB, start ${s0} MB; stopping"
         child=$(pgrep -P "$wrapper" | head -1)
         target=${child:-$wrapper}
-        kill -INT "$target" 2>/dev/null
+        # TERM first: an INT sent here would be ignored (see the header)
+        kill -TERM "$target" 2>/dev/null
         for _ in $(seq 1 30); do kill -0 "$target" 2>/dev/null || break; sleep 1; done
-        if kill -0 "$target" 2>/dev/null; then
-            kill -TERM "$target" 2>/dev/null
-            for _ in $(seq 1 30); do kill -0 "$target" 2>/dev/null || break; sleep 1; done
-        fi
         # bounded: a process that outlives TERM still holds the lock and its memory
         if kill -0 "$target" 2>/dev/null; then
-            note "SWAP GUARD: $target ignored INT and TERM; sending KILL"
+            note "SWAP GUARD: $target ignored TERM for 30 s; sending KILL"
             kill -KILL "$target" 2>/dev/null
         fi
         sleep 2
