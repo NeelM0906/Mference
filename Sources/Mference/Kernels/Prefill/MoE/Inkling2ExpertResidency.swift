@@ -112,13 +112,50 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
     let slabBytes: Int
     let filled: MTLSharedEvent
     let released: MTLSharedEvent
-    /// Whether the fills bypass the file cache.
-    let readMode: Inkling2StagedReadMode
+    /// Whether the fills bypass the file cache. Each fill reads it when it
+    /// starts; change it between runs (after `drain()`) to compare the modes
+    /// on one loaded model.
+    var readMode: Inkling2StagedReadMode {
+        get { lock.withLock { mode } }
+        set { lock.withLock { mode = newValue } }
+    }
+    private var mode: Inkling2StagedReadMode
     private let files: [Int: Inkling2ExpertLayerFile]
     private let queue = DispatchQueue(label: "inkling2.expert-staging", qos: .userInitiated)
     private let lock = NSLock()
     private var nextSequence: UInt64 = 0
     private var failure: StagingError?
+
+    /// One staged visit's timings (uptime nanoseconds; 0 = not reached), for
+    /// diagnostics: queued by `stage`, read started (slab free and fence
+    /// passed) and finished, and when the GPU reached the visit's wait
+    /// (a shared-event notification, so a few microseconds late). The GPU
+    /// waited on the read for `finished - gpuArrived` when that is positive.
+    struct TimelineEntry: Equatable, Sendable {
+        let sequence: UInt64
+        let layer: Int
+        let bytes: Int
+        var queued: UInt64 = 0
+        var started: UInt64 = 0
+        var finished: UInt64 = 0
+        var gpuArrived: UInt64 = 0
+        /// How long the GPU waited for this visit's read, in seconds.
+        var gpuStallSeconds: Double {
+            guard finished > 0, gpuArrived > 0, finished > gpuArrived else { return 0 }
+            return Double(finished - gpuArrived) / 1e9
+        }
+    }
+    /// Records a `TimelineEntry` per staged visit while set (off by default;
+    /// set it before staging). Read the entries after `drain()` and after the
+    /// command buffers complete.
+    var recordsTimeline: Bool {
+        get { lock.withLock { recording } }
+        set { lock.withLock { recording = newValue } }
+    }
+    private var recording = false
+    private var entries: [UInt64: TimelineEntry] = [:]
+    private var arrived: MTLSharedEvent?
+    private var listener: MTLSharedEventListener?
     /// Bytes read so far and the time spent reading, for diagnostics.
     private(set) var bytesRead: Int = 0
     private(set) var secondsReading: Double = 0
@@ -146,7 +183,7 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         }
         self.slabs = made
         self.files = files
-        self.readMode = readMode
+        self.mode = readMode
         self.filled = filled
         self.released = released
     }
@@ -182,13 +219,49 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
         let sequence = nextSequence
         let slab = slabs[Int((sequence - 1) % UInt64(slabs.count))]
         let ticket = Ticket(sequence: sequence, layer: layer, slab: slab)
+        if recording {
+            entries[sequence] = TimelineEntry(sequence: sequence, layer: layer, bytes: file.bytes,
+                                              queued: DispatchTime.now().uptimeNanoseconds)
+        }
         queue.async { [self] in fill(ticket, file: file, after: fence) }
         return ticket
     }
 
     /// Before the visit's MoE encoder: wait until the slab holds the layer.
     func encodeWait(_ ticket: Ticket, commandBuffer: MTLCommandBuffer) {
+        if let arrived = timelineArrivalEvent(commandBuffer.device), let listener {
+            // Diagnostics only: a signal just before the wait tells when the
+            // GPU reached it.
+            commandBuffer.encodeSignalEvent(arrived, value: ticket.sequence)
+            let sequence = ticket.sequence
+            arrived.notify(listener, atValue: sequence) { [self] _, _ in
+                let now = DispatchTime.now().uptimeNanoseconds
+                lock.withLock { entries[sequence]?.gpuArrived = now }
+            }
+        }
         commandBuffer.encodeWaitForEvent(filled, value: ticket.sequence)
+    }
+
+    /// The arrival event while the timeline records (made on first use).
+    private func timelineArrivalEvent(_ device: MTLDevice) -> MTLSharedEvent? {
+        lock.withLock {
+            guard recording else { return nil }
+            if arrived == nil {
+                arrived = device.makeSharedEvent()
+                listener = MTLSharedEventListener(dispatchQueue: DispatchQueue(label: "inkling2.expert-staging.timeline"))
+            }
+            return arrived
+        }
+    }
+
+    /// The recorded visits in sequence order.
+    func timeline() -> [TimelineEntry] {
+        lock.withLock { entries.values.sorted { $0.sequence < $1.sequence } }
+    }
+
+    /// Forgets the recorded visits (recording continues while set).
+    func resetTimeline() {
+        lock.withLock { entries.removeAll() }
     }
 
     /// After the visit's last encoder that reads the slab: hand it back.
@@ -239,8 +312,12 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
             return
         }
         let start = DispatchTime.now().uptimeNanoseconds
+        let uncached = lock.withLock {
+            entries[ticket.sequence]?.started = start
+            return mode == .uncached
+        }
         do {
-            try Inkling2ExpertStore.read(file, into: ticket.slab.contents(), bypassCache: readMode == .uncached)
+            try Inkling2ExpertStore.read(file, into: ticket.slab.contents(), bypassCache: uncached)
         } catch Inkling2ExpertStore.StoreError.openFailed(let path, let code) {
             record(.openFailed(path: path, errno: code))
             return
@@ -251,10 +328,11 @@ final class Inkling2StagedExpertLayers: @unchecked Sendable {
             record(.readFailed(path: file.path, errno: EIO))
             return
         }
-        let seconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+        let end = DispatchTime.now().uptimeNanoseconds
         lock.lock()
         bytesRead += file.bytes
-        secondsReading += seconds
+        secondsReading += Double(end - start) / 1e9
+        entries[ticket.sequence]?.finished = end
         lock.unlock()
     }
 }
@@ -401,7 +479,11 @@ final class Inkling2ExpertStore: @unchecked Sendable {
     let plan: Inkling2ExpertResidencyPlan
     let shape: Inkling2MoEShape
     /// How staged layers are read (slab fills and decode-cache misses).
-    let readMode: Inkling2StagedReadMode
+    /// Change it only between runs (no prefill in flight), for example to
+    /// compare the two modes on one loaded model.
+    var readMode: Inkling2StagedReadMode {
+        didSet { staging?.readMode = readMode }
+    }
     private let resident: [Int: Inkling2ExpertPool]
     private let mapped: [Int: Inkling2ExpertPool]
     private let templates: [Int: Inkling2ExpertPool]
