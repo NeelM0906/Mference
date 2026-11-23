@@ -75,6 +75,7 @@ import MferenceValidationSupport
         defer { try? FileManager.default.removeItem(at: directory) }
         let staged = try Inkling2StagedExpertLayers(device: context.device, files: files, slabs: 2, readMode: mode)
         #expect(staged.readMode == mode)
+        staged.recordsTimeline = true
 
         let tokens = 48
         let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B10)
@@ -119,6 +120,21 @@ import MferenceValidationSupport
                     "visit \(i) (layer \(layer))")
         }
         #expect(staged.bytesRead == visits.reduce(0) { $0 + files[$1]!.bytes })
+
+        // The diagnostic timeline: one entry per visit, in order, each read
+        // after it was queued, and the GPU's arrival at every wait seen.
+        let timeline = staged.timeline()
+        #expect(timeline.map(\.layer) == visits && timeline.map(\.sequence) == (1...UInt64(visits.count)).map { $0 })
+        for entry in timeline {
+            #expect(entry.bytes == files[entry.layer]!.bytes)
+            #expect(entry.queued > 0 && entry.queued <= entry.started && entry.started <= entry.finished)
+            #expect(entry.gpuArrived > 0 && entry.gpuStallSeconds >= 0, "visit \(entry.sequence)")
+        }
+        staged.resetTimeline()
+        #expect(staged.timeline().isEmpty)
+        let other: Inkling2StagedReadMode = mode == .uncached ? .cached : .uncached
+        staged.readMode = other
+        #expect(staged.readMode == other)
     }
 
     @Test func failedReadSignalsAndReports() throws {
@@ -159,6 +175,9 @@ import MferenceValidationSupport
         #expect(store.readMode == mode && store.staging?.readMode == mode)
         let byDefault = try Inkling2ExpertStore(device: context.device, shape: shape, layers: specs, plan: plan)
         #expect(byDefault.readMode == .forHost() && byDefault.staging?.readMode == .forHost())
+        // Switchable between runs; the ring follows.
+        byDefault.readMode = byDefault.readMode == .uncached ? .cached : .uncached
+        #expect(byDefault.staging?.readMode == byDefault.readMode && byDefault.readMode != .forHost())
 
         let tokens = 40
         let (hidden, _) = Inkling2MoETestSupport.halfBuffer(context.device, rows: tokens, stride: shape.d, d: shape.d, seed: 0x2B30)
@@ -486,6 +505,52 @@ import MferenceValidationSupport
                 #expect(got == want, "decode token \(t) visit \(visit) (layer \(step.0), pass \(step.1))")
             }
         }
+    }
+
+    /// A failed command buffer never runs its signals: a staged prefill
+    /// visit's slab release and a decode visit's done mark. Then the next
+    /// decode visit (after a prefill) and the next slot refill wait out the
+    /// timeout; once every committed buffer has completed,
+    /// `recoverAfterFailedCommands` releases both, and decode and prefill
+    /// carry on.
+    @Test func recoveryAfterFailedCommandsReleasesSlabsAndSlots() throws {
+        let context = try MetalContext()
+        let shape = Inkling2MoEShape(d: 256, f: 128, experts: 16, topK: 4)
+        let (store, _, directory, _) = try Self.cacheStore(context, shape: shape, encoding: .q8_0)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        store.waitTimeoutMS = 300
+        // Two staged prefill visits encoded into a buffer that never runs
+        // (two: as many as slabs, so the reader never waits on a release).
+        let lostPrefill = context.queue.makeCommandBuffer()!
+        for layer in [1, 2] {
+            _ = try store.beginPrefillVisit(layer: layer, commandBuffer: lostPrefill)
+            try store.endPrefillVisit(layer: layer, commandBuffer: lostPrefill)
+        }
+        #expect(throws: Inkling2ExpertStore.StoreError.self) {
+            try store.prepareDecodeVisit(layer: 1, expertIDs: [0, 1, 2, 3])
+        }
+        store.recoverAfterFailedCommands()
+        let first = try store.prepareDecodeVisit(layer: 1, expertIDs: [0, 1, 2, 3])
+        #expect(first.misses == 4)
+        // A decode visit ended in a buffer that never runs.
+        store.endDecodeVisit(first, commandBuffer: context.queue.makeCommandBuffer()!)
+        #expect(throws: Inkling2ExpertStore.StoreError.self) {
+            try store.prepareDecodeVisit(layer: 1, expertIDs: [4, 5, 6, 7])
+        }
+        store.recoverAfterFailedCommands()
+        let second = try store.prepareDecodeVisit(layer: 1, expertIDs: [4, 5, 6, 7])
+        #expect(second.misses == 4)
+        let decodeBuffer = context.queue.makeCommandBuffer()!
+        store.endDecodeVisit(second, commandBuffer: decodeBuffer)
+        decodeBuffer.commit()
+        // A prefill visit after it fills and completes normally.
+        let cb = context.queue.makeCommandBuffer()!
+        _ = try store.beginPrefillVisit(layer: 3, commandBuffer: cb)
+        try store.endPrefillVisit(layer: 3, commandBuffer: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+        store.drainStaging()
+        #expect(cb.status == .completed && store.stagingError == nil)
     }
 
     /// A failed read leaves no slot claiming an expert it does not hold.
