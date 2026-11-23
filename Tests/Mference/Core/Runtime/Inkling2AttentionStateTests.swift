@@ -191,6 +191,165 @@ import Metal
         try state.restoreSnapshot(second, from: region)
     }
 
+    // MARK: Prefix snapshots for the multi-prefix cache
+
+    /// Every window ring's rows the next token can read at `position`, and
+    /// every global visit's rows below it.
+    static func prefixRows(_ state: Inkling2AttentionState, at position: Int) -> [Int: [Int: [Float16]]] {
+        var rows: [Int: [Int: [Float16]]] = [:]
+        for slot in 0..<48 {
+            let first = Inkling2VisitPlan.bySlot[slot].isGlobal ? 0 : max(0, position - 15)
+            for p in first..<position { rows[slot, default: [:]][p] = read(state, slot: slot, position: p) }
+        }
+        return rows
+    }
+
+    static func expectRows(_ state: Inkling2AttentionState, _ rows: [Int: [Int: [Float16]]],
+                           sourceLocation: SourceLocation = #_sourceLocation) {
+        var differing = 0
+        for (slot, byPosition) in rows {
+            for (p, row) in byPosition where read(state, slot: slot, position: p) != row { differing += 1 }
+        }
+        #expect(differing == 0, "\(differing) rows differ", sourceLocation: sourceLocation)
+    }
+
+    @Test func globalRowCopyHoldsEachVisitsKeysThenValues() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let state = try Inkling2AttentionState(device: device, configuration: Self.config)
+        try Self.run(state, tokens: 20, salt: 6)
+        let count = 12
+        #expect(Inkling2AttentionState.globalRowBytes(tokens: count) == 8 * 2 * count * 2048)
+        let region = try PrefixSnapshotRegion(byteCount: Inkling2AttentionState.globalRowBytes(tokens: count))
+        try state.copyGlobalRows(count: count, into: region)
+        let halves = region.base.bindMemory(to: Float16.self, capacity: 8 * 2 * count * Self.rowHalves)
+        for (i, slot) in Inkling2VisitPlan.globalSlots.enumerated() {
+            for p in 0..<count {
+                let row = Self.read(state, slot: slot, position: p)
+                let keys = Array(UnsafeBufferPointer(start: halves + ((i * 2) * count + p) * Self.rowHalves,
+                                                     count: Self.rowHalves))
+                let values = Array(UnsafeBufferPointer(start: halves + ((i * 2 + 1) * count + p) * Self.rowHalves,
+                                                       count: Self.rowHalves))
+                #expect(keys + values == row, "visit \(slot) position \(p)")
+            }
+        }
+        #expect(throws: PrefixSnapshotError.self) { try state.copyGlobalRows(count: 21, into: region) }
+        #expect(throws: PrefixSnapshotError.self) { try state.copyGlobalRows(count: 0, into: region) }
+        let small = try PrefixSnapshotRegion(byteCount: Inkling2AttentionState.globalRowBytes(tokens: count) - 1)
+        #expect(throws: PrefixSnapshotError.self) { try state.copyGlobalRows(count: count, into: small) }
+    }
+
+    /// The cache's restored hit: conversation X's image and light snapshot
+    /// come back byte for byte after Y overwrote the rings, the tails and the
+    /// global rows. Then the cache's later rewind inside X (a prefix whose
+    /// rows the image brought back) restores too, although the rewind log
+    /// refuses it to the snapshot API.
+    @Test func prefixImageRestoresAnotherConversationAndItsEarlierPrefix() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let state = try Inkling2AttentionState(device: device, configuration: Self.config)
+        try Self.run(state, tokens: 12, salt: 1)                      // conversation X
+        Self.fillTails(state, salt: 3)
+        let tailsAt12 = Self.tails(state), rowsAt12 = Self.prefixRows(state, at: 12)
+        let light12 = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: false))
+        let record12 = try state.takeSnapshot(into: light12, includeGlobalRows: false)
+        try Self.run(state, tokens: 8, salt: 1)
+        Self.fillTails(state, salt: 4)
+        let tailsAt20 = Self.tails(state), rowsAt20 = Self.prefixRows(state, at: 20)
+        let light20 = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: false))
+        _ = try state.takeSnapshot(into: light20, includeGlobalRows: false)
+        let image = try PrefixSnapshotRegion(byteCount: Inkling2AttentionState.globalRowBytes(tokens: 20))
+        try state.copyGlobalRows(count: 20, into: image)
+
+        state.reset()
+        try Self.run(state, tokens: 30, salt: 9)                      // conversation Y wraps every ring
+        Self.fillTails(state, salt: 77)
+        state.reset()
+
+        try state.restorePrefix(globalRows: (image, 20), position: 20, light: light20)
+        #expect(state.position == 20)
+        #expect(Self.tails(state) == tailsAt20)
+        Self.expectRows(state, rowsAt20)
+
+        // The image's earlier prefix: its rows below 12 are X's again.
+        #expect(!state.canRestore(record12))
+        try state.restorePrefix(globalRows: nil, position: 12, light: light12)
+        #expect(state.position == 12)
+        #expect(Self.tails(state) == tailsAt12)
+        Self.expectRows(state, rowsAt12)
+
+        // An image longer than the prefix restores it too (rows past 12 are
+        // rewritten before anything reads them).
+        state.reset()
+        try state.restorePrefix(globalRows: (image, 20), position: 12, light: light12)
+        #expect(state.position == 12)
+        #expect(Self.tails(state) == tailsAt12)
+        Self.expectRows(state, rowsAt12)
+    }
+
+    /// The cache's rewound hit: a branch past 20 wraps the rings over the
+    /// prefix's window rows and advances the tails; the light snapshot
+    /// brings them back, and the global rows below 20 were never touched.
+    @Test func prefixRewindRestoresTheRingsAfterABranch() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let state = try Inkling2AttentionState(device: device, configuration: Self.config)
+        try Self.run(state, tokens: 20, salt: 2)
+        Self.fillTails(state, salt: 5)
+        let tails = Self.tails(state), rows = Self.prefixRows(state, at: 20)
+        let light = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: false))
+        _ = try state.takeSnapshot(into: light, includeGlobalRows: false)
+
+        try Self.run(state, tokens: 25, salt: 8)                      // positions 20-44: slots 0-19 rewritten
+        Self.fillTails(state, salt: 99)
+        #expect(Self.read(state, slot: 0, position: 19) != rows[0]![19]!)
+
+        try state.restorePrefix(globalRows: nil, position: 20, light: light)
+        #expect(state.position == 20)
+        #expect(Self.tails(state) == tails)
+        Self.expectRows(state, rows)
+    }
+
+    /// Every refusal comes before the first copy: the cursor and the tails
+    /// stay as they were.
+    @Test func prefixRestoreRefusesBeforeCopying() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let state = try Inkling2AttentionState(device: device, configuration: Self.config)
+        try Self.run(state, tokens: 12, salt: 3)
+        let light12 = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: false))
+        _ = try state.takeSnapshot(into: light12, includeGlobalRows: false)
+        let full12 = try PrefixSnapshotRegion(byteCount: state.snapshotBytes(includeGlobalRows: true))
+        _ = try state.takeSnapshot(into: full12, includeGlobalRows: true)
+        let image12 = try PrefixSnapshotRegion(byteCount: Inkling2AttentionState.globalRowBytes(tokens: 12))
+        try state.copyGlobalRows(count: 12, into: image12)
+        try Self.run(state, tokens: 4, salt: 3)
+        Self.fillTails(state, salt: 11)
+        let tails = Self.tails(state)
+        let blank = try PrefixSnapshotRegion(byteCount: light12.byteCount)
+
+        func refused(_ body: @escaping () throws -> Void, _ why: Comment) {
+            #expect(throws: PrefixSnapshotError.self, why) { try body() }
+            #expect(state.position == 16, why)
+            #expect(Self.tails(state) == tails, why)
+        }
+        refused({ try state.restorePrefix(globalRows: nil, position: 11, light: light12) }, "another position")
+        refused({ try state.restorePrefix(globalRows: nil, position: 12, light: full12) }, "a full snapshot")
+        refused({ try state.restorePrefix(globalRows: nil, position: 12, light: blank) }, "no snapshot")
+        refused({ try state.restorePrefix(globalRows: (image12, 11), position: 12, light: light12) },
+                "an image shorter than the prefix")
+        refused({ try state.restorePrefix(globalRows: (image12, 13), position: 12, light: light12) },
+                "an image region too small for its count")
+        refused({ try state.restorePrefix(globalRows: nil, position: 0, light: light12) }, "an empty prefix")
+
+        // Past the cursor without rows: refused; with the image, restored.
+        try state.restorePrefix(globalRows: nil, position: 12, light: light12)
+        #expect(state.position == 12)
+        state.reset()
+        #expect(throws: PrefixSnapshotError.self) {
+            try state.restorePrefix(globalRows: nil, position: 12, light: light12)
+        }
+        #expect(state.position == 0)
+        try state.restorePrefix(globalRows: (image12, 12), position: 12, light: light12)
+        #expect(state.position == 12)
+    }
+
     @Test func memoryEstimateAtProductionShape() {
         let config = Inkling2AttentionState.Configuration(maxContext: 32_768, maxChunkTokens: 2048)
         // 40 rings x (K, V) x 3072 slots x 2 KiB + 48 x 78 KiB of tails + 8 x (K, V) x 32K x 2 KiB.

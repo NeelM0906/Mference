@@ -54,10 +54,16 @@ public struct NativeBackend: EngineBackend {
     }
 
     /// `multi-prefix` needs a runner that snapshots its prefix state; any
-    /// other runner is served exactly as `single-prefix`.
+    /// other runner is served exactly as `single-prefix`. Inkling 2 is served
+    /// as `single-prefix` too unless `inkling2MultiPrefix`
+    /// (`Inkling2PrefixSnapshots`), while its default is measured. `family`
+    /// has no default, so a caller cannot drop it and lift that rule.
     public static func effectivePromptCacheMode(_ requested: EnginePromptCacheMode,
-                                                runnerSnapshotsPrefixes: Bool) -> EnginePromptCacheMode {
-        requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
+                                                runnerSnapshotsPrefixes: Bool,
+                                                family: ModelFamily?,
+                                                inkling2MultiPrefix: Bool = false) -> EnginePromptCacheMode {
+        if requested == .multiPrefix, family == .inkling2Loop, !inkling2MultiPrefix { return .singlePrefix }
+        return requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
     }
 }
 
@@ -65,7 +71,8 @@ extension EnginePromptCacheBytes {
     static let gibibyte = 1 << 30
 
     /// `auto` is min(4 GiB, physical / 8) on hosts with at least 24 GiB,
-    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below.
+    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below;
+    /// for Inkling 2, at most `Inkling2PrefixSnapshots.autoBudgetCeiling`.
     public func resolved(family: ModelFamily? = nil,
                          physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
         switch self {
@@ -81,7 +88,7 @@ extension EnginePromptCacheBytes {
             } else {
                 general = 0
             }
-            return general
+            return family == .inkling2Loop ? min(general, Inkling2PrefixSnapshots.autoBudgetCeiling) : general
         }
     }
 }
@@ -268,7 +275,8 @@ public actor NativeEngineModel: EngineModel {
             $0.supportsPrefixStateSnapshots ? $0 : nil
         }
         let promptCacheMode = NativeBackend.effectivePromptCacheMode(
-            requestedPromptCacheMode, runnerSnapshotsPrefixes: snapshots != nil)
+            requestedPromptCacheMode, runnerSnapshotsPrefixes: snapshots != nil,
+            family: model?.config.family, inkling2MultiPrefix: Inkling2PrefixSnapshots.multiPrefixEnabled())
         let snapshotRunner: (any PrefixStateSnapshotting)?
         let memoryGovernor: PrefixCacheMemoryGovernor?
         let prefixStates: PrefixStateCache?

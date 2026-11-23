@@ -234,10 +234,16 @@ public actor ServerModelSession: ServerLoadedModel {
     }
 
     /// `multi-prefix` needs a runner that snapshots its prefix state; any
-    /// other runner is served exactly as `single-prefix`.
+    /// other runner is served exactly as `single-prefix`. Inkling 2 is served
+    /// as `single-prefix` too unless `inkling2MultiPrefix`
+    /// (`Inkling2PrefixSnapshots`), while its default is measured. `family`
+    /// has no default, so a caller cannot drop it and lift that rule.
     static func effectivePromptCacheMode(_ requested: ServerPromptCacheMode,
-                                         runnerSnapshotsPrefixes: Bool) -> ServerPromptCacheMode {
-        requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
+                                         runnerSnapshotsPrefixes: Bool,
+                                         family: ModelFamily?,
+                                         inkling2MultiPrefix: Bool = false) -> ServerPromptCacheMode {
+        if requested == .multiPrefix, family == .inkling2Loop, !inkling2MultiPrefix { return .singlePrefix }
+        return requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
     }
 
     /// `--max-context max` (nil) is the model's native context; either is
@@ -368,7 +374,8 @@ public actor ServerModelSession: ServerLoadedModel {
             $0.supportsPrefixStateSnapshots ? $0 : nil
         }
         self.promptCacheMode = Self.effectivePromptCacheMode(
-            promptCacheMode, runnerSnapshotsPrefixes: snapshots != nil)
+            promptCacheMode, runnerSnapshotsPrefixes: snapshots != nil,
+            family: model.config.family, inkling2MultiPrefix: Inkling2PrefixSnapshots.multiPrefixEnabled())
         if self.promptCacheMode == .multiPrefix, let snapshots {
             self.snapshotRunner = snapshots
             let governor = PrefixCacheMemoryGovernor()
