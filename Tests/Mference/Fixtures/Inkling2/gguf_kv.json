@@ -1,0 +1,391 @@
+{
+ "general.architecture": {
+  "type": "STRING",
+  "value": "inkling2_loop"
+ },
+ "general.type": {
+  "type": "STRING",
+  "value": "model"
+ },
+ "general.name": {
+  "type": "STRING",
+  "value": "Inkling-2-Mini"
+ },
+ "general.size_label": {
+  "type": "STRING",
+  "value": "128x1.8B"
+ },
+ "inkling2_loop.block_count": {
+  "type": "UINT32",
+  "value": 24
+ },
+ "inkling2_loop.context_length": {
+  "type": "UINT32",
+  "value": 1048576
+ },
+ "inkling2_loop.embedding_length": {
+  "type": "UINT32",
+  "value": 2304
+ },
+ "inkling2_loop.feed_forward_length": {
+  "type": "UINT32",
+  "value": 1152
+ },
+ "inkling2_loop.attention.head_count": {
+  "type": "ARRAY",
+  "value": {
+   "type": "array[INT32]",
+   "length": 24,
+   "sha256": "1d9f0543f18b885349b7e7bc1c34154259015c51601398dd08aa1674535cda75",
+   "values": [
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24,
+    24
+   ]
+  }
+ },
+ "inkling2_loop.attention.head_count_kv": {
+  "type": "ARRAY",
+  "value": {
+   "type": "array[INT32]",
+   "length": 24,
+   "sha256": "cce0e2e2b69dd16c38887911ff7a91b7f87b59a3037bbb5b0d37be95f8ac5357",
+   "values": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8
+   ]
+  }
+ },
+ "inkling2_loop.attention.layer_norm_rms_epsilon": {
+  "type": "FLOAT32",
+  "value": 9.999999974752427e-07
+ },
+ "inkling2_loop.expert_count": {
+  "type": "UINT32",
+  "value": 128
+ },
+ "inkling2_loop.expert_used_count": {
+  "type": "UINT32",
+  "value": 8
+ },
+ "inkling2_loop.attention.key_length": {
+  "type": "UINT32",
+  "value": 128
+ },
+ "inkling2_loop.attention.value_length": {
+  "type": "UINT32",
+  "value": 128
+ },
+ "inkling2_loop.loop.count": {
+  "type": "UINT32",
+  "value": 3
+ },
+ "inkling2_loop.loop.start": {
+  "type": "UINT32",
+  "value": 6
+ },
+ "inkling2_loop.loop.end": {
+  "type": "UINT32",
+  "value": 18
+ },
+ "inkling2_loop.loop.gate_rank": {
+  "type": "UINT32",
+  "value": 64
+ },
+ "inkling2_loop.vocab_size": {
+  "type": "UINT32",
+  "value": 201024
+ },
+ "inkling2_loop.vocab_size_unpadded": {
+  "type": "UINT32",
+  "value": 200058
+ },
+ "inkling2_loop.expert_feed_forward_length": {
+  "type": "UINT32",
+  "value": 1152
+ },
+ "inkling2_loop.attention.key_length_swa": {
+  "type": "UINT32",
+  "value": 128
+ },
+ "inkling2_loop.attention.value_length_swa": {
+  "type": "UINT32",
+  "value": 128
+ },
+ "inkling2_loop.rope.dimension_count": {
+  "type": "UINT32",
+  "value": 0
+ },
+ "inkling2_loop.attention.sliding_window": {
+  "type": "UINT32",
+  "value": 1024
+ },
+ "inkling2_loop.attention.sliding_window_pattern": {
+  "type": "ARRAY",
+  "value": {
+   "type": "array[BOOL]",
+   "length": 24,
+   "sha256": "525a03496c8219c6a74a0d35a7c69c1d45f2035eca10e27ff31e4fa39e974073",
+   "values": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ]
+  }
+ },
+ "inkling2_loop.shortconv.l_cache": {
+  "type": "UINT32",
+  "value": 4
+ },
+ "inkling2_loop.expert_weights_scale": {
+  "type": "FLOAT32",
+  "value": 8.0
+ },
+ "inkling2_loop.activation.situ_beta": {
+  "type": "FLOAT32",
+  "value": 4.0
+ },
+ "inkling2_loop.activation.situ_linear_beta": {
+  "type": "FLOAT32",
+  "value": 25.0
+ },
+ "inkling2_loop.attn_res.block_size": {
+  "type": "UINT32",
+  "value": 6
+ },
+ "inkling2_loop.final_logit_softcapping": {
+  "type": "FLOAT32",
+  "value": 30.0
+ },
+ "inkling2_loop.attention.relative_length": {
+  "type": "UINT32",
+  "value": 16
+ },
+ "inkling2_loop.attention.relative_extent": {
+  "type": "UINT32",
+  "value": 1024
+ },
+ "inkling2_loop.attention.qk_clip": {
+  "type": "FLOAT32",
+  "value": 22.627416610717773
+ },
+ "inkling2_loop.attention.relative_clip": {
+  "type": "FLOAT32",
+  "value": 8.0
+ },
+ "inkling2_loop.attention.log_scale_floor": {
+  "type": "UINT32",
+  "value": 8192
+ },
+ "inkling2_loop.attention.log_scale_alpha": {
+  "type": "FLOAT32",
+  "value": 0.10000000149011612
+ },
+ "tokenizer.ggml.model": {
+  "type": "STRING",
+  "value": "gpt2"
+ },
+ "tokenizer.ggml.pre": {
+  "type": "STRING",
+  "value": "inkling2"
+ },
+ "tokenizer.ggml.tokens": {
+  "type": "ARRAY",
+  "value": {
+   "type": "array[STRING]",
+   "length": 200058,
+   "sha256": "5461399b561769bbf493b7842c50debf7f91b39d8345dc360e5e664749c51afd",
+   "head": [
+    "!",
+    "\"",
+    "#",
+    "$",
+    "%",
+    "&",
+    "'",
+    "("
+   ]
+  }
+ },
+ "tokenizer.ggml.token_type": {
+  "type": "ARRAY",
+  "value": {
+   "type": "array[INT32]",
+   "length": 200058,
+   "sha256": "34aeff1900ba87f1cfcb873917ee4acc745ed28722bf3bacb7f456362ce2b239",
+   "head": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  }
+ },
+ "tokenizer.ggml.merges": {
+  "type": "ARRAY",
+  "value": {
+   "type": "array[STRING]",
+   "length": 424413,
+   "sha256": "ceed7e32c70b68dbe9f09592542cfd82fb5fb3caeb8dad3b4977be46ec521eb5",
+   "head": [
+    "i n",
+    "e r",
+    "t h",
+    "a n",
+    "o n",
+    "r e",
+    "e n",
+    "a t"
+   ]
+  }
+ },
+ "tokenizer.ggml.eos_token_id": {
+  "type": "UINT32",
+  "value": 200006
+ },
+ "tokenizer.ggml.eot_token_id": {
+  "type": "UINT32",
+  "value": 200006
+ },
+ "tokenizer.ggml.add_bos_token": {
+  "type": "BOOL",
+  "value": false
+ },
+ "tokenizer.ggml.add_eos_token": {
+  "type": "BOOL",
+  "value": false
+ },
+ "tokenizer.ggml.clean_spaces": {
+  "type": "BOOL",
+  "value": false
+ },
+ "general.quantization_version": {
+  "type": "UINT32",
+  "value": 2
+ },
+ "general.file_type": {
+  "type": "UINT32",
+  "value": 7
+ },
+ "quantize.imatrix.file": {
+  "type": "STRING",
+  "value": "imatrix_unsloth.gguf"
+ },
+ "quantize.imatrix.dataset": {
+  "type": "STRING",
+  "value": "unsloth_calibration_Inkling-2-Mini.conv.jsonl"
+ },
+ "quantize.imatrix.entries_count": {
+  "type": "UINT32",
+  "value": 392
+ },
+ "quantize.imatrix.chunks_count": {
+  "type": "UINT32",
+  "value": 892
+ },
+ "tokenizer.chat_template": {
+  "type": "STRING",
+  "value": {
+   "type": "string",
+   "length": 6868,
+   "sha256": "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc",
+   "head": "{%- set effort_map = {\"none\": 0.0, \"minimal\": 0.1, \"low\": 0.2, \"medium\": 0.7, \"high\": 0.9, \"xhigh\": 0.99, \"max\": 0.99} -%}\n{%- set role_token = {\"user\": \"<|message_user|>\", \"assistant\": \"<|message_mod"
+  }
+ },
+ "general.basename": {
+  "type": "STRING",
+  "value": "Inkling-2-Mini"
+ },
+ "tokenizer.ggml.padding_token_id": {
+  "type": "UINT32",
+  "value": 199999
+ },
+ "general.sampling.temp": {
+  "type": "FLOAT32",
+  "value": 1.0
+ },
+ "general.sampling.top_k": {
+  "type": "INT32",
+  "value": 0
+ },
+ "general.sampling.top_p": {
+  "type": "FLOAT32",
+  "value": 1.0
+ },
+ "general.sampling.min_p": {
+  "type": "FLOAT32",
+  "value": 0.0
+ },
+ "inkling2_loop.loop.varying": {
+  "type": "BOOL",
+  "value": false
+ }
+}
