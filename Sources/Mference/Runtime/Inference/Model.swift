@@ -742,6 +742,10 @@ extension Model {
             residentSize: residentIndex.header.residentSize,
             device: device,
             tensorSpans: tensorSpans)
+        if expecting.family == .inkling2Loop {
+            try Inkling2ResidentContract.validateOneBuffer(chunkCount: residentBuffer.chunks.count,
+                                                           residentSize: residentIndex.header.residentSize)
+        }
 
         try receiptCheck {
             try validateTrustedReceiptLayerLayout(directoryURL: directoryURL,

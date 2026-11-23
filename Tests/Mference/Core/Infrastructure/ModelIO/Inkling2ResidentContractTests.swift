@@ -85,5 +85,69 @@ import Testing
         // The NVFP4 layer's per-expert factor is required; the Q8_0 layer has none.
         #expect(refused { $0.removeValue(forKey: "blk.0.ffn_down_exps.scale") } != nil)
         #expect(good.entries["blk.1.ffn_down_exps.scale"] == nil)
+        // One format per tensor, the one the kernels read in place: an F16
+        // norm (its own size, so only the format check can catch it), a BF16
+        // projection, a Q8_0 sink projection.
+        #expect(refused(with("blk.0.attn_norm.weight", dtype: GGMLBlockFormat.f16.residentDtype, size: 128 * 2))
+                != nil)
+        #expect(refused(with("blk.0.attn_q.weight", dtype: GGMLBlockFormat.bf16.residentDtype, size: 128 * 128 * 2))
+                != nil)
+        #expect(refused(with("blk.0.attn_sink_proj.weight", dtype: GGMLBlockFormat.q8_0.residentDtype,
+                             size: 2 * 4 * 34)) != nil)
+        // An offset off the 256-byte boundary.
+        #expect(refused { entries in
+            let e = entries["blk.0.ffn_norm.weight"]!
+            entries[e.name] = ResidentIndexEntry(name: e.name, dtype: e.dtype, fileOffset: e.fileOffset + 16,
+                                                 sizeBytes: e.sizeBytes, shape: e.shape, scaleOffset: 0,
+                                                 scaleSize: 0, biasOffset: 0, biasSize: 0)
+        } != nil)
+    }
+
+    /// The contract against the real file's header, as K0 dumped it
+    /// (`Fixtures/Inkling2/gguf_tensors.tsv`): every non-expert tensor by
+    /// name, with the contract's shape (the GGUF's `ne` reversed), its one
+    /// format, and its byte count.
+    @Test func realHeaderDumpMatchesTheContract() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let tsv = try String(contentsOf: root.appendingPathComponent(
+            "Tests/Mference/Fixtures/Inkling2/gguf_tensors.tsv"), encoding: .utf8)
+        var real: [String: (format: GGMLBlockFormat?, shape: [Int], bytes: UInt64)] = [:]
+        for line in tsv.split(separator: "\n").dropFirst() {
+            let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 10, !f[1].hasSuffix("_exps.weight") else { continue }
+            var ne = f[4...7].compactMap { Int($0) }
+            while ne.count > 1, ne.last == 1 { ne.removeLast() }
+            real[f[1]] = (GGMLBlockFormat(name: f[2]), Array(ne.reversed()), UInt64(f[9]) ?? 0)
+        }
+        let expected = Inkling2ResidentContract.expectedTensors(config: .inkling2Mini)
+        #expect(real.count == 696)
+        #expect(Set(real.keys) == Set(expected.map(\.name)))
+        for t in expected {
+            guard let r = real[t.name] else { continue }
+            #expect(r.shape == t.shape, "\(t.name)")
+            let format = try #require(r.format, "\(t.name)")
+            #expect(t.formats == [format], "\(t.name)")
+            #expect(UInt64(t.shape.dropLast().reduce(format.rowBytes(elements: t.shape.last!) ?? 0, *)) == r.bytes,
+                    "\(t.name)")
+        }
+    }
+
+    /// A sliding layer's bias table spans the window, a global layer's the
+    /// relative extent (the toy and the real file have both equal).
+    @Test func biasTableFollowsTheLayerKind() {
+        var shape = Inkling2Shape()
+        shape.window = 8
+        let tensors = Inkling2ResidentContract.expectedTensors(config: shape.archConfig)
+        let rows = Dictionary(uniqueKeysWithValues: tensors.map { ($0.name, $0.shape) })
+        #expect(rows["blk.0.attn_rel_bias.weight"] == [8, shape.dRel])
+        #expect(rows["blk.1.attn_rel_bias.weight"] == [shape.extent, shape.dRel])
+    }
+
+    @Test func residentRegionMustBeOneBuffer() throws {
+        try Inkling2ResidentContract.validateOneBuffer(chunkCount: 1, residentSize: 1 << 30)
+        #expect(throws: ModelError.self) {
+            try Inkling2ResidentContract.validateOneBuffer(chunkCount: 2, residentSize: 1 << 34)
+        }
     }
 }
