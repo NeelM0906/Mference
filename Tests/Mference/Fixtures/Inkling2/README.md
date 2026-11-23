@@ -75,6 +75,24 @@ states after each visit (`l_out-<slot>`, `[48 x n_prompt x 2304]`) are with
 the program's results (`goldens/generate*/cpu/<trace>/hidden_after_visit.f32`),
 as is a third trace of the 300-token tool prompt (2.5 MB of JSON).
 
+## Using the CPU-only trace (G6a)
+
+Feed the runner `cpu/<trace>/golden.json` `prompt_ids` (no BOS) as one
+prefill. The hidden state after each layer visit is kept outside the
+repository (`goldens/generate*/cpu/<trace>/hidden_after_visit.f32`): raw
+IEEE-754 binary32, little-endian, no header, `[48 visits x n_prompt x 2304]`
+row-major, so visit `v`, position `t`, channel `c` is at byte
+`4 * ((v * n_prompt + t) * 2304 + c)`. Visit `v` is `trace.json`
+`visits[v]` (`layer` = physical layer, `slot` = cache slot): visits 0-5 are
+layers 0-5 in slots 0-5, 6-17 core pass 1 (layers 6-17, slots 6-17), 18-29
+pass 2 (slots 24-35), 30-41 pass 3 (slots 36-47), 42-47 layers 18-23 in slots
+18-23. Each record is the layer output `l_out-<slot>` (after the MoE
+residual add), the next visit's input; visit 0's input is the token
+embedding after the `token_embd_norm` RMS norm. Expert ids per visit and
+position are in `trace.json` (compare as sets; weights sum to 8). The CPU-only
+run rounds the inputs of NVFP4 and Q8_0 products to Q8_0. The full
+definitions are in the program's goldens README ("Trace records").
+
 ## `noise/`: the reference against itself
 
 `compare_goldens.py` outputs: Metal vs Metal in a fresh process

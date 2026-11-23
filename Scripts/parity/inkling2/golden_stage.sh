@@ -16,6 +16,9 @@
 #   cpu2       the second set CPU-only (the G6a reference for trace02)
 #   metal3/cpu3 trace of the lp05 tool prompt (300 tokens) on each backend, to
 #              locate where Metal and CPU-only diverge on its tool JSON
+#   tf-metal/tf-cpu teacher-forced: every log-prob golden's prompt + generated
+#              ids as one prompt (inputs/generate_prompts_tf.json, from
+#              make_tf_prompts.py), so the noise covers every position
 # Set 1 writes generate/<stage>, set 2 generate2/<stage without the 2>.
 # All use n_ctx 4096, n_ubatch 512, 8 threads.
 set -uo pipefail
@@ -30,6 +33,8 @@ case "$STAGE" in
   cpu2) ngl=0; IN=$HERE/inputs/generate_prompts_2.json; OUTD=$G/generate2/cpu ;;
   metal3) ngl=99; IN=$HERE/inputs/generate_prompts_3.json; OUTD=$G/generate3/metal ;;
   cpu3) ngl=0; IN=$HERE/inputs/generate_prompts_3.json; OUTD=$G/generate3/cpu ;;
+  tf-metal) ngl=99; IN=$HERE/inputs/generate_prompts_tf.json; OUTD=$G/generate-tf/metal ;;
+  tf-cpu) ngl=0; IN=$HERE/inputs/generate_prompts_tf.json; OUTD=$G/generate-tf/cpu ;;
   *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
 exec "$HERE/guarded_run.sh" "$OUTD/log" "$GGUF" -- \

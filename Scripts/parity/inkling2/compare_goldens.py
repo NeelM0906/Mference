@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Agreement metrics between two ink-golden `generate` outputs (stdlib only).
 
-    python3 -I Scripts/parity/inkling2/compare_goldens.py <run-a> <run-b> [--json out.json]
+    python3 -I Scripts/parity/inkling2/compare_goldens.py <run-a> <run-b> [--json out.json] [--teacher-forced]
 
 Used twice: on the reference against itself (Metal vs Metal in a fresh process,
 Metal vs CPU) to measure the reference's own noise, from which the G6
@@ -135,6 +135,8 @@ def trace_metrics(da, db, pid):
 def main():
     da, db = sys.argv[1], sys.argv[2]
     out_json = sys.argv[sys.argv.index("--json") + 1] if "--json" in sys.argv else None
+    # --teacher-forced: run B is make_tf_prompts.py's set run on run A's goldens
+    teacher_forced = "--teacher-forced" in sys.argv
     ia = json.load(open(os.path.join(da, "index.json")))
     result = {"a": da, "b": db, "prompts": []}
     for p in ia["prompts"]:
@@ -142,6 +144,16 @@ def main():
         ga, gb = load(da, pid, "golden.json"), load(db, pid, "golden.json")
         if gb is None:
             result["prompts"].append({"id": pid, "missing_in_b": True})
+            continue
+        if teacher_forced:
+            # B ran A's prompt + generated ids (but the last) as one prompt:
+            # every recorded position has the same context in both
+            ctx = ga["prompt_ids"] + ga["generated_ids"][:-1]
+            r = {"id": pid, "teacher_forced": True, "context_equal": gb["prompt_ids"] == ctx,
+                 "prompt_ids_equal": gb["prompt_ids"] == ctx}
+            if r["context_equal"] and ga.get("logprobs_file") and gb.get("logprobs_file"):
+                r["logprobs"] = lp_metrics(load(da, pid, "logprobs.json"), load(db, pid, "logprobs.json"), len(ctx))
+            result["prompts"].append(r)
             continue
         r = {"id": pid, "prompt_ids_equal": ga["prompt_ids"] == gb["prompt_ids"]}
         xa, xb = ga["generated_ids"], gb["generated_ids"]

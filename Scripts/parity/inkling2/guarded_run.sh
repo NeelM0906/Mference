@@ -69,6 +69,9 @@ done
 
 power=$(pmset -g batt | head -1)
 if [ $TIMING = 1 ] && ! echo "$power" | grep -q "AC Power"; then note "REFUSED: timing run not on AC power ($power)"; exit 71; fi
+# Coordinator rule (2026-11-23): no tok/s number while the Mference app is open
+# (it may hold a model); try again later by hand.
+if [ $TIMING = 1 ] && pgrep -f 'Mference.app/Contents/MacOS/' > /dev/null; then note "REFUSED: timing run while the Mference app is open"; exit 71; fi
 [ -f "$GGUF" ] || { note "REFUSED: no GGUF at $GGUF"; exit 71; }
 if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
 # Match executables by full basename (pgrep -x sees names cut to 16 characters);

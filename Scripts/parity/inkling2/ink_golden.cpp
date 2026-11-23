@@ -15,7 +15,8 @@
 //   chat_template_kwargs (reasoning_effort) and tools; the rendered string and
 //   its tokens (the whole string, parse_special true, as llama-server does).
 //   Vocabulary only: no weights are loaded.
-// generate: for each prompt (raw text or chat messages) prefill in ubatches,
+// generate: for each prompt (raw text, chat messages, or "ids": token ids used
+//   as given, for teacher forcing) prefill in ubatches,
 //   then greedy decode one token per step (argmax of the logits, ties to the
 //   lower id). Writes the tokens and text; with "logprobs" the top-K
 //   log-probabilities (log-softmax over the 200,058 real tokens) at every
@@ -358,6 +359,11 @@ static int cmd_generate(int argc, char ** argv) {
         if (kind == "chat") {
             rendered_chat r = render_chat(model, tmpls.get(), pr);
             prompt_text = r.text; ids = r.ids;
+        } else if (kind == "ids") {
+            // token ids given directly (teacher forcing: another run's prompt
+            // ids followed by its generated ids), never re-tokenized
+            for (const auto & t : pr.at("ids")) ids.push_back((llama_token) t.get<int>());
+            prompt_text = detok(vocab, ids);
         } else {
             prompt_text = pr.at("text");
             ids = tokenize(vocab, prompt_text, pr.value("parse_special", false));
