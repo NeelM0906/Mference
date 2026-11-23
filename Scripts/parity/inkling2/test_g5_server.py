@@ -99,10 +99,10 @@ class CompareTests(unittest.TestCase):
         n = g.normalize(200, nonstream(), False)
         return self.write(name, [(c, (override or {}).get(c, n)) for c, _ in g.cases("qwen36")])
 
-    def run_compare(self, a, b):
+    def run_compare(self, a, b, fams=("qwen36",)):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            rc = g.compare(a, b)
+            rc = g.compare(a, b, list(fams))
         return rc, out.getvalue()
 
     def test_same_different_missing(self):
@@ -120,6 +120,25 @@ class CompareTests(unittest.TestCase):
         self.assertIn("MISSING on both sides", out)
         # no rows at all is not a pass
         self.assertEqual(self.run_compare(self.write("f.jsonl", []), self.write("g.jsonl", []))[0], 2)
+
+    def test_a_planned_family_with_no_rows_counts(self):
+        a, b = self.full("a.jsonl"), self.full("b.jsonl")
+        rc, out = self.run_compare(a, b, ("qwen36", "maple"))
+        self.assertEqual(rc, 2)
+        self.assertIn("families with no rows: maple", out)
+        with self.assertRaises(SystemExit):
+            self.run_compare(a, b, ("qwen99",))
+
+    def test_odd_frames_do_not_crash(self):
+        ev = [{"choices": [{"delta": {"tool_calls": [{"index": None, "function": {"name": "f", "arguments": "{}"}},
+                                                     {"index": 0, "function": {"name": "g", "arguments": "{}"}}]}}]},
+              {"choices": [], "usage": [1, 2]}, {"choices": [], "error": {"type": "x"}}]
+        n = g.normalize(200, sse(ev), True)
+        self.assertEqual(len(n["tool_calls"]), 2)
+        self.assertIn({"choices": [], "error": {"type": "x"}}, n["other_frames"])
+        self.assertIn({"<not an object>": "[1, 2]"}, n["usage_frames"])
+        self.assertEqual(g.normalize(200, json.dumps({"choices": [{"message": {"content": "x"}}], "usage": "u"}), False)["usage"],
+                         {"<not an object>": "\"u\""})
 
     def test_duplicate_rows_are_refused(self):
         n = g.normalize(200, nonstream(), False)

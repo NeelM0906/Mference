@@ -3,14 +3,15 @@
 comparison of two such runs (stdlib only).
 
     python3 -I Scripts/parity/inkling2/g5_server.py run --port N --model ID --family minicpm5|qwen36|maple --out FILE.jsonl
-    python3 -I Scripts/parity/inkling2/g5_server.py compare A.jsonl B.jsonl
+    python3 -I Scripts/parity/inkling2/g5_server.py compare A.jsonl B.jsonl --families F[,F...]
 
 `run` sends the cases ($INK/inbox/k0-notice-g5-server-cases.md) in a fixed
 order to 127.0.0.1:N and appends one JSON row per case to FILE.jsonl: the
 request, the HTTP status, the raw body (or SSE text) and the normalized
 fields. `compare` matches rows by (model, case) and compares the normalized
-fields and the request against every case the families in the files should
-have; it exits 1 on any difference, 2 when a case is missing on either side
+fields and the request against every case of the planned families
+(`--families`: one for a --model server, all three for --library), so a
+family whose model wrote no rows on either side counts as missing; it exits 1 on any difference, 2 when a case is missing on either side
 (or there are no rows), 0 when every case is the same. A file with a
 duplicate (model, case) is refused.
 
@@ -91,6 +92,8 @@ def cases(family):
 
 
 def usage_ints(u):
+    if u is not None and not isinstance(u, dict):
+        return {"<not an object>": json.dumps(u)}
     out = {}
     for k, v in (u or {}).items():
         if isinstance(v, bool):
@@ -176,8 +179,12 @@ def normalize(status, raw, stream):
         except ValueError:
             unparsed.append(payload)
             continue
-        if not isinstance(ev, dict) or "choices" not in ev:
-            other.append(ev)  # error frames and anything else that is not a delta, in order
+        if not isinstance(ev, dict) or "choices" not in ev or "error" in ev:
+            other.append(ev)  # error frames and anything else that is not a plain delta, in order
+            if not isinstance(ev, dict) or "choices" not in ev:
+                continue
+        if not isinstance(ev.get("choices"), list):
+            continue
             continue
         if ev.get("usage") is not None:
             usages.append(usage_ints(ev["usage"]))
@@ -188,7 +195,8 @@ def normalize(status, raw, stream):
             if dl.get("reasoning_content"):
                 reasoning.append(dl["reasoning_content"])
             for tc in dl.get("tool_calls") or []:
-                key = tc.get("index", "<no index>")  # a missing index is a difference, not slot 0
+                idx = tc.get("index", "<no index>")  # a missing index is a difference, not slot 0
+                key = idx if isinstance(idx, int) and not isinstance(idx, bool) else repr(idx)
                 slot = calls.setdefault(key, {"name": None, "arguments": ""})
                 f = tc.get("function") or {}
                 if f.get("name"):
@@ -238,7 +246,9 @@ def loose(n):
             "usage": n.get("usage") or ((n.get("usage_frames") or [{}])[-1])}
 
 
-def compare(a_path, b_path):
+def compare(a_path, b_path, families):
+    """families: the families the run planned (for library mode all three), so a family whose
+    model has no rows on either side still counts as missing."""
     def load(p):
         rows = {}
         with open(p) as f:
@@ -254,9 +264,16 @@ def compare(a_path, b_path):
     a, b = load(a_path), load(b_path)
     # every case each model's family should have, whether or not either side wrote it
     fams = {r["model"]: r["family"] for r in list(a.values()) + list(b.values())}
+    unknown = sorted({f for f in list(fams.values()) + families if f not in THINKING})
+    if unknown:
+        sys.exit(f"unknown families: {', '.join(unknown)}")
     expected = {(m, c) for m, f in fams.items() for c, _ in cases(f)}
+    absent = [f for f in families if f not in fams.values()]
     keys = sorted(expected | set(a) | set(b))
     diffs = missing = raw_only_n = 0
+    for f in absent:
+        missing += len(cases(f))
+        print(f"| ({f}) | all {len(cases(f))} cases | MISSING on both sides: no rows for this family | |")
     print("| Model | Case | Result | Fields that differ |")
     print("|---|---|---|---|")
     for k in keys:
@@ -292,6 +309,8 @@ def compare(a_path, b_path):
     if not keys:
         print("no rows at all")
         return 2
+    if absent:
+        print(f"families with no rows: {', '.join(absent)}")
     return 1 if diffs else (2 if missing else 0)
 
 
@@ -299,4 +318,8 @@ if __name__ == "__main__":
     a = sys.argv[1:]
     if not a or a[0] not in ("run", "compare"):
         sys.exit(__doc__)
-    sys.exit(run(a[1:]) if a[0] == "run" else compare(a[1], a[2]))
+    if a[0] == "run":
+        sys.exit(run(a[1:]))
+    if len(a) != 5 or a[3] != "--families":
+        sys.exit("usage: g5_server.py compare A.jsonl B.jsonl --families minicpm5,qwen36,maple")
+    sys.exit(compare(a[1], a[2], a[4].split(",")))

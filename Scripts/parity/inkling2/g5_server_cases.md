@@ -16,7 +16,7 @@
 
 A stream is reduced to its concatenated deltas, the assembled tool calls with their indexes, every finish reason and usage frame, every frame that is not a delta, unparsed lines and the `[DONE]` marker. Ids, `created`, timings and logs are not compared.
 
-`compare` checks every case the families in the files should have, so a case missing on both sides counts as missing. It refuses a file that holds a case twice.
+`compare A B --families F[,F]` checks every case of the planned families (one for a `--model` server, all three for `--library`), so a case missing on both sides, or a family with no rows at all, counts as missing. It refuses a file that holds a case twice.
 
 A difference in the arguments string alone, with the parsed JSON equal, is reported on its own line.
 
