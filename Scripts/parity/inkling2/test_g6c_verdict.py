@@ -308,6 +308,31 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(gv.verdict(True, "pass", [], False)[1], 4)          # no traces: never pass
         self.assertEqual(gv.verdict(True, "pass", [], True), ("PASS", 0))
 
+    def test_rule3_needs_every_reference_position(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            w = World(tmp)
+            metal = os.path.join(w.goldens, "generate-tf", "metal")
+            recs = {pid: {"logprobs": gv.pair(metal, w.cand, pid)} for pid in w.ids}
+            ok = gv.rule3(recs, w.meas, list(w.ids))
+            self.assertTrue(ok["pass"])
+            self.assertNotIn("incomplete", ok)
+            # one prompt with fewer positions compared than the reference has
+            path = os.path.join(w.cand, World.MID, "logprobs.json")
+            with open(path) as f:
+                rows = json.load(f)
+            dump(rows[:-5], path)
+            recs[World.MID] = {"logprobs": gv.pair(metal, w.cand, World.MID)}
+            short = gv.rule3(recs, w.meas, list(w.ids))
+            self.assertFalse(short["pass"])
+            self.assertEqual(short["incomplete"], [World.MID])
+            # and one missing altogether
+            del recs[World.LONG]
+            self.assertEqual(sorted(gv.rule3(recs, w.meas, list(w.ids))["incomplete"]), [World.LONG, World.MID])
+        finally:
+            import shutil
+            shutil.rmtree(tmp)
+
     def test_pooled_skips_prompts_without_positions(self):
         empty = {"logprobs": {"positions": 0, "top1_agreement": None, "top1_at_margin": {"2.0": {"positions": 0, "agree": 0}}}}
         self.assertFalse(gv.pooled([empty])["pass"])

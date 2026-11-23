@@ -164,6 +164,18 @@ def pooled(records):
     return {"positions": n, "top1": top1, "top1_at_2": top1_2, "pass": ok}
 
 
+def rule3(gate_recs, meas_g, expected):
+    """Rule 3, pooled against tf Metal, failing when any expected prompt is missing
+    or had fewer positions compared than the reference has (meas_g's count)."""
+    res = pooled([gate_recs.get(pid) for pid in expected])
+    short = [pid for pid in expected if not (gate_recs.get(pid) and gate_recs[pid].get("logprobs")
+                                            and gate_recs[pid]["logprobs"]["positions"] == meas_g[pid]["top1"][1])]
+    if short:
+        res["pass"] = False
+        res["incomplete"] = short
+    return res
+
+
 def traces(goldens, tdir):
     res = {}
     for pid, gd in TRACE_GOLDENS.items():
@@ -582,12 +594,7 @@ def main():
                                   "as_written_v18_bounds": rg[2], "plain_v2_pass": rp[0],
                                   "plain_v2_fails": rp[1], "plain_v2_bounds": rp[2], "note": note}
         rows.append((pid, rg, rp, note))
-    report["pooled"] = pooled([gate_recs.get(pid) for pid in expected])
-    short = [pid for pid in expected if not (gate_recs.get(pid) and gate_recs[pid].get("logprobs")
-                                            and gate_recs[pid]["logprobs"]["positions"] == meas_g[pid]["top1"][1])]
-    if short:
-        report["pooled"]["pass"] = False
-        report["pooled"]["incomplete"] = short
+    report["pooled"] = rule3(gate_recs, meas_g, expected)
     report["pooled_plain_v2"] = pooled([plain_recs.get(pid) for pid in expected])
     tr = traces(goldens, tdir) if tdir else {}
     report["traces"], report["traces_checked"] = tr, bool(tdir)
