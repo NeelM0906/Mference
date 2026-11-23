@@ -116,6 +116,53 @@ struct Inkling2DecoderTests {
         #expect(visible(events) == "plain")
     }
 
+    @Test func toolErrorAndTextInvokeBlocksAreVisible() throws {
+        let d = decoder()
+        var reasoning = ""
+        let events = try feed(mdl + "<|content_tool_error|>" + "bad input" + end
+                              + mdl + "<|content_invoke_tool_text|>" + " retry" + end + eos,
+                              into: d, reasoning: &reasoning)
+        #expect(visible(events) == "bad input retry")
+    }
+
+    @Test func headerTextBeforeATextBlockStaysHidden() throws {
+        let d = decoder()
+        var reasoning = ""
+        let events = try feed(mdl + "assistant" + txt + "Hi" + end, into: d, reasoning: &reasoning)
+        #expect(visible(events) == "Hi")
+    }
+
+    @Test func eosInsideABlockEndsTheVisibleText() throws {
+        let d = decoder()
+        var reasoning = ""
+        let events = try feed(mdl + txt + "partial" + eos, into: d, reasoning: &reasoning)
+        #expect(visible(events) == "partial")
+        _ = try d.finish()
+    }
+
+    @Test func aHeaderNamesOnlyTheBlockItOpens() throws {
+        // The second call has no header of its own; the first call's name
+        // must not carry over and reject it.
+        let d = decoder(allowedTools: ["get_weather", "get_time"])
+        var reasoning = ""
+        let events = try feed(mdl + "get_weather" + invoke + #"{"name":"get_weather","args":{}}"# + end
+                              + invoke + #"{"name":"get_time","args":{}}"# + end,
+                              into: d, reasoning: &reasoning)
+        #expect(calls(events).map(\.name) == ["get_weather", "get_time"])
+    }
+
+    @Test func anOversizedCallFails() throws {
+        // Token ids straight into the decoder: past the cap, the buffered call fails.
+        let d = decoder()
+        let t = try #require(tok.inkling2Tokens)
+        _ = try d.consume(tokenID: t.messageModel, delta: "")
+        _ = try d.consume(tokenID: t.contentInvokeToolJSON, delta: "")
+        let a = try #require(tok.encode("a", addBOS: false).first)
+        let cap = Inkling2ToolCallParser.maximumBytes / MemoryLayout<Int32>.size
+        for _ in 0..<cap { _ = try d.consume(tokenID: a, delta: "a") }
+        #expect(throws: ToolCallParserError.oversized) { _ = try d.consume(tokenID: a, delta: "a") }
+    }
+
     @Test func parserRejectsMalformedBodies() {
         let p = Inkling2ToolCallParser()
         for body in [#"{"name":"get_weather"}"#, #"{"name":"get_weather","args":[]}"#,

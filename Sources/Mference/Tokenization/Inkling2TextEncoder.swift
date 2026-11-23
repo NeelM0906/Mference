@@ -1,20 +1,29 @@
 import Foundation
 import Tokenizers
 
-/// Text to token ids the way the reference tokenizes Inkling 2.
+/// Text to token ids the way the vendor's tokenizer encodes Inkling 2.
 ///
-/// The reference (llama.cpp b12641, `src/llama-vocab.cpp`, pre-tokenizer
-/// `inkling2`) splits text with the GPT-4o pattern and runs byte-level BPE
-/// with `ignore_merges`: a pre-tokenized word that is itself a vocabulary
-/// entry becomes that one token before any merge is tried (#32799). The
-/// vendor's `tokenizer.json` sets the same flag. swift-transformers 1.3
-/// ignores it, so this encoder applies it: added (special) tokens are matched
-/// first, the rest is split with the same pattern, and each word is looked
+/// The vendor's tokenizer (its `tokenizer.json`, and the tiktoken file it
+/// ships) splits text with the GPT-4o pattern and takes a split word that is
+/// itself a vocabulary entry as one token before any merge (`ignore_merges`;
+/// llama.cpp b12641 does the same since #32799). swift-transformers 1.3 has
+/// no such switch, so this encoder applies it: added (special) tokens are
+/// matched first, the rest is split with the pattern, and each word is looked
 /// up whole in the vocabulary, falling back to swift-transformers' BPE for
 /// that word alone.
+///
+/// Known difference from llama.cpp, recorded for G6: llama.cpp does not run
+/// this pattern. It runs a rewrite (`LLAMA_VOCAB_PRE_TYPE_GPT4O`) over text
+/// collapsed to one byte per Unicode category, where every non-ASCII letter
+/// counts as both upper and lower case. Words that mix a lowercase letter
+/// with a following non-ASCII capital, or start an all-caps word with a
+/// non-ASCII capital, split differently there: `getÜbersicht` is one word in
+/// llama.cpp and two here (and in the vendor's tokenizer); `ÉTAT` is `É`,
+/// `TAT` there and one word here. Where the reference and the vendor's code
+/// disagree, the vendor's code decides (program spec section 10).
 struct Inkling2TextEncoder: @unchecked Sendable {
-    /// GPT-4o's split pattern, as llama.cpp's `LLAMA_VOCAB_PRE_TYPE_GPT4O`
-    /// quotes it from `tokenizer.json`.
+    /// GPT-4o's split pattern as the vendor's `tokenizer.json` and tiktoken
+    /// use it (llama.cpp keeps it as a comment beside its rewrite).
     static let pattern =
         #"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"#
 
@@ -24,6 +33,9 @@ struct Inkling2TextEncoder: @unchecked Sendable {
     private let specials: [String: Int]
 
     init(specials: [String: Int]) throws {
+        guard !specials.isEmpty else {
+            throw MFTokenizerError.missingSpecialToken("<|message_user|>")
+        }
         self.words = try NSRegularExpression(pattern: Self.pattern)
         self.specials = specials
         // Longest first, so a token never matches a prefix of a longer one.

@@ -107,7 +107,7 @@ public func run(args: Args,
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: args.reasoningEffort, promptIDs: promptIds)
         let decoder = args.messagesFile != nil && (tokenizer.usesSourceTemplate(reasoningEffort: args.reasoningEffort)
-            || startsInThinking)
+            || startsInThinking || tokenizer.dialect == .inkling2)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
                                          startsInThought: startsInThinking)
@@ -569,8 +569,10 @@ private func streamChatTurn(promptIds: [Int32],
     var reasoning = ""
     let startsInThinking = tokenizer.startsInThinking(
         reasoningEffort: reasoningEffort, promptIDs: promptIds)
+    // Inkling 2's turns are message blocks; only the decoder separates the
+    // thinking from the answer.
     let decoder = tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort)
-        || startsInThinking
+        || startsInThinking || tokenizer.dialect == .inkling2
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],
                                      startsInThought: startsInThinking)
@@ -585,7 +587,8 @@ private func streamChatTurn(promptIds: [Int32],
         stdout.write(Data(text.utf8))
         reply += text
     }
-    if tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort) {
+    if tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort)
+        || tokenizer.dialect == .inkling2 {
         decoder?.onReasoning = { text in
             reasoning += text
             if showReasoning { stderr.write(Data(echo.reasoning(text).utf8)) }

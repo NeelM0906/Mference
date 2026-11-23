@@ -56,7 +56,8 @@ extension MFTokenizer {
         public var level: Double? {
             switch self {
             case .named(let name):
-                return Self.namedLevels[name.trimmingCharacters(in: .whitespaces)]
+                // The template's `trim` strips all whitespace, newlines too.
+                return Self.namedLevels[name.trimmingCharacters(in: .whitespacesAndNewlines)]
             case .level(let value):
                 return value
             }

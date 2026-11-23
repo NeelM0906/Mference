@@ -151,6 +151,11 @@ struct Inkling2ChatTests {
                 + tool + "get_weather" + txt + "sunny" + end)
     }
 
+    /// Known deviation, pinned on purpose: arguments arrive as `JSONValue`,
+    /// whose objects have no key order, and reach the template with sorted
+    /// keys. The template sorts the top level itself; transformers and
+    /// llama.cpp keep the order nested objects arrived in, so a nested
+    /// object written by the model in another order re-renders differently.
     @Test func nestedArgumentsAreCompactWithRawUnicode() throws {
         let out = try render([
             Message(role: .user, content: "Grüße"),
@@ -183,6 +188,46 @@ struct Inkling2ChatTests {
     @Test func userContinuationClosesTheCachedTurn() throws {
         let ids = tok.encodeTextContinuation(userContent: "Next?")
         #expect(ids == [200_006] + tok.encode(usr + txt + "Next?" + end, addBOS: false))
+    }
+
+    @Test func promptPlusGeneratedTurnPlusContinuationIsTheFullRender() throws {
+        // The cache holds the prompt and the generated turn without its EOS
+        // (sampled, never fed back); the continuation must make the whole
+        // equal to rendering the conversation from scratch.
+        let prompt = try tok.encodeInkling2Chat(messages: [Message(role: .user, content: "Q1")])
+        let generated = tok.encode(mdl + thk + "hmm" + end + mdl + txt + "A1" + end, addBOS: false)
+        let continued = prompt + generated + tok.encodeTextContinuation(userContent: "Q2")
+        let full = try tok.encodeInkling2Chat(messages: [
+            Message(role: .user, content: "Q1"),
+            Message(role: .assistant, content: "A1", reasoningContent: "hmm"),
+            Message(role: .user, content: "Q2"),
+        ])
+        #expect(continued == full)
+    }
+
+    @Test func effortNamesAreTrimmedLikeTheTemplateDoes() throws {
+        let out = try render([Message(role: .user, content: "x")], effort: .named(" high\n"))
+        #expect(out.hasPrefix(effortLine("0.9")))
+    }
+
+    @Test func aVocabularyWithMovedFramingIdsIsRefused() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inkling2-tokenizer-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: try Self.fixtureFolder(), to: folder)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("tokenizer.json")
+        var root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        root["added_tokens"] = (root["added_tokens"] as! [[String: Any]]).map { token in
+            var t = token
+            switch t["content"] as! String {
+            case "<|content_model_end_sampling|>": t["id"] = 200_007
+            case "<|unused_200007|>": t["id"] = 200_006
+            default: break
+            }
+            return t
+        }
+        try JSONSerialization.data(withJSONObject: root).write(to: url)
+        await #expect(throws: MFTokenizerError.self) { _ = try await MFTokenizer.loadUncached(from: folder) }
     }
 
     // MARK: Tokenization
@@ -224,6 +269,10 @@ struct Inkling2ChatTests {
         #expect(split("I'm 12345 ok!!\n\nnext") == ["I'm", " ", "123", "45", " ok", "!!\n\n", "next"])
         #expect(split("a   b") == ["a", "  ", " b"])
         #expect(split("CamelCase") == ["Camel", "Case"])
+        // The vendor's split, which llama.cpp's collapsed rewrite does not
+        // reproduce (it gives one word and `É`, `TAT`); see Inkling2TextEncoder.
+        #expect(split("getÜbersicht") == ["get", "Übersicht"])
+        #expect(split("ÉTAT") == ["ÉTAT"])
     }
 
     private static func copyFixture(addingToken token: String, id: Int) throws -> URL {

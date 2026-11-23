@@ -273,6 +273,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 let tokens = toolTokens ?? []
                 toolTokens = nil
                 inkling2Block = .between
+                inkling2Header = ""
                 let text = tokenizer.decode(tokens, skipSpecialTokens: false)
                 do {
                     let call = try Inkling2ToolCallParser().parse(
@@ -315,7 +316,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = []
             return []
         case t.endMessage:
+            // A header names only the block it opens.
             inkling2Block = .between
+            inkling2Header = ""
             return []
         case _ where tokenizer.stopTokenIDs.contains(tokenID):
             return []

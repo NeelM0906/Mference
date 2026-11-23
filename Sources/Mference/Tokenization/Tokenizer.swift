@@ -402,7 +402,7 @@ public struct MFTokenizer: @unchecked Sendable {
             }
             return Int32(value)
         }
-        return Inkling2SpecialTokens(
+        let tokens = Inkling2SpecialTokens(
             messageUser: try id(inkling2MessageUser),
             messageModel: try id(inkling2MessageModel),
             messageSystem: try id(inkling2MessageSystem),
@@ -415,12 +415,27 @@ public struct MFTokenizer: @unchecked Sendable {
             contentInvokeToolText: try id(inkling2InvokeToolText),
             endMessage: try id(inkling2EndMessage),
             endSampling: try id(inkling2EndSampling))
+        // The dialect is this vocabulary (b85c3cf): its added-token block
+        // starts at 199,998, the EOS is 200006. Another layout is refused
+        // rather than half-recognized.
+        guard tokens.messageUser == 200_000, tokens.endSampling == 200_006,
+              tokens.endMessage == 200_010, tokens.contentInvokeToolJSON == 200_049 else {
+            throw MFTokenizerError.unsupportedForDialect(
+                "Inkling 2 framing tokens at unexpected ids; only the Inkling 2 Mini vocabulary is supported")
+        }
+        return tokens
     }
 
     /// Every added token of the Inkling 2 block (ids 199,998 to 200,057), by
     /// text, for the encoder to match before splitting words.
     static func inkling2AddedTokens(_ tokenizer: any Tokenizer) -> [String: Int] {
         var result: [String: Int] = [:]
+        for name in [inkling2MessageUser, inkling2MessageModel, inkling2MessageSystem, inkling2MessageTool,
+                     inkling2ContentText, inkling2ContentThinking, inkling2ContentToolError,
+                     inkling2ContentXML, inkling2InvokeToolJSON, inkling2InvokeToolText,
+                     inkling2EndMessage, inkling2EndSampling] {
+            if let id = specialTokenID(tokenizer, name) { result[name] = id }
+        }
         for id in 199_998...200_057 {
             if let text = tokenizer.convertIdToToken(id), text.hasPrefix("<|"), text.hasSuffix("|>"),
                specialTokenID(tokenizer, text) == id {
