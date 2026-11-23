@@ -864,7 +864,8 @@ decltype(inkling2_attention_prefill<16, 16, 3>) inkling2_attention_prefill<16, 1
 // divided by sqrt(9). clip_t(v) = v * min(1, t / (|v| + eps)).
 //
 // The tails are read, not written: run `inkling2_conv_tail_update` on the
-// same `y` columns afterwards. Grid: (tokens, 16) threadgroups of 128
+// same `y` columns afterwards. With one row, `advanceTails` updates them in
+// place instead (each thread owns its channels), saving that dispatch. Grid: (tokens, 16) threadgroups of 128
 // threads; simdgroup (y*4 + s) handles vector 0..23 q heads, 24..47 relative
 // heads, 48..55 key heads, 56..63 value heads.
 // ----------------------------------------------------------------------------
@@ -884,6 +885,7 @@ struct Inkling2QKVParams {
     uint  relOutStride;   // floats between relative-state rows
     uint  kvStride;       // halves between cache slots
     uint  ringCapacity;   // 0 = linear storage
+    uint  advanceTails;   // 1 = also advance the key/value tails in place (one row only)
     float qkClip;
     float relClip;
     float clipEps;
@@ -903,8 +905,8 @@ void inkling2_qkv_epilogue(
     device const float* relScale   [[buffer(3)]],
     device const float* kConv      [[buffer(4)]],
     device const float* vConv      [[buffer(5)]],
-    device const float* kTail      [[buffer(6)]],
-    device const float* vTail      [[buffer(7)]],
+    device float*       kTail      [[buffer(6)]],
+    device float*       vTail      [[buffer(7)]],
     device half*        qOut       [[buffer(8)]],
     device float*       relOut     [[buffer(9)]],
     device half*        kCache     [[buffer(10)]],
@@ -939,7 +941,7 @@ void inkling2_qkv_epilogue(
     const uint h = isKey ? vec - 48u : vec - 56u;
     const uint column = isKey ? p.kColumn : p.vColumn;
     device const float* conv = isKey ? kConv : vConv;
-    device const float* tail = isKey ? kTail : vTail;
+    device float* tail = isKey ? kTail : vTail;
     float taps[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     if (p.dynamicConv != 0u) {
         const uint tapColumn = isKey ? p.kTapColumn : p.vTapColumn;
@@ -957,6 +959,12 @@ void inkling2_qkv_epilogue(
         float acc = w.x * x3 + w.y * x2 + w.z * x1 + w.w * x0;
         acc += taps[0] * x0 + taps[1] * x1 + taps[2] * x2 + taps[3] * x3;
         outv[i] = (acc + x0) / divisor;
+        if (p.advanceTails != 0u) {
+            // One row: this thread alone reads and writes channel c of the tail.
+            tail[c] = x2;
+            tail[1024u + c] = x1;
+            tail[2048u + c] = x0;
+        }
     }
     const uint slot = p.ringCapacity != 0u ? (p.startPosition + t) % p.ringCapacity : p.startPosition + t;
     device half4* dst = (device half4*)((isKey ? kCache : vCache) + ulong(slot) * p.kvStride + h * 128u) + lane;
@@ -1020,6 +1028,7 @@ kernel void inkling2_conv_tail_update(
 // Static short convolution of the attention and MoE outputs, FP32:
 //   out[t,c] = (sum_j w[c,j] x[t-3+j] + x[t,c]) / sqrt(5)  (+ residual[t,c])
 // with the carried tail as rows -3..-1. `out` may alias `residual`, never `x`.
+// With one row, `advanceTail` also advances the tail in place.
 // Grid: (channels / 4, tokens), one thread per four channels.
 // ----------------------------------------------------------------------------
 
@@ -1029,7 +1038,7 @@ struct Inkling2ConvParams {
     uint xStride;
     uint outStride;
     uint residualStride;  // 0 = no residual
-    uint reserved0;
+    uint advanceTail;     // 1 = also advance the tail in place (one row only)
     uint reserved1;
     uint reserved2;
 };
@@ -1038,7 +1047,7 @@ kernel void inkling2_sconv_f32(
     constant Inkling2ConvParams& p [[buffer(0)]],
     device const float* x          [[buffer(1)]],
     device const float* weight     [[buffer(2)]],
-    device const float* tail       [[buffer(3)]],
+    device float*       tail       [[buffer(3)]],
     device const float* residual   [[buffer(4)]],
     device float*       out        [[buffer(5)]],
     uint2 gid [[thread_position_in_grid]])
@@ -1061,6 +1070,12 @@ kernel void inkling2_sconv_f32(
         result += ((device const float4*)(residual + ulong(t) * p.residualStride))[c4];
     }
     ((device float4*)(out + ulong(t) * p.outStride))[c4] = result;
+    if (p.advanceTail != 0u) {
+        // One row: rows -2, -1 and x become the tail; this thread owns its four channels.
+        ((device float4*)(tail))[c4] = ctx[1];
+        ((device float4*)(tail + p.channels))[c4] = ctx[2];
+        ((device float4*)(tail + 2u * p.channels))[c4] = ctx[3];
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1446,6 +1461,96 @@ kernel void inkling2_gate_combine(
     const float f = tanh(clamp(fg[ulong(t) * p.fgStride + p.forgetColumn + i], -20.0f, 20.0f));
     const float g = tanh(clamp(fg[ulong(t) * p.fgStride + p.gainColumn + i], -20.0f, 20.0f));
     out[ulong(t) * p.outStride + i] = xv - f * xv + g * mv;
+}
+
+// ----------------------------------------------------------------------------
+// Message gate for one row (decode): up to four controllers in two dispatches.
+// All tensors live in one weight buffer and one activation buffer at the
+// offsets of `Inkling2GateDecodeParams`.
+//   down:    grid (controllers, 64 / 8); a threadgroup reduces rms(x), rms(m)
+//            of its controller, then each of its 8 simdgroups forms one z row:
+//            z = inv_x * (down[:, :2304] . x) + inv_m * (down[:, 2304:] . m)
+//   combine: grid (ceil(width / 256), controllers); a thread forms f = F z and
+//            g = G z for its element in FP32 and writes (1 - tanh f) x + tanh g m.
+// ----------------------------------------------------------------------------
+
+struct Inkling2GateController {
+    ulong down;       // bytes into `weights`: F32 [rank][2 * width]
+    ulong forget;     // bytes: F32 [width][rank]
+    ulong gain;       // bytes: F32 [width][rank]
+    uint  x;          // floats into `acts`
+    uint  m;          // floats into `acts`
+    uint  out;        // floats into `acts` (may equal x)
+    uint  reserved;
+};
+
+struct Inkling2GateDecodeParams {
+    uint  width;
+    uint  rank;
+    uint  controllers;
+    float eps;
+    Inkling2GateController c[4];
+};
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_gate_down_decode(
+    constant Inkling2GateDecodeParams& p [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const float* acts    [[buffer(2)]],
+    device float*       z       [[buffer(3)]],     // [controllers][rank]
+    uint2  tg    [[threadgroup_position_in_grid]],
+    ushort tid   [[thread_index_in_threadgroup]],
+    ushort lane  [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup float partial[8][2];
+    const Inkling2GateController c = p.c[tg.x];
+    device const float* x = acts + c.x;
+    device const float* m = acts + c.m;
+    float ax = 0.0f, am = 0.0f;
+    for (uint i = tid; i < p.width; i += 256u) { ax = fma(x[i], x[i], ax); am = fma(m[i], m[i], am); }
+    ax = simd_sum(ax);
+    am = simd_sum(am);
+    if (lane == 0) { partial[sgitg][0] = ax; partial[sgitg][1] = am; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tx = 0.0f, tm = 0.0f;
+    for (short s = 0; s < 8; ++s) { tx += partial[s][0]; tm += partial[s][1]; }
+    const float ix = rsqrt(tx / float(p.width) + p.eps), im = rsqrt(tm / float(p.width) + p.eps);
+    const uint row = tg.y * 8u + sgitg;
+    if (row >= p.rank) { return; }
+    device const float* w = (device const float*)(weights + c.down) + ulong(row) * 2u * p.width;
+    float dx = 0.0f, dm = 0.0f;
+    for (uint i = lane * 4u; i < p.width; i += 128u) {
+        dx += dot(*((device const float4*)(w + i)), *((device const float4*)(x + i)));
+        dm += dot(*((device const float4*)(w + p.width + i)), *((device const float4*)(m + i)));
+    }
+    dx = simd_sum(dx);
+    dm = simd_sum(dm);
+    if (lane == 0) { z[tg.x * p.rank + row] = ix * dx + im * dm; }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void inkling2_gate_combine_decode(
+    constant Inkling2GateDecodeParams& p [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device float*       acts    [[buffer(2)]],
+    device const float* z       [[buffer(3)]],
+    uint2  tg  [[threadgroup_position_in_grid]],
+    ushort tid [[thread_index_in_threadgroup]])
+{
+    threadgroup float4 zs[32];
+    const Inkling2GateController c = p.c[tg.y];
+    for (uint r = tid; r < p.rank / 4u; r += 256u) { zs[r] = ((device const float4*)(z + tg.y * p.rank))[r]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint i = tg.x * 256u + tid;
+    if (i >= p.width) { return; }
+    device const float4* fr = (device const float4*)((device const float*)(weights + c.forget) + ulong(i) * p.rank);
+    device const float4* gr = (device const float4*)((device const float*)(weights + c.gain) + ulong(i) * p.rank);
+    float f = 0.0f, g = 0.0f;
+    for (uint r = 0; r < p.rank / 4u; ++r) { f += dot(fr[r], zs[r]); g += dot(gr[r], zs[r]); }
+    const float xv = acts[c.x + i], mv = acts[c.m + i];
+    const float tf = tanh(clamp(f, -20.0f, 20.0f)), tgv = tanh(clamp(g, -20.0f, 20.0f));
+    acts[c.out + i] = xv - tf * xv + tgv * mv;
 }
 
 // ============================================================================

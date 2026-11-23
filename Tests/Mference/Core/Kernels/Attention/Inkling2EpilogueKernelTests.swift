@@ -102,6 +102,76 @@ import MferenceValidationSupport
         #expect(tailsGot == kConvRef.history + vConvRef.history)
     }
 
+    /// One row (decode): the epilogue advances the key and value tails itself.
+    @Test(arguments: [false, true])
+    func qkvEpilogueAdvancesTailsInPlaceForOneRow(dynamic: Bool) throws {
+        let ctx = try MetalContext()
+        let epilogue = try Inkling2QKVEpilogue(library: Inkling2KernelLibrary(context: ctx))
+        var rng = SeedTree(0x3c80 + (dynamic ? 1 : 0)).key("ink2-qkv-decode")
+        let (cols, stride) = Self.columns(dynamic: dynamic)
+        let y = S.random(stride, &rng, -8, 8)
+        let qScale = S.random(24 * 128, &rng, 0.5, 4)
+        let relScale = S.random(24 * 16, &rng, 0.5, 6)
+        let kConv = S.random(1024 * 4, &rng, -0.6, 0.6)
+        let vConv = S.random(1024 * 4, &rng, -0.6, 0.6)
+        let kTail = S.random(3 * 1024, &rng, -3, 3)
+        let vTail = S.random(3 * 1024, &rng, -3, 3)
+        let tailBuffer = S.buffer(ctx.device, floats: kTail + vTail)
+        let kCache = ctx.device.makeBuffer(length: 8 * 1024 * 2, options: .storageModeShared)!
+        let vCache = ctx.device.makeBuffer(length: 8 * 1024 * 2, options: .storageModeShared)!
+        let qOut = ctx.device.makeBuffer(length: 3072 * 2, options: .storageModeShared)!
+        let relOut = ctx.device.makeBuffer(length: 384 * 4, options: .storageModeShared)!
+        S.run(ctx) { cb in
+            epilogue.encode(commandBuffer: cb, .init(
+                projections: .init(S.buffer(ctx.device, floats: y)), projectionStride: stride, columns: cols,
+                queryScale: .init(S.buffer(ctx.device, floats: qScale)),
+                relativeScale: .init(S.buffer(ctx.device, floats: relScale)),
+                keyConv: .init(S.buffer(ctx.device, floats: kConv)), valueConv: .init(S.buffer(ctx.device, floats: vConv)),
+                keyTail: .init(tailBuffer), valueTail: .init(tailBuffer, offset: 3 * 1024 * 4),
+                queries: .init(qOut), relative: .init(relOut),
+                cache: Inkling2KVView(keys: .init(kCache), values: .init(vCache), ringCapacity: 8),
+                rows: 1, startPosition: 13, advanceTails: true))
+        }
+        let kIn = Array(y[cols.keys..<(cols.keys + 1024)]), vIn = Array(y[cols.values..<(cols.values + 1024)])
+        let kRef: Inkling2ShortConvRef.Result, vRef: Inkling2ShortConvRef.Result
+        if dynamic {
+            kRef = Inkling2ShortConvRef.dynamicConv(kIn, weight: kConv, dynamic: Array(y[cols.keyTaps!..<(cols.keyTaps! + 32)]),
+                                                    heads: 8, history: kTail, rows: 1, channels: 1024)
+            vRef = Inkling2ShortConvRef.dynamicConv(vIn, weight: vConv, dynamic: Array(y[cols.valueTaps!..<(cols.valueTaps! + 32)]),
+                                                    heads: 8, history: vTail, rows: 1, channels: 1024)
+        } else {
+            kRef = Inkling2ShortConvRef.staticConv(kIn, weight: kConv, history: kTail, rows: 1, channels: 1024)
+            vRef = Inkling2ShortConvRef.staticConv(vIn, weight: vConv, history: vTail, rows: 1, channels: 1024)
+        }
+        let kExpected = Inkling2NormRef.l2Clip(kRef.output, rows: 1, heads: 8, width: 128, scale: nil,
+                                               threshold: Inkling2RefShape.qkClip)
+        let vExpected = Inkling2NormRef.unweightedRMS(vRef.output, rows: 1, heads: 8, width: 128)
+        #expect(RelError.compute(actual: S.readHalves(kCache, count: 1024, offset: 5 * 2048), reference: kExpected) < 2e-3)
+        #expect(RelError.compute(actual: S.readHalves(vCache, count: 1024, offset: 5 * 2048), reference: vExpected) < 2e-3)
+        #expect(S.readFloats(tailBuffer, count: 6 * 1024) == kRef.history + vRef.history)
+    }
+
+    /// One row (decode): the post convolution advances its tail itself.
+    @Test func postConvolutionAdvancesTailInPlaceForOneRow() throws {
+        let ctx = try MetalContext()
+        let conv = try Inkling2ShortConv(library: Inkling2KernelLibrary(context: ctx))
+        var rng = SeedTree(0x3d80).key("ink2-sconv-decode")
+        let channels = 2304
+        let x = S.random(channels, &rng, -5, 5)
+        let weight = S.random(channels * 4, &rng, -0.7, 0.7)
+        let tail = S.random(3 * channels, &rng, -5, 5)
+        let tailBuffer = S.buffer(ctx.device, floats: tail)
+        let out = ctx.device.makeBuffer(length: channels * 4, options: .storageModeShared)!
+        S.run(ctx) { cb in
+            conv.encode(commandBuffer: cb, x: .init(S.buffer(ctx.device, floats: x)), xStride: channels,
+                        weight: .init(S.buffer(ctx.device, floats: weight)), tail: .init(tailBuffer),
+                        residual: nil, output: .init(out), outputStride: channels, rows: 1, advanceTail: true)
+        }
+        let reference = Inkling2ShortConvRef.staticConv(x, weight: weight, history: tail, rows: 1, channels: channels)
+        #expect(RelError.compute(actual: S.readFloats(out, count: channels), reference: reference.output) < 1e-5)
+        #expect(S.readFloats(tailBuffer, count: 3 * channels) == reference.history)
+    }
+
     @Test(arguments: [1, 2, 7])
     func postConvolutionWithResidualMatchesReference(rows: Int) throws {
         let ctx = try MetalContext()

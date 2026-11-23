@@ -333,4 +333,60 @@ import Testing
                      rows, tInputs.best * 1e3, tDown.best * 1e3, tGates.best * 1e3, tCombine.best * 1e3,
                      total * 1e6 / Double(rows)))
     }
+
+    /// One row, three controllers, 48 visits chained: the decode gate (2 dispatches)
+    /// against the many-row path (inputs x3, down, forget+gain x3, combine x3).
+    @Test(.enabled(if: enabled && only("decode-gate"))) func decodeGate() throws {
+        let ctx = try MetalContext()
+        let library = try Inkling2KernelLibrary(context: ctx)
+        let gate = try Inkling2MessageGateKernels(library: library)
+        let projection = try Inkling2Projection(library: library)
+        let width = 2304, rank = 64
+        let perController = rank * 2 * width + 2 * width * rank
+        let weights = Self.floatBuffer(ctx.device, 3 * perController, salt: 3, scale: 0.02)
+        let acts = Self.floatBuffer(ctx.device, 16 * width, salt: 4)
+        let z = ctx.device.makeBuffer(length: 4 * rank * 4, options: .storageModeShared)!
+        let controllers = (0..<3).map { c in
+            Inkling2MessageGateKernels.DecodeController(
+                down: c * perController * 4, forget: (c * perController + rank * 2 * width) * 4,
+                gain: (c * perController + rank * 2 * width + width * rank) * 4,
+                x: 0, message: (1 + c) * width, output: (4 + c) * width)
+        }
+        let fused = Self.time(ctx) { cb in
+            for _ in 0..<48 {
+                gate.encodeDecode(commandBuffer: cb, weights: weights, activations: acts, z: .init(z), controllers: controllers)
+            }
+        }
+        let h = ctx.device.makeBuffer(length: 3 * 2 * width * 4, options: .storageModeShared)!
+        let zz = ctx.device.makeBuffer(length: 3 * rank * 4, options: .storageModeShared)!
+        let fg = ctx.device.makeBuffer(length: 2 * width * 4, options: .storageModeShared)!
+        let rowsPath = Self.time(ctx) { cb in
+            for _ in 0..<48 {
+                for c in 0..<3 {
+                    gate.encodeInputs(commandBuffer: cb, x: .init(acts), xStride: width,
+                                      message: .init(acts, offset: (1 + c) * width * 4), messageStride: width,
+                                      output: .init(h, offset: c * 2 * width * 4), outputStride: 2 * width, rows: 1)
+                }
+                projection.encodeFloat(commandBuffer: cb, weights: weights, input: h, output: zz, tokens: 1,
+                                       inputs: 2 * width, outStride: 3 * rank, segments: (0..<3).map { c in
+                                           .init(weightOffset: controllers[c].down, inputOffset: c * 2 * width,
+                                                 inputStride: 2 * width, rows: rank, outColumn: c * rank, format: .f32)
+                                       })
+                for c in 0..<3 {
+                    projection.encodeFloat(commandBuffer: cb, weights: weights, input: zz, output: fg, tokens: 1,
+                                           inputs: rank, outStride: 2 * width,
+                                           segments: [.init(weightOffset: controllers[c].forget, inputOffset: c * rank,
+                                                            inputStride: 3 * rank, rows: width, outColumn: 0, format: .f32),
+                                                      .init(weightOffset: controllers[c].gain, inputOffset: c * rank,
+                                                            inputStride: 3 * rank, rows: width, outColumn: width, format: .f32)])
+                    gate.encodeCombine(commandBuffer: cb, x: .init(acts), xStride: width,
+                                       message: .init(acts, offset: (1 + c) * width * 4), messageStride: width,
+                                       gates: .init(fg), gatesStride: 2 * width, forgetColumn: 0, gainColumn: width,
+                                       output: .init(acts, offset: (4 + c) * width * 4), outputStride: width, rows: 1)
+                }
+            }
+        }
+        print(String(format: "[ink2-kbench] decode-gate x3 one row: decode form %.1f us, many-row path %.1f us (per visit)",
+                     fused.best / 48 * 1e6, rowsPath.best / 48 * 1e6))
+    }
 }
