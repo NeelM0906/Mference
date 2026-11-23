@@ -75,6 +75,16 @@ states after each visit (`l_out-<slot>`, `[48 x n_prompt x 2304]`) are with
 the program's results (`goldens/generate*/cpu/<trace>/hidden_after_visit.f32`),
 as is a third trace of the 300-token tool prompt (2.5 MB of JSON).
 
+`trace01b/`: trace01's prompt ids plus its greedy token 152717 (" Paris") as
+one 6-token ids prompt (`inputs/generate_prompts_4.json`, stage `cpu4`), with
+`logprobs.json` at all 6 positions; its hidden states, `[48 x 6 x 2304]`, are
+at `goldens/generate4/cpu/trace01b/hidden_after_visit.f32`. Positions 0-4
+equal trace01 bit for bit (records and expert sets); position 5 is the
+position a runner reaches with one decode step, here computed inside the
+6-token batch (its "." log-prob is -0.285 here, -0.291 as a decode step in
+`goldens/generate/cpu/g01-capital`: the CPU backend's own batch-versus-decode
+difference).
+
 ## Using the CPU-only trace (G6a)
 
 Feed the runner `cpu/<trace>/golden.json` `prompt_ids` (no BOS) as one
@@ -112,3 +122,13 @@ definitions are in the program's goldens README ("Trace records").
 with context and on structured text (tool JSON); the G6 tolerances are set
 per prompt from these numbers. `table-logprobs.md` and `table-traces.md` are
 those numbers as tables (`noise_table.py`); p95 is nearest-rank.
+
+Teacher-forced (`make_tf_prompts.py`: each log-prob golden's prompt plus all
+but the last generated id as one ids prompt, run CPU-only and on Metal, so
+every recorded position is compared on the same context):
+`tf-set{1,2}-metal-vs-tfcpu.json` (the Metal goldens vs CPU-only, every
+position), `tf-set{1,2}-metal-vs-tfmetal.json` (the Metal goldens vs Metal
+on the same context in one batch: llama.cpp's batch-versus-decode
+difference) and `tf-metal-vs-tfcpu.json` (both batched: the backend split
+alone); tables `table-tf-*.md`. Run paths in the JSON are relative to the
+program's goldens directory.
