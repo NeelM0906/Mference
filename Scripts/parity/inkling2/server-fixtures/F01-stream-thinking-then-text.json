@@ -1,0 +1,69 @@
+{
+ "id": "F01-stream-thinking-then-text",
+ "checklist_items": [
+  2,
+  6,
+  8
+ ],
+ "status_on_trunk_6a646319": "PARTIAL: each part is pinned separately (Inkling2DecoderTests.thinkingThenAnswer; HTTPServerTests streaming; ServerEngineLibraryTests.engineModelAdapterMapsEventsUsageAndErrors) but no test sends an Inkling-dialect generation through the HTTP layer",
+ "request": {
+  "model": "inkling-2-mini-ud-q4_k_xl",
+  "stream": true,
+  "stream_options": {
+   "include_usage": true
+  },
+  "max_completion_tokens": 512,
+  "seed": 1,
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ]
+ },
+ "model_generates": "<|message_model|><|content_thinking|>The user asks for a capital.<|end_message|><|message_model|><|content_text|>Paris.<|end_message|><|content_model_end_sampling|>",
+ "expect": {
+  "http_status": 200,
+  "backend_prompt": "tokenizer.encodeInkling2Chat(messages: [user], tools: [], effort: nil): no reasoning_effort in the request, so the template's own default level 0.9 is rendered",
+  "stream": [
+   {
+    "delta": {
+     "role": "assistant"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {
+     "reasoning_content": "<the thinking text, possibly split across several chunks; concatenated: 'The user asks for a capital.'>"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {
+     "content": "<concatenated: 'Paris.'>"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {},
+    "finish_reason": "stop"
+   },
+   {
+    "choices": [],
+    "usage": {
+     "prompt_tokens": "== number of backend_prompt ids",
+     "completion_tokens": "== number of generated ids",
+     "completion_tokens_details": {
+      "reasoning_tokens": "== number of ids between <|content_thinking|> and its <|end_message|> (payload only)"
+     }
+    }
+   },
+   "data: [DONE]"
+  ],
+  "never": [
+   "framing tokens (<|message_model|>, <|content_*|>, <|end_message|>, EOS) in content or reasoning_content",
+   "an error frame"
+  ],
+  "chunk_shape": "every SSE chunk is {id, object: chat.completion.chunk, created, model: 'inkling-2-mini-ud-q4_k_xl', choices: [{index: 0, delta, finish_reason}]}"
+ }
+}

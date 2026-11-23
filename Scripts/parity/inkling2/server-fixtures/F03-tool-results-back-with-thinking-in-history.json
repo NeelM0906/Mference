@@ -1,0 +1,104 @@
+{
+ "id": "F03-tool-results-back-with-thinking-in-history",
+ "checklist_items": [
+  4,
+  6
+ ],
+ "status_on_trunk_6a646319": "PARTIAL: Inkling2ChatTests.toolsCallsAndResults and assistantTurnsKeepTheirThinking pin the template render; no server test decodes this OpenAI-shaped history (arguments as a JSON string, tool message with only tool_call_id, content \"\") into the Inkling render",
+ "request": {
+  "model": "inkling-2-mini-ud-q4_k_xl",
+  "stream": true,
+  "stream_options": {
+   "include_usage": true
+  },
+  "max_completion_tokens": 512,
+  "seed": 1,
+  "messages": [
+   {
+    "role": "user",
+    "content": "Weather in Paris?"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "Need the weather.",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "arguments": "{\"city\":\"Paris\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "{\"temp_c\": 18, \"sky\": \"cloudy\"}"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ "model_generates": "<|message_model|><|content_text|>It is 18 C and cloudy in Paris.<|end_message|><|content_model_end_sampling|>",
+ "expect": {
+  "http_status": 200,
+  "backend_prompt": "tokenizer.encodeInkling2Chat with the three messages decoded as: user; assistant(content '', reasoningContent 'Need the weather.', toolCalls [call_1 get_weather {city: Paris}]); tool(toolCallID 'call_1', name nil)",
+  "rendered_prompt_contains_in_order": [
+   "<|message_model|><|content_thinking|>Need the weather.<|end_message|>",
+   "<|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}<|end_message|><|content_model_end_sampling|>",
+   "<|message_tool|>get_weather<|content_text|>{\"temp_c\": 18, \"sky\": \"cloudy\"}<|end_message|>"
+  ],
+  "rendered_prompt_must_not_contain": [
+   "<|message_model|><|content_text|><|end_message|> (an empty text block from content \"\")"
+  ],
+  "notes": [
+   "the tool name in <|message_tool|>get_weather comes from the template's lookup of tool_call_id 'call_1' in the earlier assistant tool_calls",
+   "arguments arrive as a JSON string and must reach the template as a parsed object (the template raises on a string)"
+  ],
+  "stream": [
+   {
+    "delta": {
+     "role": "assistant"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {
+     "content": "<concatenated: 'It is 18 C and cloudy in Paris.'>"
+    },
+    "finish_reason": null
+   },
+   {
+    "delta": {},
+    "finish_reason": "stop"
+   },
+   {
+    "choices": [],
+    "usage": "<as F01; reasoning_tokens 0 or absent>"
+   },
+   "data: [DONE]"
+  ],
+  "chunk_shape": "every SSE chunk is {id, object: chat.completion.chunk, created, model: 'inkling-2-mini-ud-q4_k_xl', choices: [{index: 0, delta, finish_reason}]}"
+ }
+}
