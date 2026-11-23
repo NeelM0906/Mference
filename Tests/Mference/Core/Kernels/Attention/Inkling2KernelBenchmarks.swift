@@ -481,4 +481,62 @@ import Testing
                          + "one serial encoder %.2f us", chain, tinyBest[0], tinyBest[1]))
         }
     }
+
+    /// Where a decode visit's attention-side time goes, against the bytes each part reads.
+    /// - The visit is one token at the 1,024-key window (layer kind window) or at position 4,095
+    ///   (global).
+    /// - 12 weight sets are cycled through 48 chained visits (one token), so the 48 MB SLC cannot
+    ///   serve repeats.
+    /// - Every case is interleaved over 10 rounds and reports its minimum.
+    @Test(.enabled(if: enabled && only("bandwidth"))) func decodeVisitBandwidth() throws {
+        typealias K = Inkling2VisitFixture.StepKind
+        let sets = 12, visits = 48
+        for (global, position) in [(false, 1023), (true, 4095)] {
+            let f = try Inkling2VisitFixture(global: global, window: 1024, maxContext: 4112, weightSets: sets)
+            let run = try f.makeRun()
+            try f.fastForward(run, to: position)
+            try run.state.ensureCapacity(tokens: position + 1)
+            let keys = global ? position + 1 : 1024
+            let kvBytes = keys * 2048 * 2
+            let weights = f.stackedBytes + f.outputBytes
+            let cases: [(name: String, gates: Bool, only: Set<K>?, bytes: Int)] = [
+                ("first-pass visit", false, nil, weights + kvBytes),
+                ("loop-pass visit (q/k/v gates)", true, nil, weights + f.gateBytes + kvBytes),
+                ("  stacked projection", false, [.projection], f.stackedBytes),
+                ("  output projection", false, [.output], f.outputBytes),
+                ("  q/k/v gates, decode form", true, [.gate], f.gateBytes),
+                ("  decode attention", false, [.attention], kvBytes),
+                ("  mix, norms, epilogue, post conv", false, [.mix, .norm, .epilogue, .conv], 0),
+                ("    depth mix", false, [.mix], 0),
+                ("    input norms (3)", false, [.norm], 0),
+                ("    epilogue", false, [.epilogue], 0),
+                ("    post conv", false, [.conv], 0),
+            ]
+            let chains = cases.map { c in
+                (0..<sets).map { set in
+                    f.steps(run, row0: 0, rows: 1, set: set, position: position, gates: c.gates, only: c.only)
+                }
+            }
+            var best = [Double](repeating: .infinity, count: cases.count)
+            for round in 0...10 {
+                for (i, chain) in chains.enumerated() {
+                    let cb = f.ctx.queue.makeCommandBuffer()!
+                    let encoder = cb.makeComputeCommandEncoder()!
+                    for v in 0..<visits { for step in chain[v % sets] { try step(encoder) } }
+                    encoder.endEncoding()
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    #expect(cb.status == .completed)
+                    if round > 0 { best[i] = min(best[i], cb.gpuEndTime - cb.gpuStartTime) }
+                }
+            }
+            for (c, seconds) in zip(cases, best) {
+                let us = seconds / Double(visits) * 1e6
+                let rate = c.bytes > 0 ? String(format: ", %.1f MB, %.0f GB/s", Double(c.bytes) / 1e6,
+                                                Double(c.bytes) / (seconds / Double(visits)) / 1e9) : ""
+                print(String(format: "[ink2-kbench] bandwidth %@ %ld keys: %@: %.1f us per visit%@",
+                             global ? "global" : "window", keys, c.name, us, rate))
+            }
+        }
+    }
 }
