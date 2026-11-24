@@ -34,6 +34,10 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     /// The engine's message when the last load of this installed model
     /// failed; cleared by the next successful load.
     public var loadFailure: String?
+    /// Quick's and Deep's optional image understanding (the vision
+    /// projector): nil for the other models, and while the model itself is
+    /// not offered on this Mac.
+    public var imageUnderstanding: ImageUnderstandingRow?
 
     public var id: String { model.modelID }
 
@@ -78,6 +82,25 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     }
 }
 
+/// The "Image understanding" line under Quick and Deep: an optional add-on
+/// that lets the model see pictures. Until it is installed, pictures reach
+/// the model as the text read from them.
+public struct ImageUnderstandingRow: Sendable, Hashable {
+    /// `.installed`, `.downloadable`, a download's progress, or `.failed`.
+    public var state: ModelLibraryRow.State
+    /// On disk when installed, the download's size otherwise.
+    public var sizeBytes: UInt64
+
+    public init(state: ModelLibraryRow.State, sizeBytes: UInt64) {
+        self.state = state
+        self.sizeBytes = sizeBytes
+    }
+
+    public static let title = "Image understanding"
+
+    public var isInstalled: Bool { state == .installed }
+}
+
 /// The model library: installed or missing from the engine's catalog, sizes,
 /// memory fit, and downloads (spec 4.3, A3). Downloads need the person's
 /// approval; this model never starts one on its own.
@@ -91,15 +114,19 @@ public final class ModelLibrary {
 
     @ObservationIgnored private let engine: any EngineServicing
     @ObservationIgnored private let downloads: DownloadManager?
+    @ObservationIgnored private let imageDownloads: DownloadManager?
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private var options: [ModelOption] = []
     @ObservationIgnored private var engineStatus = EngineServiceStatus.empty
     @ObservationIgnored private var downloadStates: [AppModel: DownloadState] = [:]
+    @ObservationIgnored private var imageDownloadStates: [AppModel: DownloadState] = [:]
 
-    public init(engine: any EngineServicing, downloads: DownloadManager?, settings: AppSettings,
+    public init(engine: any EngineServicing, downloads: DownloadManager?, imageDownloads: DownloadManager? = nil,
+                settings: AppSettings,
                 memoryFit: MemoryFit = MemoryFit(), chipName: String? = MemoryFit.chipName) {
         self.engine = engine
         self.downloads = downloads
+        self.imageDownloads = imageDownloads
         self.settings = settings
         self.memoryFit = memoryFit
         self.chipName = chipName
@@ -118,10 +145,25 @@ public final class ModelLibrary {
         await refresh()
         let engine = self.engine
         let downloads = self.downloads
-        // Two followers; both stop when the caller's task is cancelled.
+        let imageDownloads = self.imageDownloads
+        // Three followers; all stop when the caller's task is cancelled.
         async let engineDone: Void = followEngine(engine.statusUpdates())
         async let downloadsDone: Void = followDownloads(await downloads?.updates())
-        _ = await (engineDone, downloadsDone)
+        async let imagesDone: Void = followImageDownloads(await imageDownloads?.updates())
+        _ = await (engineDone, downloadsDone, imagesDone)
+    }
+
+    private func followImageDownloads(_ updates: AsyncStream<[AppModel: DownloadState]>?) async {
+        guard let updates else { return }
+        for await states in updates {
+            let changedInstall = states.contains { model, state in
+                let installed: Bool = if case .installed = state { true } else { false }
+                return installed != (row(for: model)?.imageUnderstanding?.isInstalled ?? false)
+            }
+            imageDownloadStates = states
+            // Installed or removed: the engine's catalog pairs it now.
+            if changedInstall { await refreshOptions() } else { rebuild() }
+        }
     }
 
     private func followEngine(_ updates: AsyncStream<EngineServiceStatus>) async {
@@ -145,6 +187,11 @@ public final class ModelLibrary {
         if let downloads {
             for model in AppModel.engineModels where downloads.source(for: model) != nil {
                 downloadStates[model] = await downloads.state(of: model)
+            }
+        }
+        if let imageDownloads {
+            for model in AppModel.engineModels where imageDownloads.source(for: model) != nil {
+                imageDownloadStates[model] = await imageDownloads.state(of: model)
             }
         }
         await refreshOptions()
@@ -174,17 +221,36 @@ public final class ModelLibrary {
             } else {
                 state = .notInstalled(reason: "Not installed on this Mac.")
             }
+            let imageRow = imageUnderstandingRow(model, option: option)
+            // The projector stays resident beside the model once it is used.
+            let fitSize = size + ((imageRow?.isInstalled ?? false) ? (imageRow?.sizeBytes ?? 0) : 0)
             var row = ModelLibraryRow(model: model, state: state, sizeBytes: size,
                                    isDefault: settings.defaultModel == model,
-                                   fit: memoryFit.verdict(for: model, sizeBytes: size),
+                                   fit: memoryFit.verdict(for: model, sizeBytes: fitSize),
                                    licence: source?.licence,
                                    availability: isInstalled ? option?.availability : nil,
                                    location: isInstalled ? option?.location : nil)
             if isInstalled, engineStatus.lastLoadFailureModel == model, option?.availability == .ready {
                 row.loadFailure = engineStatus.lastLoadFailure
             }
+            row.imageUnderstanding = imageRow
             return row
         }
+    }
+
+    /// Installed when the engine paired a projector with the model (or the
+    /// download just finished); otherwise the add-on's download state.
+    private func imageUnderstandingRow(_ model: AppModel, option: ModelOption?) -> ImageUnderstandingRow? {
+        guard model.supportsImageUnderstanding, memoryFit.isOffered(model),
+              let source = imageDownloads?.source(for: model) else { return nil }
+        if option?.seesImages == true {
+            return ImageUnderstandingRow(state: .installed, sizeBytes: option?.imageUnderstandingBytes ?? source.sizeBytes)
+        }
+        let download = imageDownloadStates[model] ?? .notStarted
+        if case .installed = download {
+            return ImageUnderstandingRow(state: .installed, sizeBytes: source.sizeBytes)
+        }
+        return ImageUnderstandingRow(state: Self.state(download), sizeBytes: source.sizeBytes)
     }
 
     static func state(_ download: DownloadState) -> ModelLibraryRow.State {
@@ -243,6 +309,34 @@ public final class ModelLibrary {
             try? await engine.load(model)
             await refreshOptions()
         }
+    }
+
+    // MARK: Image understanding
+
+    /// The approval dialog's facts for `model`'s image understanding: nil
+    /// when it has none on this Mac.
+    public func imageUnderstandingSource(for model: AppModel) -> DownloadSource? {
+        guard model.supportsImageUnderstanding, memoryFit.isOffered(model) else { return nil }
+        return imageDownloads?.source(for: model)
+    }
+
+    /// Starts or continues an approved image-understanding download.
+    public func startImageUnderstandingDownload(_ approval: DownloadApproval) {
+        guard let imageDownloads else { return }
+        Task { try? await imageDownloads.download(approval) }
+    }
+
+    public func pauseImageUnderstanding(_ model: AppModel) {
+        guard let imageDownloads else { return }
+        Task { await imageDownloads.pause(model) }
+    }
+
+    /// Removes the add-on (or its partial download). Pictures then reach the
+    /// model as text again. A model already loaded keeps seeing until it is
+    /// unloaded.
+    public func removeImageUnderstanding(_ model: AppModel) {
+        guard let imageDownloads else { return }
+        Task { try? await imageDownloads.remove(model) }
     }
 
     public func pauseDownload(_ model: AppModel) {

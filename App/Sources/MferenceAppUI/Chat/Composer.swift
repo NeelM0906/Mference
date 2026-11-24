@@ -65,6 +65,15 @@ struct Composer: View {
         } message: {
             Text("The model still runs on this Mac. When it searches, its queries, which can include words from your chat, go to search engines through SearXNG on this Mac, and the pages it reads are fetched from this Mac. You can turn this off in Settings > Privacy.")
         }
+        .confirmationDialog(model.imageUnderstandingOffer?.title ?? "", isPresented: Binding(
+            get: { model.imageUnderstandingOffer != nil },
+            set: { if !$0 { model.declineImageUnderstandingOffer() } }),
+            presenting: model.imageUnderstandingOffer) { _ in
+            Button("Download") { model.acceptImageUnderstandingOffer() }
+            Button("Not now", role: .cancel) { model.declineImageUnderstandingOffer() }
+        } message: { offer in
+            Text(offer.message)
+        }
         .onKeyPress(.escape) {
             guard pickerOpen else { return .ignored }
             pickerOpen = false
@@ -86,7 +95,7 @@ struct Composer: View {
                 Label("Add images…", systemImage: "photo")
             }
             Section {
-                Text("PDFs, documents and text are read on this Mac. Images are read for the text in them.")
+                Text("PDFs, documents and text are read on this Mac. \(model.imageCaption).")
             }
         } label: {
             Image(systemName: "plus")

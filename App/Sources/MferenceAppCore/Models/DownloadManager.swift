@@ -234,20 +234,39 @@ public actor DownloadManager {
         setState(state(of: model), for: model)
     }
 
+    /// Deletes an installed file (an image-understanding add-on the person
+    /// removed), then tells `onInstalled` so the engine's catalog drops it.
+    /// A running download of it is discarded first.
+    public func remove(_ model: AppModel) async throws {
+        await discard(model)
+        guard let source = sources[model] else { throw DownloadError.noSource(model) }
+        let file = finalURL(source)
+        if FileManager.default.fileExists(atPath: file.path) {
+            do {
+                try FileManager.default.removeItem(at: file)
+            } catch {
+                throw DownloadError.file(error.localizedDescription)
+            }
+        }
+        states[model] = nil
+        await onInstalled(model)
+        setState(state(of: model), for: model)
+    }
+
     // MARK: Download
 
     private func finalURL(_ source: DownloadSource) -> URL {
-        destination.appending(path: source.fileName)
+        destination.appending(path: source.localFileName)
     }
 
     private func partURL(_ source: DownloadSource) -> URL {
-        destination.appending(path: source.fileName + ".part")
+        destination.appending(path: source.localFileName + ".part")
     }
 
     /// Names the source the partial file belongs to (its SHA-256), so bytes
     /// of another revision are never resumed.
     private func partSourceURL(_ source: DownloadSource) -> URL {
-        destination.appending(path: source.fileName + ".part.sha256")
+        destination.appending(path: source.localFileName + ".part.sha256")
     }
 
     private func partBelongs(to source: DownloadSource) -> Bool {

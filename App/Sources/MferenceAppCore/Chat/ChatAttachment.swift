@@ -1,5 +1,7 @@
 import Foundation
+import ImageIO
 import PDFKit
+import UniformTypeIdentifiers
 
 /// A file attached to a chat message, kept as the text read from it on this
 /// Mac. The file itself is not copied: the chat keeps its name, size and
@@ -24,9 +26,14 @@ public struct ChatAttachment: Sendable, Hashable, Codable, Identifiable {
     public var truncated: Bool
     /// Pages in a PDF, nil for other files.
     public var pageCount: Int?
+    /// A picture's pixels, scaled down to `ChatAttachmentReader.imageSide`
+    /// and saved as JPEG, so a model that sees images (Quick or Deep with
+    /// image understanding) gets them in this turn and every later one. Nil
+    /// for documents, and for pictures attached before Mference kept them.
+    public var imageData: Data?
 
     public init(id: UUID = UUID(), filename: String, kind: Kind, byteCount: Int64, text: String,
-                truncated: Bool = false, pageCount: Int? = nil) {
+                truncated: Bool = false, pageCount: Int? = nil, imageData: Data? = nil) {
         self.id = id
         self.filename = filename
         self.kind = kind
@@ -34,6 +41,7 @@ public struct ChatAttachment: Sendable, Hashable, Codable, Identifiable {
         self.text = text
         self.truncated = truncated
         self.pageCount = pageCount
+        self.imageData = imageData
     }
 
     /// A picture in which no text was found: the model learns only its name.
@@ -82,12 +90,16 @@ extension ChatAttachment {
     /// `<attachment>` block, then what the person typed. The stored message
     /// keeps only what was typed, so the bubble, the title and memory never
     /// see the files' text.
-    public static func modelContent(message: String, attachments: [ChatAttachment], budget: Int) -> String {
+    ///
+    /// When the model sees images (`seesImages`), pictures also go to it as
+    /// pixels (`images(of:)`), and their blocks say so.
+    public static func modelContent(message: String, attachments: [ChatAttachment], budget: Int,
+                                    seesImages: Bool = false) -> String {
         guard !attachments.isEmpty else { return message }
         let shares = shares(for: attachments, budget: budget)
         var blocks: [String] = []
         for (attachment, share) in zip(attachments, shares) {
-            blocks.append(attachment.block(characters: share))
+            blocks.append(attachment.block(characters: share, seesImages: seesImages))
         }
         let typed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = typed.isEmpty ? defaultRequest(for: attachments) : typed
@@ -99,18 +111,30 @@ extension ChatAttachment {
         attachments.count == 1 ? "Summarize the attached file." : "Summarize the attached files."
     }
 
-    func block(characters: Int) -> String {
+    /// The pictures of `attachments` a model that sees images gets, in order.
+    public static func images(of attachments: [ChatAttachment]) -> [ChatImage] {
+        attachments.filter { $0.kind == .image }.compactMap(\.imageData).map(ChatImage.init(data:))
+    }
+
+    /// Whether this picture reaches a model that sees images.
+    var isShown: Bool { kind == .image && imageData != nil }
+
+    func block(characters: Int, seesImages: Bool = false) -> String {
         let name = filename.replacingOccurrences(of: "\"", with: "'")
         var attributes = "name=\"\(name)\""
         if let pageCount { attributes += " pages=\"\(pageCount)\"" }
+        let shown = seesImages && isShown
         guard hasText else {
-            return "<attachment \(attributes)>\n(An image. No text was found in it, and this model cannot see images.)\n</attachment>"
+            let note = shown ? "(An image, shown to you. No text was found in it.)"
+                             : "(An image. No text was found in it, and this model cannot see images.)"
+            return "<attachment \(attributes)>\n\(note)\n</attachment>"
         }
         let safe = text.replacingOccurrences(of: "</attachment>", with: "</attachment >")
         let shortened = characters < safe.count || truncated
         let body = characters < safe.count ? String(safe.prefix(characters)) : safe
         if shortened { attributes += " shortened=\"only the start of the file is included\"" }
-        let source = kind == .image ? "\n(Text read from an image.)" : ""
+        let source = kind == .image
+            ? (shown ? "\n(An image, shown to you. The text read from it:)" : "\n(Text read from an image.)") : ""
         return "<attachment \(attributes)>\(source)\n\(body)\n</attachment>"
     }
 }
@@ -205,6 +229,29 @@ public struct ChatAttachmentReader: Sendable {
         let pageCount = findKind == .pdf ? PDFDocument(url: url)?.pageCount : nil
         return .success(ChatAttachment(filename: url.lastPathComponent, kind: kind, byteCount: size,
                                        text: truncated ? String(text.prefix(Self.storedCharacterLimit)) : text,
-                                       truncated: truncated, pageCount: pageCount))
+                                       truncated: truncated, pageCount: pageCount,
+                                       imageData: kind == .image ? Self.keptImage(url) : nil))
+    }
+
+    /// The longest side a kept picture is scaled to. Qwen3-VL's encoders
+    /// work below this; it bounds what a chat stores.
+    public static let imageSide = 1_536
+
+    /// A picture scaled to at most `imageSide` (orientation applied) as JPEG,
+    /// or nil when ImageIO cannot read it.
+    static func keptImage(_ url: URL) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: imageSide,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(destination, image,
+                                   [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 }

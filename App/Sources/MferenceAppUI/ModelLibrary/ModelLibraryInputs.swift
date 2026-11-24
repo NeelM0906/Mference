@@ -91,6 +91,23 @@ nonisolated public enum MemoryFitVerdict: Sendable, Hashable {
     case tooLarge(String)
 }
 
+/// Quick's and Deep's optional "Image understanding" add-on, shown under the
+/// model's row. Installed is `.ready`.
+nonisolated public struct ImageUnderstandingEntry: Sendable, Hashable {
+    public var state: ModelEntryState
+    /// Installed size, or the download size before install.
+    public var sizeBytes: Int64
+
+    public init(state: ModelEntryState, sizeBytes: Int64) {
+        self.state = state
+        self.sizeBytes = sizeBytes
+    }
+
+    public static let title = "Image understanding"
+    /// What it does, under the title.
+    public static let summary = "Lets the model see pictures you attach. Until then it reads the text in them."
+}
+
 /// One model: a row of the library, a choice in onboarding.
 nonisolated public struct ModelEntry: Sendable, Hashable, Identifiable {
     /// The engine catalog id (`qwen3.5-4b`, `qwen3.8-27b`, ...).
@@ -114,11 +131,14 @@ nonisolated public struct ModelEntry: Sendable, Hashable, Identifiable {
     public var isRecommended: Bool
     public var state: ModelEntryState
     public var fit: MemoryFitVerdict
+    /// The image-understanding add-on (Quick, Deep); nil for other models.
+    public var imageUnderstanding: ImageUnderstandingEntry?
 
     public init(id: String, productName: String, variantName: String, summary: String,
                 engineName: String, formatDetail: String, licence: String? = nil,
                 sizeBytes: Int64?, location: String? = nil, isRecommended: Bool,
-                state: ModelEntryState, fit: MemoryFitVerdict) {
+                state: ModelEntryState, fit: MemoryFitVerdict,
+                imageUnderstanding: ImageUnderstandingEntry? = nil) {
         self.id = id
         self.productName = productName
         self.variantName = variantName
@@ -131,6 +151,7 @@ nonisolated public struct ModelEntry: Sendable, Hashable, Identifiable {
         self.isRecommended = isRecommended
         self.state = state
         self.fit = fit
+        self.imageUnderstanding = imageUnderstanding
     }
 
     /// "Quick · Qwen3.5 4B", or "Maple" alone.
@@ -177,6 +198,18 @@ public protocol ModelLibraryModel: AnyObject, Observable {
     func retryLoad(_ id: String)
     /// Adds a model file the person picked (a GGUF on this Mac).
     func addModelFile(at url: URL) async throws
+    /// Starts or continues the image-understanding download of model `id`,
+    /// after the person approved it.
+    func downloadImageUnderstanding(_ id: String)
+    func pauseImageUnderstanding(_ id: String)
+    /// Removes the add-on, or its partial download.
+    func removeImageUnderstanding(_ id: String)
+}
+
+public extension ModelLibraryModel {
+    func downloadImageUnderstanding(_ id: String) {}
+    func pauseImageUnderstanding(_ id: String) {}
+    func removeImageUnderstanding(_ id: String) {}
 }
 
 enum ModelFormat {

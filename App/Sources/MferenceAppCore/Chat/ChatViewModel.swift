@@ -106,6 +106,9 @@ public final class ChatViewModel {
     @ObservationIgnored private let defaultModel: @MainActor () -> AppModel
     /// Reads attached files into text on this Mac.
     @ObservationIgnored private let attachmentReader: ChatAttachmentReader
+    /// Offers Quick's or Deep's image understanding on the first picture;
+    /// nil where it cannot be downloaded (tests, previews).
+    @ObservationIgnored private let imageUnderstanding: (any ImageUnderstandingOffering)?
     /// How often streamed text reaches the view.
     @ObservationIgnored public var flushInterval: Duration = .milliseconds(30)
     /// Tool rounds per answer before the model must answer without tools.
@@ -152,6 +155,9 @@ public final class ChatViewModel {
     public private(set) var title = Conversation.defaultTitle
     /// The person turned web on for the first time: ask before enabling (L7).
     public private(set) var webConsentRequested = false
+    /// A picture was attached on a model that could see it with its image
+    /// understanding, which is not installed: offer the download (once).
+    public private(set) var imageUnderstandingOffer: ImageUnderstandingOffer?
     /// How many times streamed text was pushed to the view (tests check the
     /// batching with it).
     @ObservationIgnored public private(set) var flushCount = 0
@@ -168,9 +174,11 @@ public final class ChatViewModel {
                 tools: (any ChatToolboxProvider)? = nil,
                 files: (any ChatFilesProviding)? = nil,
                 defaultModel: @escaping @MainActor () -> AppModel = { .quick },
-                attachmentReader: ChatAttachmentReader = ChatAttachmentReader()) {
+                attachmentReader: ChatAttachmentReader = ChatAttachmentReader(),
+                imageUnderstanding: (any ImageUnderstandingOffering)? = nil) {
         self.service = service
         self.attachmentReader = attachmentReader
+        self.imageUnderstanding = imageUnderstanding
         self.store = store
         self.tools = tools
         self.files = files
@@ -270,6 +278,37 @@ public final class ChatViewModel {
 
     public func option(for model: AppModel) -> ModelOption? {
         modelOptions.first { $0.model == model }
+    }
+
+    /// The chosen model sees pictures: Quick or Deep with image understanding.
+    public var seesImages: Bool { option(for: model)?.seesImages ?? false }
+
+    /// What the "+" menu says about pictures for the chosen model.
+    public var imageCaption: String {
+        seesImages ? "\(model.shortName) can see images" : "Images are read as text on this Mac"
+    }
+
+    /// The person chose Download in the offer: that is their approval.
+    public func acceptImageUnderstandingOffer() {
+        guard let offer = imageUnderstandingOffer else { return }
+        imageUnderstandingOffer = nil
+        imageUnderstanding?.download(offer.model)
+    }
+
+    public func declineImageUnderstandingOffer() {
+        imageUnderstandingOffer = nil
+    }
+
+    /// Offers image understanding when a picture is attached on Quick or
+    /// Deep without it, once ever; the Model Library offers it after that.
+    private func offerImageUnderstandingIfNeeded() {
+        guard let offering = imageUnderstanding, !offering.hasOffered, imageUnderstandingOffer == nil,
+              model.supportsImageUnderstanding, !seesImages,
+              let option = option(for: model) else { return }
+        if case .notInstalled = option.availability { return }
+        guard let size = offering.downloadBytes(for: model) else { return }
+        offering.hasOffered = true
+        imageUnderstandingOffer = ImageUnderstandingOffer(model: model, sizeBytes: size)
     }
 
     public func selectModel(_ model: AppModel) {
@@ -441,6 +480,7 @@ public final class ChatViewModel {
             }
             let pending = PendingAttachment(filename: url.lastPathComponent, kind: kind)
             pendingAttachments.append(pending)
+            if kind == .image { offerImageUnderstandingIfNeeded() }
             let reader = attachmentReader
             Task { [weak self] in
                 let result = await reader.read(url)
@@ -563,7 +603,7 @@ public final class ChatViewModel {
             // read once per answer.
             let memory = ChatMemoryPrompt.text(facts: store.rememberedFacts())
             while true {
-                var turns = store.turns(for: conversation)
+                var turns = store.turns(for: conversation, seesImages: option(for: model)?.seesImages ?? false)
                 let system = [toolbox?.systemPrompt(now: now()), memory].compactMap { $0 }
                 if !system.isEmpty {
                     turns.insert(ChatTurn(role: .system, content: system.joined(separator: "\n\n")), at: 0)
@@ -775,5 +815,69 @@ public enum ChatMemoryPrompt {
         guard !lines.isEmpty else { return nil }
         return "Things the person asked you to remember about them. Use them when they are relevant; "
             + "do not mention this list unless asked.\n" + lines.joined(separator: "\n")
+    }
+}
+
+/// The chat's one-time offer of image understanding.
+public struct ImageUnderstandingOffer: Sendable, Hashable {
+    public var model: AppModel
+    /// The download's size.
+    public var sizeBytes: UInt64
+
+    public init(model: AppModel, sizeBytes: UInt64) {
+        self.model = model
+        self.sizeBytes = sizeBytes
+    }
+
+    public var title: String { "Let \(model.name) see images?" }
+
+    public var message: String {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(clamping: sizeBytes), countStyle: .file)
+        return "\(model.name)’s image understanding downloads (\(size)) to this Mac and runs here. "
+            + "Until it is installed, pictures are read as text. You can add or remove it later in Settings › Models."
+    }
+}
+
+/// Where the chat's offer of image understanding goes: whether it was made
+/// already, the download's size, and starting the download the person just
+/// approved. `ImageUnderstandingDownloads` is the live one.
+@MainActor
+public protocol ImageUnderstandingOffering: AnyObject {
+    var hasOffered: Bool { get set }
+    /// The add-on's download size, or nil when this Mac cannot get it.
+    func downloadBytes(for model: AppModel) -> UInt64?
+    /// Starts the approved download (the offer's Download button).
+    func download(_ model: AppModel)
+}
+
+/// The live offering: remembered in Settings, downloads through
+/// `AppServices.imageDownloads` (offline mode and the memory gate still
+/// refuse there).
+@MainActor
+public final class ImageUnderstandingDownloads: ImageUnderstandingOffering {
+    private let settings: AppSettings
+    private let downloads: DownloadManager
+    private let memoryFit: MemoryFit
+
+    public init(settings: AppSettings, downloads: DownloadManager, memoryFit: MemoryFit = MemoryFit()) {
+        self.settings = settings
+        self.downloads = downloads
+        self.memoryFit = memoryFit
+    }
+
+    public var hasOffered: Bool {
+        get { settings.hasOfferedImageUnderstanding }
+        set { settings.hasOfferedImageUnderstanding = newValue }
+    }
+
+    public func downloadBytes(for model: AppModel) -> UInt64? {
+        guard memoryFit.isOffered(model) else { return nil }
+        return downloads.source(for: model)?.sizeBytes
+    }
+
+    public func download(_ model: AppModel) {
+        guard memoryFit.isOffered(model), let source = downloads.source(for: model) else { return }
+        let downloads = self.downloads
+        Task { try? await downloads.download(DownloadApproval(confirming: source)) }
     }
 }

@@ -99,7 +99,10 @@ public final class ConversationStore {
     /// all of its tool turns. A user message's attachments are written into
     /// its turn (`ChatAttachment.modelContent`): the newest message's files get
     /// the model's full attachment budget, earlier ones a quarter of it.
-    public func turns(for conversation: Conversation) -> [ChatTurn] {
+    /// With `seesImages` (Quick or Deep with image understanding), a user
+    /// message's pictures also go along as pixels, in every turn, so prompt
+    /// reuse holds across the chat; their text stays in the turn too.
+    public func turns(for conversation: Conversation, seesImages: Bool = false) -> [ChatTurn] {
         let ordered = conversation.orderedMessages
         let lastUser = ordered.lastIndex { $0.role == .user } ?? -1
         let model = conversation.model
@@ -108,8 +111,10 @@ public final class ConversationStore {
                 var turn = message.turn
                 let budget = offset == lastUser ? ChatAttachment.characterBudget(for: model)
                                                 : ChatAttachment.earlierCharacterBudget(for: model)
-                turn.content = ChatAttachment.modelContent(message: message.content,
-                                                           attachments: message.attachments, budget: budget)
+                let attachments = message.attachments
+                turn.content = ChatAttachment.modelContent(message: message.content, attachments: attachments,
+                                                           budget: budget, seesImages: seesImages)
+                if seesImages { turn.images = ChatAttachment.images(of: attachments) }
                 return turn
             }
             guard offset < lastUser else { return message.turn }
