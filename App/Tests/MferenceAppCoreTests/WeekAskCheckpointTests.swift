@@ -118,6 +118,15 @@ import Testing
         #expect(wrongShape.shapeCorrect == false)
     }
 
+    @Test func onlyAsksTheNamedQuestionsWithTheirThreads() {
+        #expect(WeekAskCheckpoint.selected(nil).count == WeekAskCheckpoint.questions.count)
+        #expect(WeekAskCheckpoint.selected(["G04", "G06", "G07"]).map(\.id) == ["G04", "G06", "G07"])
+        // A follow-up brings the questions before it in its thread.
+        let thread = WeekAskCheckpoint.selected(["C03"]).map(\.id)
+        #expect(thread == ["C01", "C02", "C03"])
+        #expect(WeekAskCheckpoint.selected(["nope"]).isEmpty)
+    }
+
     /// Writes the answer key (and each free-time question's Swift answer)
     /// for the record: `MFERENCE_WEEK_ASK_KEY=<file> Scripts/test.sh ...`.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["MFERENCE_WEEK_ASK_KEY"] != nil))

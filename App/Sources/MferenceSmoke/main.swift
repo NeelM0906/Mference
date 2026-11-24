@@ -27,6 +27,7 @@ import MferenceWeekAskFixtures
 // App/Scripts/week_ask_report.py) and the key as `week-ask-key.jsonl`.
 // `--model apple --week-ask` asks Apple's on-device model in-process
 // through `AssistantWeekLanguageModel` instead (no engine model loads).
+// `--questions G06,G07` asks only those (each with its thread).
 // Passes when every typed question got an answer.
 //
 // Warm decode: add `--warmup` to send a short request on the loaded model
@@ -119,6 +120,7 @@ var weekAskMode = false
 var warmup = false
 var temperature: Float?
 var promptGiven = false
+var onlyQuestions: Set<String>?
 while let argument = arguments.popFirst() {
     switch argument {
     case "--model": modelName = arguments.popFirst()
@@ -132,6 +134,7 @@ while let argument = arguments.popFirst() {
     case "--temperature": temperature = arguments.popFirst().flatMap(Float.init)
     case "--max-tokens": maxTokens = arguments.popFirst().flatMap(Int.init) ?? maxTokens
     case "--commit": commit = arguments.popFirst()
+    case "--questions": onlyQuestions = arguments.popFirst().map { Set($0.split(separator: ",").map(String.init)) }
     default: fail("unknown argument \(argument)", code: 2)
     }
 }
@@ -162,7 +165,7 @@ guard let swapBefore = swapUsedBytes() else { fail("cannot read vm.swapusage", c
         let key = WeekAskCheckpoint.keyLines().joined(separator: "\n") + "\n"
         try? Data(key.utf8).write(to: outDirectory.appending(path: "week-ask-key.jsonl"))
     }
-    let results = await WeekAskCheckpoint.run(model: model, log: log) { one in
+    let results = await WeekAskCheckpoint.run(model: model, log: log, only: onlyQuestions) { one in
         FileHandle.standardError.write(Data("\(one.id) \(one.route ?? "error") \(one.latencyMilliseconds) ms\n".utf8))
     }
     result.weekAsk = results

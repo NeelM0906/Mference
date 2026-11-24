@@ -62,6 +62,7 @@ import Testing
         #expect(prompt.contains(#"read "past_days" only when the question asks about the past"#))
         #expect(prompt.contains(#"Am I free tonight?\#n{"free_query": {"days": ["today"], "part": "evening"}}"#))
         #expect(prompt.contains("IDs go only in refs."))
+        #expect(prompt.contains(#"is about today on: answer it from "days" and never mention or cite "past_days"."#))
         #expect(prompt.contains("even for a date outside this week"))
         #expect(!prompt.contains("day_query"))
         #expect(prompt.contains("Examples, from a made-up calendar, for the format only:"))

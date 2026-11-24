@@ -465,14 +465,15 @@ public enum WeekAskCheckpoint {
 
     /// Asks every question with `model` (already resident), as the app
     /// would: a thread carries on for follow-ups, a chip starts one in
-    /// Swift. Each typed answer is also written to `log`.
-    public static func run(model: any WeekLanguageModel, log: WeekAskLog?,
+    /// Swift. Each typed answer is also written to `log`. `only` (IDs)
+    /// asks just those questions, each with the thread before it.
+    public static func run(model: any WeekLanguageModel, log: WeekAskLog?, only: Set<String>? = nil,
                            progress: @Sendable (Result) -> Void = { _ in }) async -> [Result] {
         let contexts = contexts
         let answerer = WeekAnswerer(picker: .fixed(model), review: { .timeWarning }, log: log)
         var results: [Result] = []
         var thread: [WeekAnswer] = []
-        for question in questions {
+        for question in selected(only) {
             guard let context = contexts[question.week] else { continue }
             if !question.followUp { thread = [] }
             var result: Result
@@ -498,6 +499,19 @@ public enum WeekAskCheckpoint {
             results.append(result)
         }
         return results
+    }
+
+    /// The questions `only` names, each with the earlier questions of its
+    /// thread; every question when `only` is nil.
+    public static func selected(_ only: Set<String>?) -> [Question] {
+        guard let only else { return questions }
+        var keep = Set<Int>()
+        for (index, question) in questions.enumerated() where only.contains(question.id) {
+            var start = index
+            while start > 0, questions[start].followUp { start -= 1 }
+            keep.formUnion(start...index)
+        }
+        return questions.indices.filter(keep.contains).map { questions[$0] }
     }
 
     /// The run's totals against the v1 bars.

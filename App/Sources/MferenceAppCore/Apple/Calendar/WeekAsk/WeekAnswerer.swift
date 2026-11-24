@@ -170,7 +170,8 @@ public struct WeekAnswerer: Sendable {
         the IDs of the events and to-dos the answer uses. Name events and to-dos by their titles; IDs go only \
         in refs. Answer only from the schedule; to-dos come from "todos". Answer from "days" (today on); read \
         "past_days" only when the question asks about the past: an earlier day of this week, or an event \
-        that already happened. If the schedule does not hold the answer, say it is not in your calendar this \
+        that already happened. A question about the week ("What's on my week?", "What am I doing this \
+        week?") is about today on: answer it from "days" and never mention or cite "past_days". If the schedule does not hold the answer, say it is not in your calendar this \
         week. Use the times and lengths the schedule writes; do not calculate. In answers, morning is 12 AM \
         to 12 PM, afternoon 12 to 5 PM, evening 5 to 9 PM and night 9 PM to 12 AM. (For free time, Mference \
         searches 9 AM to 12 PM in the morning, and 9 AM to 5 PM when no part is named.)
