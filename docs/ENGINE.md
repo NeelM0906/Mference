@@ -79,8 +79,41 @@ field by field. A loaded model handles it in two steps:
 
 `EngineModelTraits` says what the loaded model supports: chat dialect,
 sampling defaults, effective context, reasoning-effort support, prefix reuse,
-and whether draft (MTP) decoding is active. The dialect comes from the loaded
+whether draft (MTP) decoding is active, and whether it accepts images. The dialect comes from the loaded
 tokenizer, which is why a request is validated after its model is resident.
+
+### Images
+
+`EngineRequest.media` maps the index of a user message to its images, as
+`EngineMedia` values: packed 8-bit RGB with a SHA-256 of the size and pixels.
+`EngineMedia.image(encoded:)` decodes any format ImageIO reads, applies its
+orientation, and caps the longest side at 4,096 px; the vendored llama.cpp
+carries no image decoders.
+
+- Only a model whose `traits.supportsVision` is true accepts images: a GGUF
+  model that discovery paired with a vision projector (see
+  [Discovery](#discovery)). Every other model, and an image on a message that
+  is not a user message, fails in `prepare` with `unsupported_content`.
+- The prompt is what llama.cpp's server builds at the pin: a message with
+  images reaches the chat template as one string, a media marker per image
+  and then the text, with no newline beside a marker. `mtmd_tokenize` turns
+  each marker into `<|vision_start|>`, the image's tokens and
+  `<|vision_end|>`. The marker is random per load, so typed text never
+  matches it.
+- Prefill follows llama.cpp's `mtmd-helper`: text at one position per token,
+  and each image encoded by the projector and decoded as embeddings at its
+  M-RoPE positions, after which the position moves on by the image's `n_pos`.
+  In `EnginePreparedPrompt.promptTokens` each vision token is
+  `EngineMedia.placeholderToken` (-1), so the count is the context the prompt
+  fills. Images are never drafted: a request with images on Deep decodes
+  plainly, without MTP, and the next request starts from an empty memory.
+- Prefix reuse keys the cache by position, with an image's positions keyed
+  by its hash. A later turn that resends the same images reuses the KV
+  through them; a changed image is where reuse stops.
+- The projector loads (`mtmd_init_from_file`) on the first request that
+  carries an image and stays until the model unloads, so a text-only session
+  never holds it. A request without images takes exactly the text-only path,
+  with byte-identical output.
 
 ## The host
 
@@ -231,6 +264,14 @@ a weight file or a tensor.
   architecture, `general.name`, `<arch>.context_length`, the tensor count,
   and the `blk.N.nextn.*` tensors of an MTP head. Split GGUFs
   (`-00001-of-0000N`) are skipped.
+- **Vision projectors** are the `.gguf` files with `mmproj` in their name.
+  They are never listed as models. Each GGUF model is paired with a projector
+  in its own directory whose header has a vision encoder and a
+  `clip.vision.projection_dim` equal to the model's `embedding_length`; a
+  product model prefers its own file names (Quick:
+  `Qwen3.5-4B-mmproj-F16.gguf`, then `mmproj-F16.gguf`; Deep:
+  `mmproj-Qwen3.8-27B-BF16.gguf`), then path order. The pairing is
+  `EngineModelDescriptor.visionProjector`.
 
 ### Product allowlist
 

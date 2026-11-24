@@ -69,12 +69,20 @@ struct LlamaChatTemplate: Sendable {
         return kwargs
     }
 
+    /// Renders the prompt. `mediaCounts` gives, by message index, how many
+    /// images that message carries; each becomes one `mediaMarker` ahead of
+    /// its text, for `mtmd_tokenize` to replace with the image.
     func render(messages: [MFTokenizer.Message],
                 tools: [MFTokenizer.FunctionDefinition],
                 addGenerationPrompt: Bool = true,
-                keywordArguments: [String: any Sendable] = [:]) throws -> String {
+                keywordArguments: [String: any Sendable] = [:],
+                mediaCounts: [Int: Int] = [:],
+                mediaMarker: String = "") throws -> String {
         var context: [String: Value] = [
-            "messages": try .array(messages.map { try Value(any: Self.templateMessage($0)) }),
+            "messages": try .array(messages.enumerated().map { index, message in
+                try Value(any: Self.templateMessage(message, mediaMarkers: mediaCounts[index] ?? 0,
+                                                    marker: mediaMarker))
+            }),
             "add_generation_prompt": .boolean(addGenerationPrompt),
         ]
         if !tools.isEmpty {
@@ -94,10 +102,24 @@ struct LlamaChatTemplate: Sendable {
     }
 
     /// The dictionary `MFTokenizer.encodeToolChat` passes for a message.
-    static func templateMessage(_ message: MFTokenizer.Message) throws -> [String: any Sendable] {
+    ///
+    /// A message with `mediaMarkers` images is the content-part list
+    /// llama.cpp's server builds for it (one media-marker part per image,
+    /// then the text part) joined into one string as llama.cpp's
+    /// `common_chat_msg` does whenever a message holds media: the parts are
+    /// concatenated with no newline beside a marker. The template then sees
+    /// plain text, and `mtmd_tokenize` turns each marker into
+    /// `<|vision_start|>` image `<|vision_end|>`. A message without images is
+    /// passed exactly as before.
+    static func templateMessage(_ message: MFTokenizer.Message,
+                                mediaMarkers: Int = 0,
+                                marker: String = "") throws -> [String: any Sendable] {
+        let content: String? = mediaMarkers > 0
+            ? String(repeating: marker, count: mediaMarkers) + (message.content ?? "")
+            : message.content
         var value: [String: any Sendable] = [
             "role": message.role.rawValue,
-            "content": message.content as (any Sendable)?,
+            "content": content as (any Sendable)?,
         ]
         if !message.toolCalls.isEmpty {
             value["tool_calls"] = try message.toolCalls.map { call -> [String: any Sendable] in

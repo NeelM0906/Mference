@@ -10,6 +10,12 @@ import Synchronization
 /// prompt the context already holds), samples one token at a time, and turns
 /// the tokens into the same events, finish reasons and usage as the native
 /// path (`StructuredAssistantDecoder`, `StreamingStopMatcher`).
+///
+/// With a vision projector, a request that carries images is tokenized by
+/// `mtmd_tokenize` and prefilled chunk by chunk as llama.cpp's `mtmd-helper`
+/// does (images encoded, then decoded as embeddings at M-RoPE positions);
+/// it always decodes plainly, without MTP. A request without images takes
+/// exactly the text-only path.
 actor LlamaModel: EngineModel {
     nonisolated let descriptor: EngineModelDescriptor
     nonisolated let traits: EngineModelTraits
@@ -32,8 +38,22 @@ actor LlamaModel: EngineModel {
     /// included. Kept for the token-identity checks against upstream tools.
     private(set) var lastSampledTokens: [Int32] = []
 
+    /// The vision projector (`mmproj`) file, when the model has one.
+    private let projector: URL?
+    private let projectorUsesGPU: Bool
+    /// The loaded projector (`mtmd_context`), from the first image on.
+    private var media: OpaquePointer?
+    /// The batch media prompts prefill through (explicit positions).
+    private var mediaBatch: OpaquePointer?
+    /// The text that stands for an image in a rendered prompt. Random per
+    /// load, as llama.cpp's server makes it, so no typed text can be taken
+    /// for an image.
+    private let mediaMarker = "<__media_\(UUID().uuidString.lowercased())__>"
+    /// The media prompt `prepare` last tokenized, for `generate` to reuse.
+    private var preparedMedia: LlamaMediaPrompt?
+
     /// The prompt text `prepare` tokenizes: the GGUF's template rendered for
-    /// `request`.
+    /// `request`, with one media marker per image.
     func renderedPrompt(_ request: EngineRequest) throws -> String {
         let rendered = try template.render(
             messages: request.messages,
@@ -42,7 +62,9 @@ actor LlamaModel: EngineModel {
                 reasoningEffort: request.reasoningEffort,
                 preserveThinking: request.preserveThinking,
                 readsEnableThinking: template.readsEnableThinking,
-                readsReasoningEffort: template.readsReasoningEffort))
+                readsReasoningEffort: template.readsReasoningEffort),
+            mediaCounts: request.media.mapValues(\.count).filter { $0.value > 0 },
+            mediaMarker: mediaMarker)
         return template.strippingImplicitSpecialTokens(rendered, addsBOS: vocabulary.addsBOS,
                                                        addsEOS: vocabulary.addsEOS)
     }
@@ -55,8 +77,12 @@ actor LlamaModel: EngineModel {
          template: LlamaChatTemplate,
          batchSize: Int,
          mtp: OpaquePointer? = nil,
-         draftLimit: Int = LlamaBackend.draftLimit) {
+         draftLimit: Int = LlamaBackend.draftLimit,
+         projector: URL? = nil,
+         projectorUsesGPU: Bool = true) {
         self.descriptor = descriptor
+        self.projector = projector
+        self.projectorUsesGPU = projectorUsesGPU
         self.handle = handle
         let contextOwner = LlamaContextHandle(context, model: handle)
         self.contextOwner = contextOwner
@@ -76,7 +102,8 @@ actor LlamaModel: EngineModel {
             // rejects developer messages, as the server's Qwen 3.8 rules do.
             supportsQwenReasoningEffort: template.readsReasoningEffort,
             reusesPromptPrefixes: drafter == nil,
-            usesDraftDecoding: drafter != nil)
+            usesDraftDecoding: drafter != nil,
+            supportsVision: projector != nil)
         llama_set_abort_callback(context, { data in
             guard let data else { return false }
             return Unmanaged<LlamaAbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
@@ -97,7 +124,16 @@ actor LlamaModel: EngineModel {
             throw EngineError.invalidRequest(message: "reasoning_effort is not supported by this model",
                                              param: "reasoning_effort", code: "unsupported_value")
         }
-        let tokens = vocabulary.tokenIDs(try renderedPrompt(request), addSpecial: true)
+        try request.validateMedia(supportsVision: traits.supportsVision)
+        preparedMedia = nil
+        let tokens: [Int32]
+        if request.hasMedia {
+            let prompt = try mediaPrompt(request)
+            preparedMedia = prompt
+            tokens = prompt.layout.promptTokens
+        } else {
+            tokens = vocabulary.tokenIDs(try renderedPrompt(request), addSpecial: true)
+        }
         // (`renderedPrompt` already dropped any BOS/EOS tokenization adds.)
         guard !tokens.isEmpty else {
             throw EngineError.invalidRequest(message: "the rendered prompt is empty",
@@ -139,6 +175,11 @@ actor LlamaModel: EngineModel {
 
     func unload() async {
         abortFlag.set()
+        preparedMedia = nil
+        if let mediaBatch { llama_batch_ext_free(mediaBatch) }
+        mediaBatch = nil
+        if let media { mtmd_free(media) }
+        media = nil
         context = nil
         drafter?.free()
         contextOwner.free()
@@ -208,7 +249,7 @@ actor LlamaModel: EngineModel {
         var draftProposed: Int?
         var draftAccepted: Int?
 
-        if let drafter, let mtp = drafter.pointer {
+        if let drafter, let mtp = drafter.pointer, !request.hasMedia {
             // MTP: llama.cpp's speculative loop owns both memories and starts
             // from empty ones (no prefix reuse).
             reused = 0
@@ -254,17 +295,21 @@ actor LlamaModel: EngineModel {
             // Decides what to reuse, trims or clears the memory to match, and
             // leaves the cache untrusted until a clean return.
             let memory = llama_get_memory(context)
-            reused = promptCache.begin(
-                prompt: prompt,
-                trim: { llama_memory_seq_rm(memory, 0, llama_pos($0), -1) },
-                clear: { llama_memory_clear(memory, true) })
             let prefillStart = clock.now
-            var position = reused
-            while position < prompt.count {
-                try Task.checkCancellation()
-                let end = min(position + batchSize, prompt.count)
-                try decode(Array(prompt[position..<end]), context: context)
-                position = end
+            if request.hasMedia {
+                reused = try prefillMedia(request, context: context)
+            } else {
+                reused = promptCache.begin(
+                    prompt: prompt,
+                    trim: { llama_memory_seq_rm(memory, 0, llama_pos($0), -1) },
+                    clear: { llama_memory_clear(memory, true) })
+                var position = reused
+                while position < prompt.count {
+                    try Task.checkCancellation()
+                    let end = min(position + batchSize, prompt.count)
+                    try decode(Array(prompt[position..<end]), context: context)
+                    position = end
+                }
             }
             // llama_decode only queues GPU work; wait for it so the prefill time
             // is the prefill's, not the first sampled token's.
@@ -274,7 +319,8 @@ actor LlamaModel: EngineModel {
             let sampler = LlamaSampler(config: config, vocabularySize: Int32(vocabulary.tokenCount),
                                        contextSize: Int32(maxContext),
                                        suppressedTokens: vocabulary.suppressedTokens)
-            for token in prompt { sampler.accept(token) }
+            // Text tokens only: llama.cpp's server skips an image's tokens.
+            for token in prompt where token != EngineMedia.placeholderToken { sampler.accept(token) }
             decodeStart = clock.now
             while true {
                 try Task.checkCancellation()
@@ -296,8 +342,9 @@ actor LlamaModel: EngineModel {
             !assembler.toolCalls.isEmpty ? .toolCalls : (hitLimit && !assembler.isStopped ? .length : .stop)
         let counts = decoder.payloadTokenCounts
         // The plain path's memory now holds exactly what the cache recorded;
-        // the MTP loop's is not tracked, so the next request starts from empty.
-        if drafter == nil { promptCache.commit() }
+        // the MTP loop's is not tracked, so the next request starts from empty
+        // (as does one after a media request on an MTP model).
+        if drafter == nil { promptCache.commit() } else { promptCache.invalidate() }
         return EngineCompletion(
             content: assembler.content,
             reasoningContent: reasoning.isEmpty ? nil : reasoning,
@@ -311,6 +358,147 @@ actor LlamaModel: EngineModel {
             timings: EngineTimings(prefillSeconds: prefillSeconds, decodeSeconds: decodeSeconds,
                                    draftTokensProposed: draftProposed,
                                    draftTokensAccepted: draftAccepted))
+    }
+
+    // MARK: Media
+
+    /// The loaded projector, loading it on first use.
+    private func mediaContext() throws -> OpaquePointer {
+        if let media { return media }
+        guard let projector, let model = handle.pointer, let context else {
+            throw EngineError.invalidRequest(message: "this model does not accept images",
+                                             param: "messages", code: "unsupported_content")
+        }
+        var params = mtmd_context_params_default()
+        params.use_gpu = projectorUsesGPU
+        params.print_timings = false
+        let loaded = mediaMarker.withCString { marker -> OpaquePointer? in
+            params.media_marker = marker
+            return mtmd_init_from_file(projector.path, model, params)
+        }
+        guard let loaded else { throw LlamaBackendError.projectorFailed("could not load \(projector.path)") }
+        guard mtmd_support_vision(loaded), let batch = llama_batch_ext_init(context) else {
+            mtmd_free(loaded)
+            throw LlamaBackendError.projectorFailed("\(projector.lastPathComponent) has no vision encoder")
+        }
+        media = loaded
+        mediaBatch = batch
+        return loaded
+    }
+
+    /// `request` rendered and tokenized with its images.
+    private func mediaPrompt(_ request: EngineRequest) throws -> LlamaMediaPrompt {
+        let media = try mediaContext()
+        return try LlamaMediaPrompt(rendered: try renderedPrompt(request), media: request.orderedMedia,
+                                    context: media)
+    }
+
+    /// Prefills a prompt with images, reusing what the memory holds of it, as
+    /// llama.cpp's `mtmd_helper_eval_chunks` does: text at one position per
+    /// token, each image encoded and then decoded as embeddings at its M-RoPE
+    /// positions (`t`, `y`, `x`, `z`), the position advancing by the image's
+    /// `n_pos`. Logits are kept for the last prompt token only. Returns the
+    /// prompt tokens reused.
+    private func prefillMedia(_ request: EngineRequest, context: OpaquePointer) throws -> Int {
+        let prompt: LlamaMediaPrompt
+        if let prepared = preparedMedia, prepared.mediaHashes == request.orderedMedia.map(\.hash),
+           prepared.rendered == (try renderedPrompt(request)) {
+            prompt = prepared
+        } else {
+            prompt = try mediaPrompt(request)
+        }
+        preparedMedia = nil
+        guard let media, let batch = mediaBatch, let model = handle.pointer else {
+            throw EngineError.modelUnloaded(descriptor.id)
+        }
+        let layout = prompt.layout
+        let memory = llama_get_memory(context)
+        let keys = layout.cacheKeys
+        let reusedPositions = promptCache.begin(
+            prompt: keys,
+            trim: { llama_memory_seq_rm(memory, 0, llama_pos($0), -1) },
+            clear: { llama_memory_clear(memory, true) })
+        var plan = layout.remaining(afterReusing: reusedPositions)
+        if plan == nil {
+            // Ends inside an image (cannot happen with whole-image keys):
+            // start over.
+            llama_memory_clear(memory, true)
+            promptCache.invalidate()
+            plan = layout.remaining(afterReusing: 0)
+        }
+        guard let (pieces, reusedTokens) = plan else { throw LlamaBackendError.decodeFailed(-1) }
+
+        let embeddingWidth = Int(llama_model_n_embd_inp(model))
+        let usesMRoPE = mtmd_decode_use_mrope(media)
+        for (pieceIndex, piece) in pieces.enumerated() {
+            try Task.checkCancellation()
+            let isLast = pieceIndex == pieces.count - 1
+            switch piece {
+            case .text(let segment, let skipping, let start):
+                guard case .text(let all) = layout.segments[segment] else { continue }
+                let tokens = Array(all[skipping...])
+                var offset = 0
+                while offset < tokens.count {
+                    let end = min(offset + batchSize, tokens.count)
+                    llama_batch_ext_clear(batch)
+                    for index in offset..<end {
+                        let entry = llama_batch_ext_add_token(batch, 0, tokens[index])
+                        var position: [llama_pos] = [llama_pos(start + index), 0, 0, 0]
+                        guard entry >= 0, llama_batch_ext_set_pos(batch, entry, &position) else {
+                            throw LlamaBackendError.decodeFailed(-1)
+                        }
+                        if isLast, index == tokens.count - 1 {
+                            _ = llama_batch_ext_set_output_logits(batch, entry, true)
+                        }
+                    }
+                    try process(batch, context: context)
+                    promptCache.append(Array(tokens[offset..<end]))
+                    offset = end
+                }
+            case .media(let segment, let start):
+                guard case .media(let count, let positions, _) = layout.segments[segment],
+                      let chunk = prompt.chunk(segment) else { continue }
+                guard mtmd_encode_chunk(media, chunk) == 0, let rows = mtmd_get_output_embd(media) else {
+                    if abortFlag.isSet { throw CancellationError() }
+                    throw LlamaBackendError.projectorFailed("an image could not be encoded")
+                }
+                let imageTokens = mtmd_input_chunk_get_tokens_image(chunk)
+                let nonCausal = mtmd_decode_use_non_causal(media, chunk)
+                if nonCausal { llama_set_causal_attn(context, false) }
+                defer { if nonCausal { llama_set_causal_attn(context, true) } }
+                var offset = 0
+                while offset < count {
+                    let end = min(offset + batchSize, count)
+                    llama_batch_ext_clear(batch)
+                    for index in offset..<end {
+                        let entry = llama_batch_ext_add_embd(
+                            batch, 0, llama_embd(data: rows + index * embeddingWidth, n_rows: 1,
+                                                 n_embd: embeddingWidth))
+                        var position: [llama_pos]
+                        if usesMRoPE, let imageTokens {
+                            let at = mtmd_image_tokens_get_decoder_pos(imageTokens, llama_pos(start), index)
+                            position = [llama_pos(at.t), llama_pos(at.y), llama_pos(at.x), llama_pos(at.z)]
+                        } else {
+                            position = [llama_pos(start + index), 0, 0, 0]
+                        }
+                        guard entry >= 0, llama_batch_ext_set_pos(batch, entry, &position) else {
+                            throw LlamaBackendError.decodeFailed(-1)
+                        }
+                    }
+                    try process(batch, context: context)
+                    offset = end
+                }
+                promptCache.append(Array(keys[start..<(start + positions)]))
+            }
+        }
+        llama_batch_ext_clear(batch)
+        return reusedTokens
+    }
+
+    private func process(_ batch: OpaquePointer, context: OpaquePointer) throws {
+        let status = llama_process(context, LLAMA_PROCESS_TYPE_DECODE, batch)
+        if status == 2 || abortFlag.isSet { throw CancellationError() }
+        guard status == 0 else { throw LlamaBackendError.decodeFailed(status) }
     }
 
     private func decode(_ tokens: [Int32], context: OpaquePointer) throws {

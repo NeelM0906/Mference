@@ -20,6 +20,8 @@ public enum LlamaBackendError: Error, Equatable, Sendable, CustomStringConvertib
     case decodeFailed(Int32)
     /// llama.cpp could not create the MTP draft context.
     case draftContextFailed(String)
+    /// The vision projector could not be loaded or used.
+    case projectorFailed(String)
 
     public var description: String {
         switch self {
@@ -32,6 +34,7 @@ public enum LlamaBackendError: Error, Equatable, Sendable, CustomStringConvertib
         case .unsupportedTokenizer(let reason): "unsupported GGUF tokenizer: \(reason)"
         case .decodeFailed(let status): "llama_decode failed with status \(status)"
         case .draftContextFailed(let id): "llama.cpp could not create the MTP draft context for \(id)"
+        case .projectorFailed(let reason): "the vision projector failed: \(reason)"
         }
     }
 }
@@ -46,6 +49,11 @@ public enum LlamaBackendError: Error, Equatable, Sendable, CustomStringConvertib
 /// batch sizes and KV cache types. `EngineHost` loads only with no other model
 /// resident, and `LlamaModel.unload` frees the context and the model before the
 /// host drops it.
+///
+/// A descriptor with a `visionProjector` loads as a vision model when the
+/// file's header says it has a vision encoder; the projector itself loads
+/// (`mtmd_init_from_file`) on the first request that carries an image, so a
+/// text-only session never pays its memory.
 public struct LlamaBackend: EngineBackend {
     public var engine: EngineKind { .llamaCpp }
 
@@ -159,9 +167,13 @@ public struct LlamaBackend: EngineBackend {
                 throw LlamaBackendError.draftContextFailed(descriptor.id)
             }
         }
+        let projector = descriptor.visionProjector.map(\.location).flatMap { url in
+            mtmd_get_cap_from_file(url.path).inp_vision ? url : nil
+        }
         return LlamaModel(descriptor: descriptor, handle: handle, context: context,
                           vocabulary: vocabulary, tokenizer: tokenizer, template: template,
-                          batchSize: Self.logicalBatch, mtp: mtp, draftLimit: Self.draftLimit)
+                          batchSize: Self.logicalBatch, mtp: mtp, draftLimit: Self.draftLimit,
+                          projector: projector, projectorUsesGPU: modelParams.n_gpu_layers != 0)
     }
 }
 
