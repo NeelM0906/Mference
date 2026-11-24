@@ -362,6 +362,7 @@ public actor NativeEngineModel: EngineModel {
     /// no generation state.
     public func prepare(_ request: EngineRequest) throws -> EnginePreparedPrompt {
         guard let loaded else { throw EngineError.modelUnloaded(descriptor.id) }
+        try request.validateMedia(supportsVision: false)
         let tokenizer = loaded.tokenizer
         let maxContext = loaded.maxContext
         let needsToolTemplate = request.needsToolTemplate

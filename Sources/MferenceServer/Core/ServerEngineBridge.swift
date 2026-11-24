@@ -176,6 +176,7 @@ public final class ServerSessionEngineModel: EngineModel {
     }
 
     public func prepare(_ request: EngineRequest) async throws -> EnginePreparedPrompt {
+        try request.validateMedia(supportsVision: false)
         let prepared: PreparedGeneration
         do {
             prepared = try await loaded().prepare(ValidatedChatRequest(request))

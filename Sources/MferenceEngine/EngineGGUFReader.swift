@@ -1,8 +1,9 @@
 import Foundation
 
 /// Reads the facts the catalog needs from a GGUF file's header: architecture,
-/// name, context length, tensor count, and the next-token-prediction (MTP)
-/// tensors. Only the header is parsed, through a bounded 1 MiB read window
+/// name, context length, embedding width, tensor count, the
+/// next-token-prediction (MTP) tensors, and, for a multimodal projector, its
+/// type and projection width. Only the header is parsed, through a bounded 1 MiB read window
 /// that may run at most that far past the header; tensor data is never
 /// parsed, so listing a 12 GB file costs a few megabytes of reads (the
 /// tokenizer vocabulary dominates the header).
@@ -50,6 +51,9 @@ public enum EngineGGUFReader {
 
         var architecture: String?
         var name: String?
+        var fileType: String?
+        var projectorType: String?
+        var hasVisionEncoder = false
         var integers: [String: UInt64] = [:]
         for _ in 0..<keyCount {
             let key = try reader.string()
@@ -59,8 +63,15 @@ public enum EngineGGUFReader {
                 architecture = try reader.stringValue(type: type, key: key)
             case "general.name":
                 name = try reader.stringValue(type: type, key: key)
+            case "general.type" where type == 8:
+                fileType = try reader.string()
+            case "clip.projector_type" where type == 8:
+                projectorType = try reader.string()
+            case "clip.has_vision_encoder" where type == 7:
+                hasVisionEncoder = try reader.bytes(1).first != 0
             default:
-                if key.hasSuffix(".context_length") || key.hasSuffix(".nextn_predict_layers") {
+                if key.hasSuffix(".context_length") || key.hasSuffix(".nextn_predict_layers")
+                    || key.hasSuffix(".embedding_length") || key == "clip.vision.projection_dim" {
                     // Another architecture's key, or an odd type, is not a
                     // reason to refuse the file: a non-integer is skipped.
                     integers[key] = try reader.integerValueOrSkip(type: type)
@@ -83,11 +94,22 @@ public enum EngineGGUFReader {
         }
 
         let context = integers["\(architecture).context_length"].map { Int(clamping: $0) }
+        // An `mmproj` file: llama.cpp's converters mark it `general.type`
+        // `mmproj`; older ones only give the `clip` architecture.
+        let projector: EngineGGUFProjector? = (fileType == "mmproj" || architecture == "clip")
+            ? EngineGGUFProjector(
+                projectorType: projectorType,
+                hasVisionEncoder: hasVisionEncoder,
+                projectionDimension: integers["clip.vision.projection_dim"].map { Int(clamping: $0) })
+            : nil
         return EngineGGUFMetadata(architecture: architecture,
                                   name: name,
                                   contextLength: context,
                                   tensorCount: Int(tensorCount),
-                                  nextNTensorCount: nextN)
+                                  nextNTensorCount: nextN,
+                                  embeddingLength: integers["\(architecture).embedding_length"]
+                                      .map { Int(clamping: $0) },
+                                  projector: projector)
     }
 
     /// Sequential little-endian reads over a file through a 1 MiB window.

@@ -187,9 +187,12 @@ public final class FakeEngineBackend: EngineBackend {
             journal.record(.loadFailed(descriptor.id))
             throw error
         }
+        // Like a GGUF model, the default fake sees images when its descriptor
+        // has a vision projector.
         var traits = script.traits ?? EngineModelTraits(
             chatDialect: .chatml,
-            maxContext: descriptor.resolvedContext(options: options))
+            maxContext: descriptor.resolvedContext(options: options),
+            supportsVision: descriptor.visionProjector != nil)
         if script.traits != nil {
             traits.maxContext = min(traits.maxContext, descriptor.resolvedContext(options: options))
         }
@@ -203,7 +206,8 @@ public final class FakeEngineBackend: EngineBackend {
     public static func descriptor(id: String,
                                   engine: EngineKind = .mference,
                                   contextLength: Int = 4_096,
-                                  product: EngineProductSlot? = nil) -> EngineModelDescriptor {
+                                  product: EngineProductSlot? = nil,
+                                  visionProjector: EngineVisionProjector? = nil) -> EngineModelDescriptor {
         let format: EngineModelFormat = switch engine {
         case .mference: .gturbo(family: .qwen36, checkpointID: nil)
         case .llamaCpp: .gguf(EngineGGUFMetadata(architecture: "fake", contextLength: contextLength,
@@ -217,13 +221,19 @@ public final class FakeEngineBackend: EngineBackend {
             location: URL(fileURLWithPath: "/nonexistent/fake-engine/\(id)"),
             sizeBytes: 0,
             contextLength: contextLength,
-            product: product)
+            product: product,
+            visionProjector: visionProjector)
     }
 }
 
 /// One loaded fake. Prompt tokens are one per whitespace-separated word plus
-/// one per message; each event costs one completion token.
+/// one per message, and `imageTokens` per image; each event costs one
+/// completion token. It accepts images only when its traits say
+/// `supportsVision`.
 public final class FakeEngineModel: EngineModel {
+    /// Prompt tokens one image costs.
+    public static let imageTokens = 16
+
     public let descriptor: EngineModelDescriptor
     public let traits: EngineModelTraits
     private let script: FakeEngineScript
@@ -248,17 +258,21 @@ public final class FakeEngineModel: EngineModel {
 
     public func prepare(_ request: EngineRequest) async throws -> EnginePreparedPrompt {
         guard !isUnloaded else { throw EngineError.modelUnloaded(descriptor.id) }
+        try request.validateMedia(supportsVision: traits.supportsVision)
         var count = 0
         for message in request.messages {
             count += 1 + (message.content ?? "").split(whereSeparator: \.isWhitespace).count
         }
-        guard count < traits.maxContext else {
+        let imageTokens = request.orderedMedia.count * Self.imageTokens
+        guard count + imageTokens < traits.maxContext else {
             throw EngineError.invalidRequest(message: "prompt exceeds the configured context",
                                              param: "messages", code: "context_length_exceeded")
         }
-        return EnginePreparedPrompt(request: request,
-                                    promptTokens: (0..<count).map { Int32($0) },
-                                    needsToolTemplate: request.needsToolTemplate)
+        return EnginePreparedPrompt(
+            request: request,
+            promptTokens: (0..<count).map { Int32($0) }
+                + Array(repeating: EngineMedia.placeholderToken, count: imageTokens),
+            needsToolTemplate: request.needsToolTemplate)
     }
 
     public func generate(_ prepared: EnginePreparedPrompt,
