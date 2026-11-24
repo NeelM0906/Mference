@@ -16,11 +16,14 @@ public struct ChatMessageItem: Sendable, Hashable, Identifiable {
     public var model: AppModel?
     public var finish: ChatFinish?
     public var isStreaming: Bool
+    /// Files sent with a user message.
+    public var attachments: [ChatAttachment]
 
     public init(id: UUID = UUID(), role: Role, content: String, reasoning: String? = nil,
                 steps: [ChatStep] = [], citations: [ChatCitation] = [], model: AppModel? = nil,
-                finish: ChatFinish? = nil, isStreaming: Bool = false) {
+                finish: ChatFinish? = nil, isStreaming: Bool = false, attachments: [ChatAttachment] = []) {
         self.id = id
+        self.attachments = attachments
         self.role = role
         self.content = content
         self.reasoning = reasoning
@@ -41,7 +44,8 @@ public struct ChatMessageItem: Sendable, Hashable, Identifiable {
         messages.compactMap { message in
             switch message.role {
             case .user:
-                return ChatMessageItem(id: message.id, role: .user, content: message.content)
+                return ChatMessageItem(id: message.id, role: .user, content: message.content,
+                                       attachments: message.attachments)
             case .assistant where message.toolCalls.isEmpty || message.finish == .cancelled
                 || message.finish == .failed:
                 return ChatMessageItem(id: message.id, role: .assistant, content: message.content,
@@ -53,6 +57,35 @@ public struct ChatMessageItem: Sendable, Hashable, Identifiable {
             }
         }
     }
+}
+
+/// A file in the composer, before it is sent: being read, ready, or not
+/// readable (its chip says why).
+public struct PendingAttachment: Sendable, Hashable, Identifiable {
+    public enum State: Sendable, Hashable {
+        case reading
+        case ready(ChatAttachment)
+        case failed(String)
+    }
+
+    public var id: UUID
+    public var filename: String
+    public var kind: ChatAttachment.Kind
+    public var state: State
+
+    public init(id: UUID = UUID(), filename: String, kind: ChatAttachment.Kind, state: State = .reading) {
+        self.id = id
+        self.filename = filename
+        self.kind = kind
+        self.state = state
+    }
+
+    public var attachment: ChatAttachment? {
+        if case .ready(let attachment) = state { return attachment }
+        return nil
+    }
+
+    public var isReading: Bool { state == .reading }
 }
 
 /// The chat screen's state and actions (spec 4.3). Streams through
@@ -71,6 +104,8 @@ public final class ChatViewModel {
     /// The model a new chat starts with (Settings' default model), read each
     /// time a chat is started so a change applies to the next one.
     @ObservationIgnored private let defaultModel: @MainActor () -> AppModel
+    /// Reads attached files into text on this Mac.
+    @ObservationIgnored private let attachmentReader: ChatAttachmentReader
     /// How often streamed text reaches the view.
     @ObservationIgnored public var flushInterval: Duration = .milliseconds(30)
     /// Tool rounds per answer before the model must answer without tools.
@@ -92,6 +127,8 @@ public final class ChatViewModel {
         return streaming
     }
     public var draft = ""
+    /// Files in the composer, waiting to be sent with the next message.
+    public private(set) var pendingAttachments: [PendingAttachment] = []
     public private(set) var isGenerating = false
     public var errorMessage: String? {
         didSet { if errorMessage == nil { canRetryAfterError = false } }
@@ -130,8 +167,10 @@ public final class ChatViewModel {
     public init(service: any EngineServicing, store: ConversationStore,
                 tools: (any ChatToolboxProvider)? = nil,
                 files: (any ChatFilesProviding)? = nil,
-                defaultModel: @escaping @MainActor () -> AppModel = { .quick }) {
+                defaultModel: @escaping @MainActor () -> AppModel = { .quick },
+                attachmentReader: ChatAttachmentReader = ChatAttachmentReader()) {
         self.service = service
+        self.attachmentReader = attachmentReader
         self.store = store
         self.tools = tools
         self.files = files
@@ -194,10 +233,12 @@ public final class ChatViewModel {
         filesEnabled = false
         self.isPrivate = isPrivate
         title = Conversation.defaultTitle
+        pendingAttachments = []
     }
 
     public func select(_ id: UUID) {
         guard let conversation = try? store.conversation(id: id) else { return }
+        let previous = selectedID
         selectedID = id
         errorMessage = nil
         historyTrimmed = false
@@ -207,6 +248,7 @@ public final class ChatViewModel {
         filesEnabled = files?.filesEnabled(for: id) ?? false
         isPrivate = conversation.isPrivate
         title = conversation.title
+        if selectedID != previous { pendingAttachments = [] }
         messages = ChatMessageItem.items(from: conversation.orderedMessages)
         warmUp(model)
     }
@@ -375,12 +417,58 @@ public final class ChatViewModel {
     // MARK: Sending
 
     public var canSend: Bool {
-        !isGenerating && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !isGenerating, !pendingAttachments.contains(where: \.isReading) else { return false }
+        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || pendingAttachments.contains { $0.attachment != nil }
+    }
+
+    // MARK: Attachments
+
+    /// Whether another file can be added to this message.
+    public var canAttach: Bool { pendingAttachments.count < ChatAttachmentReader.maxAttachments }
+
+    /// Adds files to the next message and reads them into text on this Mac.
+    /// Files that cannot be attached show why on their chip.
+    public func attach(_ urls: [URL]) {
+        for url in urls {
+            guard canAttach else { break }
+            guard let kind = ChatAttachmentReader.kind(of: url) else {
+                pendingAttachments.append(PendingAttachment(
+                    filename: url.lastPathComponent, kind: .document,
+                    state: .failed(ChatAttachmentReader.isAppleFormat(url) ? "Export it as PDF to attach it"
+                                                                           : "This kind of file can’t be read")))
+                continue
+            }
+            let pending = PendingAttachment(filename: url.lastPathComponent, kind: kind)
+            pendingAttachments.append(pending)
+            let reader = attachmentReader
+            Task { [weak self] in
+                let result = await reader.read(url)
+                guard let self, let index = self.pendingAttachments.firstIndex(where: { $0.id == pending.id })
+                else { return }
+                switch result {
+                case .success(let attachment): self.pendingAttachments[index].state = .ready(attachment)
+                case .failure(let error): self.pendingAttachments[index].state = .failed(error.message)
+                }
+            }
+        }
+    }
+
+    public func removeAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    /// Waits until every pending file has been read (tests).
+    public func waitForAttachments() async {
+        while pendingAttachments.contains(where: \.isReading) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     public func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isGenerating, !text.isEmpty else { return }
+        let attachments = pendingAttachments.compactMap(\.attachment)
+        guard canSend, !text.isEmpty || !attachments.isEmpty else { return }
         errorMessage = nil
         do {
             let conversation = try selectedConversation
@@ -389,10 +477,13 @@ public final class ChatViewModel {
                 selectedID = conversation.id
             }
             if filesEnabled { files?.setFilesEnabled(true, for: conversation.id) }
-            let message = try store.append(to: conversation, role: .user, content: text, now: now())
+            let message = try store.append(to: conversation, role: .user, content: text, now: now()) {
+                $0.attachments = attachments
+            }
             draft = ""
+            pendingAttachments = []
             title = conversation.title
-            messages.append(ChatMessageItem(id: message.id, role: .user, content: text))
+            messages.append(ChatMessageItem(id: message.id, role: .user, content: text, attachments: attachments))
             reloadConversations()
             answer(in: conversation)
         } catch {

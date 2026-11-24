@@ -76,15 +76,18 @@ public final class MenuBarModel {
 public struct MenuBarActions {
     public var openWindow: () -> Void
     public var newChat: () -> Void
+    public var newPrivateChat: () -> Void
     public var selectModel: (AppModel) -> Void
     public var openSettings: () -> Void
     public var quit: () -> Void
 
     public init(openWindow: @escaping () -> Void, newChat: @escaping () -> Void,
+                newPrivateChat: @escaping () -> Void,
                 selectModel: @escaping (AppModel) -> Void, openSettings: @escaping () -> Void,
                 quit: @escaping () -> Void) {
         self.openWindow = openWindow
         self.newChat = newChat
+        self.newPrivateChat = newPrivateChat
         self.selectModel = selectModel
         self.openSettings = openSettings
         self.quit = quit
@@ -126,6 +129,8 @@ public struct MenuBarMenu: View {
                 .keyboardShortcut("0")
             Button("New Chat", action: actions.newChat)
                 .keyboardShortcut("n")
+            Button("New Private Chat", action: actions.newPrivateChat)
+                .keyboardShortcut("n", modifiers: [.command, .shift])
         }
         Section {
             Menu("Model") {

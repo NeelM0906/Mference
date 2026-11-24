@@ -131,13 +131,29 @@ struct ChatDetail: View {
                 .foregroundStyle(MFColor.ink)
                 .lineLimit(1)
                 .accessibilityAddTraits(.isHeader)
-            if model.isPrivate {
-                ChatChip(systemImage: "lock", title: "Private")
-            }
+            privateToggle
             Spacer(minLength: 0)
         }
         .padding(.horizontal, MFSpacing.xl)
         .padding(.vertical, MFSpacing.m)
+    }
+
+    /// Private on or off for this chat (private chats never feed memory).
+    private var privateToggle: some View {
+        Button {
+            model.setPrivate(!model.isPrivate)
+        } label: {
+            ChatChip(systemImage: model.isPrivate ? "lock" : "lock.open",
+                     title: model.isPrivate ? "Private" : "Not private",
+                     foreground: model.isPrivate ? MFColor.secondary : MFColor.tertiary)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(model.isPrivate ? "Private: never used for memory. Click to make it a regular chat."
+                              : "Click to make this chat private: it is never used for memory.")
+        .accessibilityLabel("Private chat")
+        .accessibilityValue(model.isPrivate ? "On" : "Off")
+        .accessibilityAddTraits(.isToggle)
     }
 }
 
