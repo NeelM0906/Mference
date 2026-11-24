@@ -189,7 +189,8 @@ public enum WeekAskCheckpoint {
         ["thanksgiving": WeekContext(week: thanksgivingWeek, focus: nil),
          "work": WeekContext(week: workWeek(day: 15), focus: nil),
          "workThursday": WeekContext(week: workWeek(day: 17), focus: nil),
-         "busy": WeekContext(week: busyWeek, focus: nil)]
+         "busy": WeekContext(week: busyWeek, focus: nil),
+         "holdout": WeekContext(week: holdoutWeek, focus: nil)]
     }
 
     // MARK: The questions and their key
@@ -406,10 +407,11 @@ public enum WeekAskCheckpoint {
         public var error: String?
     }
 
-    /// The key, as JSON lines for the record (written before any run).
-    public static func keyLines() -> [String] {
+    /// The key, as JSON lines for the record (written before any run):
+    /// `questions`, or `set` (the holdout).
+    public static func keyLines(_ set: [Question] = questions) -> [String] {
         let contexts = contexts
-        return questions.compactMap { question -> String? in
+        return set.compactMap { question -> String? in
             guard let context = contexts[question.week] else { return nil }
             var object: [String: Any] = ["id": question.id, "week": question.week, "question": question.text,
                                          "followUp": question.followUp]
@@ -465,15 +467,17 @@ public enum WeekAskCheckpoint {
 
     /// Asks every question with `model` (already resident), as the app
     /// would: a thread carries on for follow-ups, a chip starts one in
-    /// Swift. Each typed answer is also written to `log`. `only` (IDs)
-    /// asks just those questions, each with the thread before it.
-    public static func run(model: any WeekLanguageModel, log: WeekAskLog?, only: Set<String>? = nil,
+    /// Swift. Each typed answer is also written to `log`. `set` is the
+    /// question set (`questions`, or `holdoutQuestions`); `only` (IDs) asks
+    /// just those questions, each with the thread before it.
+    public static func run(model: any WeekLanguageModel, log: WeekAskLog?, set: [Question] = questions,
+                           only: Set<String>? = nil,
                            progress: @Sendable (Result) -> Void = { _ in }) async -> [Result] {
         let contexts = contexts
         let answerer = WeekAnswerer(picker: .fixed(model), review: { .timeWarning }, log: log)
         var results: [Result] = []
         var thread: [WeekAnswer] = []
-        for question in selected(only) {
+        for question in selected(only, from: set) {
             guard let context = contexts[question.week] else { continue }
             if !question.followUp { thread = [] }
             var result: Result
@@ -503,7 +507,8 @@ public enum WeekAskCheckpoint {
 
     /// The questions `only` names, each with the earlier questions of its
     /// thread; every question when `only` is nil.
-    public static func selected(_ only: Set<String>?) -> [Question] {
+    public static func selected(_ only: Set<String>?, from set: [Question] = questions) -> [Question] {
+        let questions = set
         guard let only else { return questions }
         var keep = Set<Int>()
         for (index, question) in questions.enumerated() where only.contains(question.id) {

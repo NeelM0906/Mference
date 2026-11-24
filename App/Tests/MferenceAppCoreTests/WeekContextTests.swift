@@ -68,8 +68,11 @@ import Testing
         #expect(past[0]["relative"] as? String == "yesterday")
         // Past days: events and booked time only.
         #expect(past[0]["free"] == nil)
-        #expect(past[0]["open_minutes"] == nil)
-        #expect(past[0]["booked_minutes"] as? Int == 150)
+        #expect(past[0]["open"] == nil)
+        // Totals come as one formatted length and a count, never as a
+        // second minute figure to misread.
+        #expect(past[0]["booked_minutes"] == nil)
+        #expect(past[0]["event_count"] as? Int == 2)
         #expect(past[0]["booked"] as? String == "2 h 30 min")
         let events = try #require(past[0]["events"] as? [[String: Any]])
         #expect(events.map { $0["id"] as? String } == ["E9", "E10"])
@@ -117,10 +120,11 @@ import Testing
         #expect(free.map { $0["minutes"] as? Int } == [30, 120, 240])
         #expect(free.map { $0["length"] as? String } == ["30 min", "2 h", "4 h"])
         #expect(free.allSatisfy { $0["id"] == nil })
-        #expect(tuesday["booked_minutes"] as? Int == 90)
         #expect(tuesday["booked"] as? String == "1 h 30 min")
-        #expect(tuesday["open_minutes"] as? Int == 390)
         #expect(tuesday["open"] as? String == "6 h 30 min")
+        #expect(tuesday["event_count"] as? Int == 2)
+        #expect(tuesday["booked_minutes"] == nil)
+        #expect(tuesday["open_minutes"] == nil)
         // Only events and to-dos have IDs: nothing the model sees names open time.
         #expect(Self.context().facts.allSatisfy { $0.id.hasPrefix("E") || $0.id.hasPrefix("T") })
     }
@@ -132,7 +136,7 @@ import Testing
         let thursday = try Self.days(Self.object(context))[2]
         #expect(thursday["busy_all_day"] as? Bool == true)
         #expect((thursday["free"] as? [Any])?.isEmpty == true)
-        #expect(thursday["open_minutes"] as? Int == 0)
+        #expect(thursday["open"] as? String == "0 min")
         let offsite = try #require((thursday["events"] as? [[String: Any]])?.first)
         #expect(offsite["id"] as? String == "E5")
         #expect(offsite["all_day"] as? Bool == true)
@@ -161,7 +165,7 @@ import Testing
         #expect(wfh["title"] as? String == "WFH")
         #expect(wfh["shows_as"] as? String == "free")
         let tuesday = days[0]
-        #expect(tuesday["booked_minutes"] as? Int == 90)
+        #expect(tuesday["booked"] as? String == "1 h 30 min")
         #expect((tuesday["free"] as? [[String: Any]])?.last?["from"] as? String == "1 PM")
         #expect(context.overlaps.isEmpty)
     }
@@ -259,7 +263,7 @@ import Testing
         let thursday = try #require(days.first { $0["date"] as? String == "2026-11-26" })
         #expect((thursday["events"] as? [[String: Any]])?.first?["title"] as? String == "Thanksgiving")
         #expect(thursday["busy_all_day"] == nil)
-        #expect(thursday["open_minutes"] as? Int == 480)
+        #expect(thursday["open"] as? String == "8 h")
     }
 
     // MARK: Size

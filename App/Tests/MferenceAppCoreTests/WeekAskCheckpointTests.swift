@@ -14,7 +14,7 @@ import Testing
 
         init() {
             var replies: [String: String] = [:]
-            for question in WeekAskCheckpoint.questions {
+            for question in WeekAskCheckpoint.questions + WeekAskCheckpoint.holdoutQuestions {
                 guard let expected = question.expected else { continue }
                 replies[question.text] = expected.routes.first == .freeQuery
                     ? expected.queries.first?.json ?? #"{"free_query": {}}"#
@@ -118,6 +118,32 @@ import Testing
         #expect(wrongShape.shapeCorrect == false)
     }
 
+    @Test func theHoldoutIsANewWeekWithNewQuestions() async throws {
+        let holdout = WeekAskCheckpoint.holdoutQuestions
+        let typed = holdout.filter { $0.chip == nil }
+        #expect((15...20).contains(typed.count))
+        #expect(Set(holdout.map(\.week)) == ["holdout"])
+        #expect(Set(holdout.map(\.id)).isDisjoint(with: WeekAskCheckpoint.questions.map(\.id)))
+        // New phrasings: no typed question repeats one from the main set
+        // (the chip's text is Swift's own).
+        #expect(Set(typed.map(\.text)).isDisjoint(with: WeekAskCheckpoint.questions.map(\.text)))
+        let context = try #require(WeekAskCheckpoint.contexts["holdout"])
+        // Friday has no open time without being an all-day day; the retreat
+        // spans two days; Mom's visit is a multi-day banner shown as free.
+        let friday = try #require(context.days.first { context.week.text.weekday($0.date) == "Friday" })
+        #expect(friday.open.isEmpty)
+        #expect(!friday.load.isBlocked)
+        #expect(FreeTimeSearch.run(FreeQuery(days: ["2027-03-05"], part: .afternoon), in: context.week).openings.isEmpty)
+        #expect(context.overlaps.count == 1)
+        #expect(context.pastDays.count == 2)
+        #expect(WeekAskCheckpoint.keyLines(holdout).count == holdout.count)
+        // The key model passes its own key.
+        let results = await WeekAskCheckpoint.run(model: KeyModel(), log: nil, set: holdout)
+        #expect(results.count == holdout.count)
+        #expect(results.filter { !$0.chip }.allSatisfy { $0.shapeCorrect == true && $0.error == nil })
+        #expect(results.filter { $0.fieldsCorrect != nil }.allSatisfy { $0.fieldsCorrect == true })
+    }
+
     @Test func onlyAsksTheNamedQuestionsWithTheirThreads() {
         #expect(WeekAskCheckpoint.selected(nil).count == WeekAskCheckpoint.questions.count)
         #expect(WeekAskCheckpoint.selected(["G04", "G06", "G07"]).map(\.id) == ["G04", "G06", "G07"])
@@ -133,6 +159,14 @@ import Testing
     func exportKey() throws {
         let path = try #require(ProcessInfo.processInfo.environment["MFERENCE_WEEK_ASK_KEY"])
         try (WeekAskCheckpoint.keyLines().joined(separator: "\n") + "\n")
+            .write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// The holdout key: `MFERENCE_WEEK_ASK_HOLDOUT_KEY=<file>`.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MFERENCE_WEEK_ASK_HOLDOUT_KEY"] != nil))
+    func exportHoldoutKey() throws {
+        let path = try #require(ProcessInfo.processInfo.environment["MFERENCE_WEEK_ASK_HOLDOUT_KEY"])
+        try (WeekAskCheckpoint.keyLines(WeekAskCheckpoint.holdoutQuestions).joined(separator: "\n") + "\n")
             .write(toFile: path, atomically: true, encoding: .utf8)
     }
 }

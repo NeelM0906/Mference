@@ -344,6 +344,7 @@ public struct WeekContext: Sendable, Hashable {
                                               ("weekday", quoted(text.weekday(day.date)))]
             if let relative = relative(day.date) { fields.append(("relative", quoted(relative))) }
             fields.append(("events", array(day.entries.map(eventObject))))
+            fields.append(("event_count", String(day.entries.count)))
             if !past {
                 fields.append(("free", array(day.open.map { open in
                     let minutes = WeekFacts.minutes(open)
@@ -351,10 +352,8 @@ public struct WeekContext: Sendable, Hashable {
                                    ("minutes", String(minutes)), ("length", quoted(text.duration(minutes: minutes)))])
                 })))
             }
-            fields.append(("booked_minutes", String(day.load.bookedMinutes)))
             fields.append(("booked", quoted(text.duration(minutes: day.load.bookedMinutes))))
             if !past {
-                fields.append(("open_minutes", String(day.openMinutes)))
                 fields.append(("open", quoted(text.duration(minutes: day.openMinutes))))
                 if day.load.isBlocked { fields.append(("busy_all_day", "true")) }
             }

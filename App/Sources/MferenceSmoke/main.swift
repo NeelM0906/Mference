@@ -28,6 +28,8 @@ import MferenceWeekAskFixtures
 // `--model apple --week-ask` asks Apple's on-device model in-process
 // through `AssistantWeekLanguageModel` instead (no engine model loads).
 // `--questions G06,G07` asks only those (each with its thread).
+// `--holdout` asks the holdout set instead (`WeekAskCheckpoint
+// .holdoutQuestions`, a week the prompt was never tuned on).
 // Passes when every typed question got an answer.
 //
 // Warm decode: add `--warmup` to send a short request on the loaded model
@@ -121,6 +123,7 @@ var warmup = false
 var temperature: Float?
 var promptGiven = false
 var onlyQuestions: Set<String>?
+var holdout = false
 while let argument = arguments.popFirst() {
     switch argument {
     case "--model": modelName = arguments.popFirst()
@@ -134,6 +137,7 @@ while let argument = arguments.popFirst() {
     case "--temperature": temperature = arguments.popFirst().flatMap(Float.init)
     case "--max-tokens": maxTokens = arguments.popFirst().flatMap(Int.init) ?? maxTokens
     case "--commit": commit = arguments.popFirst()
+    case "--holdout": holdout = true
     case "--questions": onlyQuestions = arguments.popFirst().map { Set($0.split(separator: ",").map(String.init)) }
     default: fail("unknown argument \(argument)", code: 2)
     }
@@ -158,14 +162,19 @@ guard let swapBefore = swapUsedBytes() else { fail("cannot read vm.swapusage", c
 @MainActor func runWeekAsk(_ model: any WeekLanguageModel, name: String, into start: SmokeResult) async -> SmokeResult {
     var result = start
     let log = outDirectory.map {
-        WeekAskLog(url: $0.appending(path: "week-ask-\(name)-\(stamp).jsonl"), isEnabled: { true })
+        WeekAskLog(url: $0.appending(path: "week-ask-\(name)\(holdout ? "-holdout" : "")-\(stamp).jsonl"),
+                   isEnabled: { true })
     }
     if let outDirectory {
         try? FileManager.default.createDirectory(at: outDirectory, withIntermediateDirectories: true)
-        let key = WeekAskCheckpoint.keyLines().joined(separator: "\n") + "\n"
-        try? Data(key.utf8).write(to: outDirectory.appending(path: "week-ask-key.jsonl"))
+        let set = holdout ? WeekAskCheckpoint.holdoutQuestions : WeekAskCheckpoint.questions
+        let key = WeekAskCheckpoint.keyLines(set).joined(separator: "\n") + "\n"
+        try? Data(key.utf8).write(to: outDirectory.appending(path: holdout ? "week-ask-holdout-key.jsonl"
+                                                                          : "week-ask-key.jsonl"))
     }
-    let results = await WeekAskCheckpoint.run(model: model, log: log, only: onlyQuestions) { one in
+    let results = await WeekAskCheckpoint.run(model: model, log: log,
+                                              set: holdout ? WeekAskCheckpoint.holdoutQuestions : WeekAskCheckpoint.questions,
+                                              only: onlyQuestions) { one in
         FileHandle.standardError.write(Data("\(one.id) \(one.route ?? "error") \(one.latencyMilliseconds) ms\n".utf8))
     }
     result.weekAsk = results
