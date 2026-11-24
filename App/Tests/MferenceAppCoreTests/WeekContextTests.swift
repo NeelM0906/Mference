@@ -51,10 +51,12 @@ import Testing
         #expect(focused["looking_at"] as? String == "Wednesday 2026-09-16")
     }
 
-    @Test func daysRunFromTodayAndEarlierDaysArePastDaysListedAfter() throws {
+    @Test func daysRunFromTodayAndEarlierDaysAreWorkedOutButNotSent() throws {
         let context = Self.context()
         #expect(context.days.map(\.date) == (15...20).map { CalendarFixtures.date($0, 0) })
         #expect(context.pastDays.map(\.date) == [CalendarFixtures.date(14, 0)])
+        #expect(context.pastDays[0].load.bookedMinutes == 150)
+        #expect(context.pastDays[0].events.map(\.id) == ["E9", "E10"])
         let object = try Self.object(context)
         let days = try Self.days(object)
         #expect(days.map { $0["date"] as? String } == ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
@@ -62,24 +64,10 @@ import Testing
         #expect(days[0]["relative"] as? String == "today")
         #expect(days[1]["relative"] as? String == "tomorrow")
         #expect(days[2]["relative"] == nil)
-        let past = try Self.days(object, "past_days")
-        #expect(past.count == 1)
-        #expect(past[0]["date"] as? String == "2026-09-14")
-        #expect(past[0]["relative"] as? String == "yesterday")
-        // Past days: events and booked time only.
-        #expect(past[0]["free"] == nil)
-        #expect(past[0]["open_minutes"] == nil)
-        #expect(past[0]["booked_minutes"] as? Int == 150)
-        #expect(past[0]["booked"] as? String == "2 h 30 min")
-        let events = try #require(past[0]["events"] as? [[String: Any]])
-        #expect(events.map { $0["id"] as? String } == ["E9", "E10"])
-        #expect(events.map { $0["title"] as? String } == ["Team sync", "Focus time"])
-        // past_days comes right after days.
-        let json = context.json
-        let daysAt = try #require(json.range(of: "\"days\""))
-        let pastAt = try #require(json.range(of: "\"past_days\""))
-        let busiestAt = try #require(json.range(of: "\"busiest_day_left\""))
-        #expect(daysAt.lowerBound < pastAt.lowerBound && pastAt.lowerBound < busiestAt.lowerBound)
+        // The past-day gate's contingency: earlier days are not in the
+        // prompt; a question about one gets {"day_query"}.
+        #expect(object["past_days"] == nil)
+        #expect(!context.json.contains("Team sync"))
     }
 
     @Test func aWeekThatIsAllOverHasNoDaysLeft() throws {
@@ -92,6 +80,7 @@ import Testing
         #expect(context.pastDays.count == 7)
         #expect(context.busiest == nil)
         #expect(!context.json.contains("\"free\""))
+        #expect(try Self.days(Self.object(context)).isEmpty)
     }
 
     @Test func eventsCarryIDsLengthsAndFormattedTimes() throws {

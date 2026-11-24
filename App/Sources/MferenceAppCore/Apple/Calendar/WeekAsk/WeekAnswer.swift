@@ -4,6 +4,10 @@ import Foundation
 /// reply was not JSON.
 public enum WeekReplyRoute: String, Sendable, Hashable, Codable {
     case freeQuery = "free_query"
+    /// An earlier day of the week, which the schedule leaves out: Swift
+    /// answers it from the week it loaded (the past-day gate's
+    /// contingency, spec "Evaluation").
+    case dayQuery = "day_query"
     case answer
     case prose
 }
@@ -13,6 +17,8 @@ public enum WeekReplyRoute: String, Sendable, Hashable, Codable {
 public enum WeekAnswerRecord: Sendable, Hashable {
     /// A free-time search Swift answered.
     case freeQuery(FreeQuery)
+    /// A day Swift read out ("2026-09-14").
+    case dayQuery(String)
     /// A lookup: the model's sentence (or a chip's) and the facts it cited.
     case lookup(answer: String, refs: [WeekFact])
     /// A reply that was not JSON: shown, but never replayed.
@@ -111,6 +117,7 @@ public struct WeekAnswer: Sendable, Hashable, Identifiable {
     public func replay(in context: WeekContext) -> String? {
         switch record {
         case .freeQuery(let query): return query.json
+        case .dayQuery(let day): return "{\"day_query\": \"\(day)\"}"
         case .lookup(let answer, let refs):
             let ids = refs.compactMap { context.fact(matching: $0)?.id }
             let object: [String: Any] = ["answer": answer, "refs": ids]

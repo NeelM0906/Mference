@@ -59,7 +59,8 @@ import Testing
         #expect(!prompt.contains("2026"))
         #expect(prompt.contains(#"{"free_query": {"min_minutes": 120}}"#))
         #expect(prompt.contains(#"{"answer": "The budget meeting is Wednesday from 10 to 11 AM.", "refs": ["E4"]}"#))
-        #expect(prompt.contains(#"read "past_days" only when the question names an earlier day of this week"#))
+        #expect(prompt.contains(#"{"day_query": "yesterday"}"#))
+        #expect(prompt.contains("Examples, from a made-up calendar, for the format only:"))
         let other = WeekContext(week: WeekAskThanksgivingCase.week, focus: nil)
         #expect(WeekAnswerer.turns("q", context: other, history: [])[0].content == prompt)
     }
@@ -92,6 +93,28 @@ import Testing
             #"{"answer": "You're free at 7 PM.", "refs": ["E1"], "free_query": {"days": ["Friday"]}}"#)
         #expect(answer.trace?.route == .freeQuery)
         #expect(answer.sentence == "2 openings on Friday: 11 AM to 1 PM and 1:30 to 5 PM.")
+    }
+
+    // MARK: An earlier day
+
+    @Test func aDayQueryIsAnsweredBySwiftFromTheLoadedWeek() async throws {
+        let answer = try await Self.ask(#"{"day_query": "Monday"}"#, "How much time was booked on Monday?")
+        #expect(answer.sentence == "Monday: 2 events, 2 h 30 min booked.")
+        #expect(answer.rows.map(\.id) == ["E9", "E10"])
+        #expect(answer.record == .dayQuery("2026-09-14"))
+        #expect(answer.source == .calendar(askedBy: "Deep 27B"))
+        #expect(answer.trace?.route == .dayQuery)
+        #expect(answer.replay(in: Self.context()) == #"{"day_query": "2026-09-14"}"#)
+        let iso = try await Self.ask(#"{"day_query": "2026-09-14"}"#)
+        #expect(iso.record == .dayQuery("2026-09-14"))
+        let outside = try await Self.ask(#"{"day_query": "2026-10-12"}"#)
+        #expect(outside.sentence == "I'm looking at Sep 14 to 20. Go to that week to check Oct 12.")
+        #expect(outside.record == .prose)
+        let unreadable = try await Self.ask(#"{"day_query": "someday"}"#)
+        #expect(unreadable.sentence == "That day isn't in this week's calendar.")
+        // free_query still wins over every other shape.
+        let both = try await Self.ask(#"{"day_query": "Monday", "free_query": {"days": ["Friday"]}}"#)
+        #expect(both.trace?.route == .freeQuery)
     }
 
     // MARK: Lookups

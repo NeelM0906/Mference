@@ -74,7 +74,7 @@ import Testing
             picker: WeekModelPicker(engine: engine, appleModel: nil, useAppleModel: { false })))
     }
 
-    @Test @MainActor func aFollowUpTheNextDayReadsANewSchedule() async throws {
+    @Test @MainActor func aFollowUpTheNextDayReadsANewSchedule() async {
         let engine = Self.engine()
         let clock = Clock()
         let ask = await Self.setUp(engine: engine, clock: clock)
@@ -89,10 +89,8 @@ import Testing
         #expect(third.map(\.role) == [.system, .user, .assistant, .user, .assistant, .user])
         let schedule = third[1].content ?? ""
         #expect(schedule.contains(#""now": "Wednesday 2026-09-16, 9 AM""#))
-        // Tuesday is a past day now.
-        let past = try #require(schedule.range(of: #""past_days""#))
-        let coffee = try #require(schedule.range(of: "Coffee with Tom"))
-        #expect(coffee.lowerBound > past.lowerBound)
+        // Tuesday is over: it is no longer in the schedule.
+        #expect(!schedule.contains("Coffee with Tom"))
     }
 
     @Test @MainActor func aFollowUpAfterOpenTimeHasPassedReadsANewSchedule() async {

@@ -158,6 +158,7 @@ public struct FreeQuery: Sendable, Hashable {
         switch word {
         case "today": return [place(week.today)]
         case "tomorrow": return calendar.date(byAdding: .day, value: 1, to: week.today).map { [place($0)] } ?? []
+        case "yesterday": return calendar.date(byAdding: .day, value: -1, to: week.today).map { [place($0)] } ?? []
         case "weekend", "this weekend": return week.days.filter { calendar.isDateInWeekend($0) }.map { .inside($0) }
         default: break
         }
