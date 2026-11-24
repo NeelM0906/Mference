@@ -58,6 +58,13 @@ import Testing
         #expect(FreeQuery.clockMinutes("lunch") == nil)
     }
 
+    @Test func aLengthPastADayIsUnreadableNotACrash() throws {
+        #expect(try Self.decode(#"{"free_query": {"min_minutes": 9223372036854775807}}"#).minMinutes == nil)
+        #expect(try Self.decode(#"{"free_query": {"min_minutes": "99999999999999999999"}}"#).minMinutes == nil)
+        #expect(try Self.decode(#"{"free_query": {"min_minutes": 1e300}}"#).minMinutes == nil)
+        #expect(try Self.decode(#"{"free_query": {"min_minutes": 1440}}"#).minMinutes == 1440)
+    }
+
     @Test func tonightIsTheEvening() throws {
         #expect(try Self.decode(#"{"free_query": {"part": "tonight"}}"#).part == .evening)
     }

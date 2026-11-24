@@ -527,4 +527,17 @@ import Testing
         ask.refreshFreeTime()
         #expect(ask.answers[0].sentence == "Lunch is at noon.")
     }
+
+    @Test @MainActor func blockWaitsWhileAQuestionIsAnswered() async throws {
+        let (_, ask) = await Self.setUp(engine: Self.engine(delay: .milliseconds(40)))
+        await ask.ask(.freeOn(CalendarFixtures.date(18, 0)))
+        let slot = try #require(ask.highlightedOpenTimes.first)
+        let running = Task { await ask.ask("and after that?") }
+        for _ in 0..<200 where ask.pending == nil { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(!ask.canBlock)
+        await ask.block(slot)
+        #expect(ask.blocked.isEmpty)
+        await running.value
+        #expect(ask.canBlock)
+    }
 }

@@ -77,7 +77,9 @@ public struct FreeQuery: Sendable, Hashable {
     public static func decode(_ value: Any?, in week: WeekSnapshot) -> FreeQuery {
         guard let object = value as? [String: Any] else { return FreeQuery() }
         var query = FreeQuery()
-        if let minutes = integer(object["min_minutes"]), minutes > 0 { query.minMinutes = minutes }
+        // A length past a whole day cannot be met; it is unreadable, not
+        // a number to multiply.
+        if let minutes = integer(object["min_minutes"]), (1...24 * 60).contains(minutes) { query.minMinutes = minutes }
         let named: [String] = switch object["days"] {
         case let list as [Any]: list.compactMap { $0 as? String }
         case let one as String: [one]
@@ -105,9 +107,11 @@ public struct FreeQuery: Sendable, Hashable {
 
     static func integer(_ value: Any?) -> Int? {
         switch value {
-        case let number as NSNumber: return Int(truncating: number)
+        case let number as NSNumber:
+            let value = number.doubleValue
+            return value.isFinite && abs(value) < 1_000_000 ? Int(value) : nil
         case let text as String:
-            let digits = text.trimmingCharacters(in: .whitespaces).prefix { $0.isNumber }
+            let digits = text.trimmingCharacters(in: .whitespaces).prefix { $0.isNumber }.prefix(7)
             return Int(digits)
         default: return nil
         }

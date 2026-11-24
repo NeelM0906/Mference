@@ -84,8 +84,13 @@ public final class WeekAskModel {
     public var isFull: Bool { answers.count >= Self.maximumQuestions }
 
     public var canAsk: Bool {
-        pending == nil && !isFull && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        pending == nil && blocking.isEmpty && !isFull && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    /// Block is offered only while no question is being answered: an
+    /// answer worked out from a read taken before the Block would offer the
+    /// time it took.
+    public var canBlock: Bool { pending == nil && !isStale }
 
     /// The latest answer, unless it is out of date.
     public var current: WeekAnswer? { isStale ? nil : answers.last }
@@ -145,7 +150,8 @@ public final class WeekAskModel {
                                              @escaping @Sendable (WeekAskStep) async -> Void) async throws -> WeekAnswer
 
     private func run(_ question: String, answering: @escaping Answering) async {
-        guard pending == nil else { return }
+        // A Block still being written is not in Calendar's read yet.
+        guard pending == nil, blocking.isEmpty else { return }
         scopeChanged()
         guard !isFull else {
             notice = WeekAskNotice(text: "Three questions is the limit here. Continue in Chat to keep going with this "
@@ -223,8 +229,8 @@ public final class WeekAskModel {
             // No answer: the question is not used up and goes back in the box.
             if !(error is CancellationError) {
                 notice = WeekAskNotice(text: Self.message(for: error), canUndo: false)
-                draft = question
             }
+            draft = question
         }
         // Stop, Clear or a newer question may have taken over during the
         // last wait: their state is not this question's to clear.
@@ -383,7 +389,7 @@ public final class WeekAskModel {
     /// only on the person's click), with Undo. Refused once its start has
     /// passed.
     public func block(_ openTime: DateInterval) async {
-        guard blocked[openTime] == nil, !blocking.contains(openTime) else { return }
+        guard canBlock, blocked[openTime] == nil, !blocking.contains(openTime) else { return }
         guard !hasStarted(openTime) else {
             notice = WeekAskNotice(text: "That opening has started. Ask again for the time left.", canUndo: false)
             return

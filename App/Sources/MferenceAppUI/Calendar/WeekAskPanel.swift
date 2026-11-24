@@ -371,7 +371,7 @@ struct WeekFactRow: View {
                 Spacer(minLength: 0)
                 if ask.blocked[interval] != nil {
                     Text("Added").font(MFFont.caption.weight(.semibold)).foregroundStyle(MFColor.success)
-                } else if !ask.isStale, !ask.hasStarted(interval) {
+                } else if ask.canBlock, !ask.hasStarted(interval) {
                     let block = ask.blockInterval(for: interval)
                     Button("Block") { Task { await ask.block(interval) } }
                         .buttonStyle(.plain)
