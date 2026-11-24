@@ -108,7 +108,8 @@ carries no image decoders.
   fills. Images are never drafted: a request with images on Deep decodes
   plainly, without MTP, and the next request starts from an empty memory.
 - Prefix reuse keys the cache by position, with an image's positions keyed
-  by its hash. A later turn that resends the same images reuses the KV
+  by its hash, and the cache checks each image's full SHA-256 before it
+  reuses through it. A later turn that resends the same images reuses the KV
   through them; a changed image is where reuse stops.
 - The projector loads (`mtmd_init_from_file`) on the first request that
   carries an image and stays until the model unloads, so a text-only session

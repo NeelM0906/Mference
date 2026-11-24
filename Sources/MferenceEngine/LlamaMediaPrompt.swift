@@ -58,8 +58,21 @@ struct LlamaMediaLayout: Equatable {
 
     var totalPositions: Int { segments.reduce(0) { $0 + $1.positions } }
 
-    /// Negative keys for an image's positions. The first comes from the
-    /// hash's leading 31 bits, so two different images differ at once.
+    /// Each image's first position and full hash, which the prompt cache
+    /// checks before it reuses through an image (its keys alone are short).
+    var mediaStarts: [Int: String] {
+        var starts: [Int: String] = [:]
+        var position = 0
+        for segment in segments {
+            if case .media(_, _, let hash) = segment { starts[position] = hash }
+            position += segment.positions
+        }
+        return starts
+    }
+
+    /// Negative keys for an image's positions, from the hash's leading 31
+    /// bits. Different images can share them; the prompt cache tells them
+    /// apart by full hash (`mediaStarts`).
     static func mediaKeys(hash: String, positions: Int) -> [Int32] {
         let base = UInt32(hash.prefix(8), radix: 16) ?? 0
         return (0..<positions).map { offset in
