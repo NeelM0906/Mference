@@ -14,10 +14,10 @@ public struct ClockRange: Sendable, Hashable {
 
 /// The schedule a model answers from, as one JSON object (spec "The
 /// schedule sent to the model"): the week from today on (`days`, with open
-/// time and booked time worked out), the busiest day left, overlaps and
-/// to-dos. The earlier days of the week are worked out (`pastDays`) but not
-/// sent: the past-day gate failed with them in the prompt, so a question
-/// about an earlier day gets `{"day_query"}` instead, which Swift answers. Events and to-dos carry IDs the answer can cite;
+/// time and booked time worked out), the earlier days of the week
+/// (`past_days`, events and booked time only), the busiest day left,
+/// overlaps (with both titles, so an answer names them) and to-dos. Events
+/// and to-dos carry IDs the answer can cite;
 /// open time carries none, so highlights and Block only ever come from
 /// Swift. Lengths come pre-formatted next to their minutes. The person's own
 /// all-day events take a whole day; a subscribed holiday, or an event shown
@@ -384,9 +384,13 @@ public struct WeekContext: Sendable, Hashable {
                 days.isEmpty ? "[]" : "[\n" + days.map { "    " + dayObject($0, past: past) }.joined(separator: ",\n") + "\n  ]"
             }
             top.append(("days", list(listed, past: false)))
+            top.append(("past_days", list(past, past: true)))
             top.append(("busiest_day_left", busiestValue()))
             top.append(("overlaps", array(overlaps.map { overlap in
                 object([("ids", array([quoted(overlap.first.id), quoted(overlap.second.id)])),
+                        ("events", array([overlap.first, overlap.second].compactMap { fact in
+                            if case .event(let event) = fact.kind { quoted(WeekContext.clean(event.title)) } else { nil }
+                        })),
                         ("date", quoted(isoFormatter.string(from: overlap.interval.start))),
                         ("from", quoted(text.time(overlap.interval.start))),
                         ("to", quoted(text.time(overlap.interval.end)))])

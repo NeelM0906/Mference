@@ -22,7 +22,7 @@ import Testing
 
     static func answerer(_ engine: ScriptedEngineService, review: WeekAnswerReview = .timeWarning,
                          log: WeekAskLog? = nil) -> WeekAnswerer {
-        WeekAnswerer(picker: WeekModelPicker(engine: engine, appleModel: nil, useAppleModel: { false }),
+        WeekAnswerer(picker: WeekModelPicker(engine: engine),
                      review: { review }, log: log)
     }
 
@@ -59,7 +59,11 @@ import Testing
         #expect(!prompt.contains("2026"))
         #expect(prompt.contains(#"{"free_query": {"min_minutes": 120}}"#))
         #expect(prompt.contains(#"{"answer": "The budget meeting is Wednesday from 10 to 11 AM.", "refs": ["E4"]}"#))
-        #expect(prompt.contains(#"{"day_query": "yesterday"}"#))
+        #expect(prompt.contains(#"read "past_days" only when the question asks about the past"#))
+        #expect(prompt.contains(#"Am I free tonight?\#n{"free_query": {"days": ["today"], "part": "evening"}}"#))
+        #expect(prompt.contains("IDs go only in refs."))
+        #expect(prompt.contains("even for a date outside this week"))
+        #expect(!prompt.contains("day_query"))
         #expect(prompt.contains("Examples, from a made-up calendar, for the format only:"))
         let other = WeekContext(week: WeekAskThanksgivingCase.week, focus: nil)
         #expect(WeekAnswerer.turns("q", context: other, history: [])[0].content == prompt)
@@ -95,26 +99,14 @@ import Testing
         #expect(answer.sentence == "2 openings on Friday: 11 AM to 1 PM and 1:30 to 5 PM.")
     }
 
-    // MARK: An earlier day
+    // MARK: Days the model names
 
-    @Test func aDayQueryIsAnsweredBySwiftFromTheLoadedWeek() async throws {
-        let answer = try await Self.ask(#"{"day_query": "Monday"}"#, "How much time was booked on Monday?")
-        #expect(answer.sentence == "Monday: 2 events, 2 h 30 min booked.")
-        #expect(answer.rows.map(\.id) == ["E9", "E10"])
-        #expect(answer.record == .dayQuery("2026-09-14"))
-        #expect(answer.source == .calendar(askedBy: "Deep 27B"))
-        #expect(answer.trace?.route == .dayQuery)
-        #expect(answer.replay(in: Self.context()) == #"{"day_query": "2026-09-14"}"#)
-        let iso = try await Self.ask(#"{"day_query": "2026-09-14"}"#)
-        #expect(iso.record == .dayQuery("2026-09-14"))
-        let outside = try await Self.ask(#"{"day_query": "2026-10-12"}"#)
-        #expect(outside.sentence == "I'm looking at Sep 14 to 20. Go to that week to check Oct 12.")
-        #expect(outside.record == .prose)
-        let unreadable = try await Self.ask(#"{"day_query": "someday"}"#)
-        #expect(unreadable.sentence == "That day isn't in this week's calendar.")
-        // free_query still wins over every other shape.
-        let both = try await Self.ask(#"{"day_query": "Monday", "free_query": {"days": ["Friday"]}}"#)
-        #expect(both.trace?.route == .freeQuery)
+    @Test func nextWeekdayAndTonightResolveAsSpoken() async throws {
+        let next = try await Self.ask(#"{"free_query": {"days": ["next Tuesday"]}}"#, "Am I free next Tuesday?")
+        #expect(next.freeQuery == FreeQuery(outside: ["2026-09-22"]))
+        #expect(next.sentence == "I'm looking at Sep 14 to 20. Go to that week to check Sep 22.")
+        let tonight = try await Self.ask(#"{"free_query": {"min_minutes": 120, "part": "tonight"}}"#)
+        #expect(tonight.freeQuery == FreeQuery(minMinutes: 120, days: ["2026-09-15"], part: .evening))
     }
 
     // MARK: Lookups
@@ -350,7 +342,9 @@ import Testing
 
     @Test func appleModelGetsTheThreadWithEarlierAndCurrentQuestionLabels() async throws {
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: #"{"free_query": {"part": "morning"}}"#)
-        let answerer = WeekAnswerer(picker: WeekModelPicker(engine: nil, appleModel: apple, useAppleModel: { true }))
+        // Typed questions never pick Apple's model; the checkpoint and
+        // `MferenceSmoke --model apple` still run it through this adapter.
+        let answerer = WeekAnswerer(picker: .fixed(AssistantWeekLanguageModel(model: apple)))
         let context = Self.context()
         let first = WeekAnswerer.answer(.freeFor(minutes: 120), context: context)
         let answer = try await answerer.answer("only mornings", context: context, history: [first])
@@ -372,23 +366,16 @@ import Testing
 
     @Test func theResidentModelAnswersAndNothingIsSwapped() async {
         let engine = Self.engine()
-        let picked = await WeekModelPicker(engine: engine, appleModel: nil, useAppleModel: { true }).pick()
+        let picked = await WeekModelPicker(engine: engine).pick()
         #expect(picked?.label == "Deep 27B")
         #expect((picked as? EngineWeekLanguageModel)?.model == .deep)
     }
 
-    @Test func withNothingResidentAppleComesFirstThenQuick() async {
+    @Test func withNothingResidentQuickLoadsAndAppleIsNeverPicked() async {
         let engine = Self.engine(status: .empty)
-        let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: "")
-        #expect(await WeekModelPicker(engine: engine, appleModel: apple, useAppleModel: { true }).pick()?.label
-            == "Apple on-device")
-        #expect(await WeekModelPicker(engine: engine, appleModel: apple, useAppleModel: { false }).pick()?.label
-            == "Quick 4B")
-        apple.setAvailability(.unavailable(reason: "Not ready."))
-        #expect(await WeekModelPicker(engine: engine, appleModel: apple, useAppleModel: { true }).pick()?.label
-            == "Quick 4B")
+        #expect(await WeekModelPicker(engine: engine).pick()?.label == "Quick 4B")
         let noQuick = Self.engine(status: .empty, quickInstalled: false)
-        #expect(await WeekModelPicker(engine: noQuick, appleModel: apple, useAppleModel: { true }).pick() == nil)
+        #expect(await WeekModelPicker(engine: noQuick).pick() == nil)
         #expect(await WeekModelPicker.none.pick() == nil)
         #expect(await WeekModelPicker.fixed(EngineWeekLanguageModel(engine: noQuick, model: .deep)).pick()?.label
             == "Deep 27B")

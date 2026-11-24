@@ -49,8 +49,7 @@ public final class AppleServices {
                              calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
                              weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
-                                 picker: WeekModelPicker(engine: engine, appleModel: FoundationTextModel(),
-                                                         useAppleModel: useAppleModel),
+                                 picker: WeekModelPicker(engine: engine),
                                  review: { WeekAnswerReview.current() }, log: .live())))
     }
 
@@ -79,8 +78,7 @@ public final class AppleServices {
                                                imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans")),
                              calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
-                             weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: WeekModelPicker(
-                                 engine: engine, appleModel: nil, useAppleModel: { false }))))
+                             weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: WeekModelPicker(engine: engine))))
     }
 }
 

@@ -23,7 +23,7 @@ import Testing
         async -> (calendar: CalendarWeekModel, ask: WeekAskModel) {
         let calendar = AppleCalendarTests.model(service: service)
         await calendar.load()
-        let picker = engine.map { WeekModelPicker(engine: $0, appleModel: nil, useAppleModel: { false }) } ?? .none
+        let picker = engine.map { WeekModelPicker(engine: $0) } ?? .none
         return (calendar, WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: picker)))
     }
 
@@ -71,10 +71,10 @@ import Testing
                                          now: { clock.now }, syncsAutomatically: false)
         await calendar.load()
         return WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
-            picker: WeekModelPicker(engine: engine, appleModel: nil, useAppleModel: { false })))
+            picker: WeekModelPicker(engine: engine)))
     }
 
-    @Test @MainActor func aFollowUpTheNextDayReadsANewSchedule() async {
+    @Test @MainActor func aFollowUpTheNextDayReadsANewSchedule() async throws {
         let engine = Self.engine()
         let clock = Clock()
         let ask = await Self.setUp(engine: engine, clock: clock)
@@ -89,8 +89,10 @@ import Testing
         #expect(third.map(\.role) == [.system, .user, .assistant, .user, .assistant, .user])
         let schedule = third[1].content ?? ""
         #expect(schedule.contains(#""now": "Wednesday 2026-09-16, 9 AM""#))
-        // Tuesday is over: it is no longer in the schedule.
-        #expect(!schedule.contains("Coffee with Tom"))
+        // Tuesday is a past day now.
+        let past = try #require(schedule.range(of: #""past_days""#))
+        let coffee = try #require(schedule.range(of: "Coffee with Tom"))
+        #expect(coffee.lowerBound > past.lowerBound)
     }
 
     @Test @MainActor func aFollowUpAfterOpenTimeHasPassedReadsANewSchedule() async {

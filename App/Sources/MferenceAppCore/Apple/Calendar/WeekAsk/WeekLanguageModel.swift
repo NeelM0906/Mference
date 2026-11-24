@@ -98,7 +98,8 @@ extension GenerationUpdate {
 /// Apple's on-device model, which takes instructions and one prompt: the
 /// thread is written out in order, each question labeled "Earlier
 /// question" or "Current question" just before its `<USER QUERY>` block,
-/// and each earlier reply as the JSON it was.
+/// and each earlier reply as the JSON it was. Typed questions never pick it
+/// (`WeekModelPicker`); `MferenceSmoke --week-ask --model apple` measures it.
 public struct AssistantWeekLanguageModel: WeekLanguageModel {
     public let model: any AssistantTextModel
 
@@ -143,32 +144,29 @@ public struct AssistantWeekLanguageModel: WeekLanguageModel {
     }
 }
 
-/// Which model answers (canvas board 4): the one already in memory,
-/// whatever it is; with none, Apple's on-device model when it is switched
-/// on and ready, then Quick (L12). Never a swap. Nil when no model can run:
-/// the chips still answer, in Swift.
+/// Which model answers a typed question (canvas board 4): the engine model
+/// already in memory, whatever it is; with none, Quick (L12). Never a swap.
+/// Apple's on-device model does not answer typed questions: at the v1
+/// checkpoint it left 14 of 38 lookups wrong (an empty week, a prompt
+/// example copied as the answer), so Quick is the model Ask is measured on.
+/// Nil when no model can run: the chips still answer, in Swift.
 public struct WeekModelPicker: Sendable {
     private let engine: (any EngineServicing)?
-    private let appleModel: (any AssistantTextModel)?
-    private let useAppleModel: @Sendable () async -> Bool
     private var fixed: (any WeekLanguageModel)?
 
-    public init(engine: (any EngineServicing)?, appleModel: (any AssistantTextModel)?,
-                useAppleModel: @escaping @Sendable () async -> Bool) {
+    public init(engine: (any EngineServicing)?) {
         self.engine = engine
-        self.appleModel = appleModel
-        self.useAppleModel = useAppleModel
     }
 
     /// Always `model` (the checkpoint, tests).
     public static func fixed(_ model: any WeekLanguageModel) -> WeekModelPicker {
-        var picker = WeekModelPicker(engine: nil, appleModel: nil, useAppleModel: { false })
+        var picker = WeekModelPicker(engine: nil)
         picker.fixed = model
         return picker
     }
 
     /// No model at all (previews, and Macs with nothing installed).
-    public static let none = WeekModelPicker(engine: nil, appleModel: nil, useAppleModel: { false })
+    public static let none = WeekModelPicker(engine: nil)
 
     public func pick() async -> (any WeekLanguageModel)? {
         if let fixed { return fixed }
@@ -181,9 +179,6 @@ public struct WeekModelPicker: Sendable {
             if status.phase == .loading, let target = status.targetModel, target.isEngineModel {
                 return EngineWeekLanguageModel(engine: engine, model: target)
             }
-        }
-        if let appleModel, await useAppleModel(), await appleModel.availability() == .available {
-            return AssistantWeekLanguageModel(model: appleModel)
         }
         guard let engine else { return nil }
         // Nothing resident (or it is being released): loading Quick swaps

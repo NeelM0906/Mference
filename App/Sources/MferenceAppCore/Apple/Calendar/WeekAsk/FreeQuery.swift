@@ -71,7 +71,8 @@ public struct FreeQuery: Sendable, Hashable {
     // MARK: Reading the model's fields
 
     /// The query in a reply's `free_query` value, its days resolved inside
-    /// `week` ("Friday", "today", "tomorrow" and ISO dates). Lenient:
+    /// `week` ("Friday", "next Friday", "today", "tonight", "tomorrow" and
+    /// ISO dates). Lenient:
     /// numbers may come as strings, and an unreadable field is left at its
     /// default.
     public static func decode(_ value: Any?, in week: WeekSnapshot) -> FreeQuery {
@@ -99,6 +100,14 @@ public struct FreeQuery: Sendable, Hashable {
         }
         if let text = (object["part"] as? String)?.lowercased().trimmingCharacters(in: .whitespaces) {
             query.part = Part(rawValue: text) ?? (text == "tonight" ? .evening : nil)
+            // "Tonight" names the day too.
+            if text == "tonight", named.isEmpty {
+                switch resolve("today", in: week).first {
+                case .inside(let today): query.days = [WeekContext.isoDate(today, in: week.calendar)]
+                case .outside(let iso): query.outside = [iso]
+                case nil: break
+                }
+            }
         }
         query.after = clockMinutes(object["after"])
         query.before = clockMinutes(object["before"])
@@ -156,7 +165,7 @@ public struct FreeQuery: Sendable, Hashable {
             week.contains(day) ? .inside(calendar.startOfDay(for: day)) : .outside(WeekContext.isoDate(day, in: calendar))
         }
         switch word {
-        case "today": return [place(week.today)]
+        case "today", "tonight", "this morning", "this afternoon", "this evening": return [place(week.today)]
         case "tomorrow": return calendar.date(byAdding: .day, value: 1, to: week.today).map { [place($0)] } ?? []
         case "yesterday": return calendar.date(byAdding: .day, value: -1, to: week.today).map { [place($0)] } ?? []
         case "weekend", "this weekend": return week.days.filter { calendar.isDateInWeekend($0) }.map { .inside($0) }
@@ -164,11 +173,22 @@ public struct FreeQuery: Sendable, Hashable {
         }
         if let day = isoFormatter(calendar).date(from: word) { return [place(day)] }
         // A weekday's name, in English or the Mac's language: that day of
-        // the asked week.
+        // the asked week. "This Tuesday" is the same day; "next Tuesday" is
+        // Tuesday of the week after, outside the asked week.
+        var name = word
+        var weeksAhead = 0
+        if name.hasPrefix("this ") {
+            name = String(name.dropFirst(5))
+        } else if name.hasPrefix("next ") {
+            name = String(name.dropFirst(5))
+            weeksAhead = 1
+        }
         let names = englishWeekdays + localWeekdays(calendar)
         for day in week.days {
             let weekday = calendar.component(.weekday, from: day) - 1
-            if names.contains(where: { $0[weekday] == word }) { return [.inside(day)] }
+            guard names.contains(where: { $0[weekday] == name }) else { continue }
+            if weeksAhead == 0 { return [.inside(day)] }
+            return calendar.date(byAdding: .day, value: 7 * weeksAhead, to: day).map { [place($0)] } ?? []
         }
         return []
     }

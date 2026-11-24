@@ -16,11 +16,9 @@ import Testing
             var replies: [String: String] = [:]
             for question in WeekAskCheckpoint.questions {
                 guard let expected = question.expected else { continue }
-                replies[question.text] = switch expected.routes.first {
-                case .freeQuery: expected.queries.first?.json ?? #"{"free_query": {}}"#
-                case .dayQuery: #"{"day_query": ""# + (expected.day ?? "") + #""}"#
-                default: #"{"answer": "Per the key.", "refs": []}"#
-                }
+                replies[question.text] = expected.routes.first == .freeQuery
+                    ? expected.queries.first?.json ?? #"{"free_query": {}}"#
+                    : #"{"answer": "Per the key.", "refs": []}"#
             }
             self.replies = replies
         }
@@ -89,13 +87,10 @@ import Testing
         #expect(typed.allSatisfy { $0.shapeCorrect == true })
         #expect(typed.allSatisfy { $0.jsonParsed == true })
         #expect(typed.filter { $0.fieldsCorrect != nil }.allSatisfy { $0.fieldsCorrect == true })
-        #expect(typed.filter { $0.dayCorrect != nil }.count == 5)
-        #expect(typed.filter { $0.dayCorrect != nil }.allSatisfy { $0.dayCorrect == true })
-        // A day_query's rows are that day's events, so it cites the past
-        // day; the key model's lookups cite nothing.
+        // The key model cites nothing: "must not cite" passes, "must cite"
+        // does not.
         #expect(typed.filter { $0.gate == "mustNotCite" }.allSatisfy { $0.gatePassedByRefs == true })
-        #expect(typed.filter { $0.route == "day_query" }.allSatisfy { $0.gatePassedByRefs == true })
-        #expect(typed.filter { $0.gate == "mustCite" && $0.route == "answer" }.allSatisfy { $0.gatePassedByRefs == false })
+        #expect(typed.filter { $0.gate == "mustCite" }.allSatisfy { $0.gatePassedByRefs == false })
         let summary = WeekAskCheckpoint.summary(results)
         #expect(summary.typed == typed.count)
         #expect(summary.shapeCorrect == typed.count)

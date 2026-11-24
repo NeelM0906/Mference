@@ -58,8 +58,7 @@ import Testing
         let engine = ScriptedEngineService(status: EngineServiceStatus(phase: .ready, residentModel: .quick), replies: [
             .init(content: #"{"answer": "Your busiest day left is the one with the most booked time.", "refs": []}"#),
         ])
-        let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: WeekModelPicker(
-            engine: engine, appleModel: nil, useAppleModel: { false })))
+        let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: WeekModelPicker(engine: engine)))
         func render(_ name: String, _ scheme: ColorScheme = .light) throws {
             try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
                 .environment(model).environment(ask), name: name, colorScheme: scheme)

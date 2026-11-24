@@ -44,6 +44,29 @@ import Testing
         #expect(try Self.decode(#"{"free_query": "tomorrow"}"#) == FreeQuery())
     }
 
+    @Test func spokenDaysResolveAsSaid() throws {
+        // Now Tuesday Sep 15; the asked week is Sep 14 to 20.
+        #expect(try Self.decode(#"{"free_query": {"days": ["this Friday"]}}"#).days == ["2026-09-18"])
+        let next = try Self.decode(#"{"free_query": {"days": ["next Tuesday"]}}"#)
+        #expect(next.days == nil)
+        #expect(next.outside == ["2026-09-22"])
+        #expect(try Self.decode(#"{"free_query": {"days": ["Next fri"]}}"#).outside == ["2026-09-25"])
+        for word in ["tonight", "this morning", "This afternoon", "this evening"] {
+            #expect(try Self.decode(#"{"free_query": {"days": [""# + word + #""]}}"#).days == ["2026-09-15"])
+        }
+        #expect(try Self.decode(#"{"free_query": {"days": ["next Funday"]}}"#) == FreeQuery())
+    }
+
+    @Test func tonightAsAPartIsThisEvening() throws {
+        let tonight = try Self.decode(#"{"free_query": {"min_minutes": 120, "part": "tonight"}}"#)
+        #expect(tonight == FreeQuery(minMinutes: 120, days: ["2026-09-15"], part: .evening))
+        // A named day wins.
+        #expect(try Self.decode(#"{"free_query": {"days": ["Friday"], "part": "tonight"}}"#)
+            == FreeQuery(days: ["2026-09-18"], part: .evening))
+        // "evening" alone names no day.
+        #expect(try Self.decode(#"{"free_query": {"part": "evening"}}"#) == FreeQuery(part: .evening))
+    }
+
     @Test func timesComeInManyForms() {
         #expect(FreeQuery.clockMinutes("15:00") == 900)
         #expect(FreeQuery.clockMinutes("15") == 900)
