@@ -1,0 +1,43 @@
+{
+ "id": "F07-startup-switches-and-context",
+ "checklist_items": [
+  1,
+  9,
+  10
+ ],
+ "status_on_trunk_6a646319": "Item 1 PRESENT (ServerEngineLibraryTests.itIsServedUnderItsProductIdentifierBesideDeep: id inkling-2-mini-ud-q4_k_xl beside qwen3.8-27b). Item 9 PRESENT for the acceptance pair: --prompt-cache-mode off reaches EngineLoadOptions (ServerArguments.baseEngineLoadOptions; ServerPromptCacheArgumentTests) and the ready line prints prompt_cache=off (main.swift, untested); Deep never reuses prefixes while its MTP drafter is on (LlamaModel: reusesPromptPrefixes = drafter == nil); LlamaBackend ignores the switch otherwise (Quick would still reuse). Item 10 PARTIAL, a real gap for Deep: --max-context sets only EngineLoadOptions.nativeMaxContext (ServerArguments.baseEngineLoadOptions; its doc comment says GGUF models keep 32,768), and no server flag sets ggufMaxContext, so Deep runs at 32,768 in library mode whatever is passed. Inkling's cap is exactly 40,960 on hosts that stage layers (Inkling2MemoryFootprint.stagedHostContextCap; Inkling2MemoryFootprintTests). Neither model has run at 40,960 on the 32 GB machine.",
+ "arguments": [
+  "--library",
+  "--max-context",
+  "40960",
+  "--prompt-cache-mode",
+  "off"
+ ],
+ "expect": {
+  "load_options": {
+   "nativeMaxContext": 40960,
+   "ggufMaxContext": 40960,
+   "promptCacheMode": "off"
+  },
+  "ready_line_contains": [
+   "mode=library",
+   "context=40960",
+   "prompt_cache=off"
+  ],
+  "resolved_context_on_32_GiB": {
+   "inkling-2-mini-ud-q4_k_xl": 40960,
+   "qwen3.8-27b": 40960
+  },
+  "v1_models_lists": [
+   "inkling-2-mini-ud-q4_k_xl",
+   "qwen3.8-27b"
+  ],
+  "model_run_still_needed": "a real load of each model at 40,960 with the swap guard (not a NIOEmbedded test)",
+  "today": {
+   "inkling-2-mini-ud-q4_k_xl": 40960,
+   "qwen3.8-27b": 32768
+  },
+  "needs": "a way to give GGUF models 40,960 in library mode: --max-context also setting ggufMaxContext (capped at the file's native context), or a separate flag; then load_options.ggufMaxContext == 40960"
+ },
+ "why_it_matters": "block C's 30K cases (c09, c10: 106,301 characters, about 26.6K tokens at 4 characters per token, more if the documents tokenize denser) plus the 4,096 completion cap exceed 32,768: on Deep their completion budget would be cut (max_new = context - prompt), so they could end 'truncated' for Deep only. They are in the full tier; the gate tier's C cases (4K, 16K) fit in 32,768."
+}

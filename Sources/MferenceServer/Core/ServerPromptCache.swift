@@ -19,7 +19,8 @@ public enum ServerPromptCacheBytes: Equatable, Sendable {
     static let gibibyte = 1 << 30
 
     /// `auto` is min(4 GiB, physical / 8) on hosts with at least 24 GiB,
-    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below.
+    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below;
+    /// for Inkling 2, at most `Inkling2PrefixSnapshots.autoBudgetCeiling`.
     func resolved(family: ModelFamily? = nil,
                   physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
         switch self {
@@ -35,7 +36,7 @@ public enum ServerPromptCacheBytes: Equatable, Sendable {
             } else {
                 general = 0
             }
-            return general
+            return family == .inkling2Loop ? min(general, Inkling2PrefixSnapshots.autoBudgetCeiling) : general
         }
     }
 }
@@ -53,7 +54,8 @@ extension ValidatedChatRequest {
         PromptPrefixCacheTurn(messages: messages,
                               tools: tools,
                               reasoningEffort: reasoningEffort,
-                              preserveThinking: preserveThinking)
+                              preserveThinking: preserveThinking,
+                              inkling2Effort: inkling2Effort)
     }
 }
 

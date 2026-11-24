@@ -1,0 +1,644 @@
+import Accelerate
+import Foundation
+import Metal
+import Testing
+@testable import Mference
+import MferenceValidationSupport
+
+/// Log-probabilities of one row of the runner's logits as K0's goldens
+/// record them (`goldens/README.md`; `g6c_verdict.py`): the final softcap
+/// `cap * tanh(x / cap)` on the FP16 values the head wrote (the sampler's
+/// path: the install's head leaves the cap to it), a log-softmax over the
+/// first `count` values (the real vocabulary, padding rows excluded), and
+/// the top `k` by logit, ties to the lower id. Accelerate throughout: the
+/// tests run as a debug build and a G6c run takes about 1,100 rows of 200,058.
+struct Inkling2LogProbRow {
+    /// The capped logits.
+    let logits: [Double]
+    let logSumExp: Double
+    /// Ids of the `k` largest logits, largest first, ties to the lower id.
+    let top: [Int]
+    /// Every value read was finite.
+    let rawFinite: Bool
+
+    func logprob(_ id: Int) -> Double { logits[id] - logSumExp }
+
+    init(halves: UnsafePointer<Float16>, count n: Int, softcap: Double, k: Int = 20) {
+        var floats = [Float](repeating: 0, count: n)
+        let status = floats.withUnsafeMutableBytes { dst in
+            var source = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: halves), height: 1,
+                                       width: vImagePixelCount(n), rowBytes: n * 2)
+            var target = vImage_Buffer(data: dst.baseAddress, height: 1, width: vImagePixelCount(n), rowBytes: n * 4)
+            return vImageConvert_Planar16FtoPlanarF(&source, &target, vImage_Flags(kvImageNoFlags))
+        }
+        // A failed conversion would leave zeros: uniform log-probs, silently.
+        precondition(status == kvImageNoError, "FP16 to F32 conversion failed: \(status)")
+        self.init(floats: floats, count: n, softcap: softcap, k: k)
+    }
+
+    /// The same from F32 logits (the first `count` of `floats`).
+    init(floats: [Float], count n: Int, softcap: Double, k: Int = 20) {
+        precondition(n > k && k > 0 && floats.count >= n)
+        var x = [Double](repeating: 0, count: n)
+        vDSP_vspdp(floats, 1, &x, 1, vDSP_Length(n))
+        // A sum of finite FP16 or F32 logits is finite: one check before the cap
+        // (which would turn an infinity into the cap).
+        var rawSum = 0.0
+        vDSP_sveD(x, 1, &rawSum, vDSP_Length(n))
+        rawFinite = rawSum.isFinite
+        x.withUnsafeMutableBufferPointer { b in
+            let p = b.baseAddress!
+            if softcap > 0 {
+                var inverse = 1 / softcap, cap = softcap
+                var count = Int32(n)
+                vDSP_vsmulD(p, 1, &inverse, p, 1, vDSP_Length(n))
+                vvtanh(p, p, &count)
+                vDSP_vsmulD(p, 1, &cap, p, 1, vDSP_Length(n))
+            }
+        }
+        var maximum = 0.0
+        vDSP_maxvD(x, 1, &maximum, vDSP_Length(n))
+        var shifted = [Double](repeating: 0, count: n)
+        var negated = -maximum
+        vDSP_vsaddD(x, 1, &negated, &shifted, 1, vDSP_Length(n))
+        var count = Int32(n)
+        shifted.withUnsafeMutableBufferPointer { vvexp($0.baseAddress!, $0.baseAddress!, &count) }
+        var sum = 0.0
+        vDSP_sveD(shifted, 1, &sum, vDSP_Length(n))
+        logits = x
+        logSumExp = maximum + Foundation.log(sum)
+
+        // One pass, a sorted list of k: an equal later value never displaces
+        // or passes an earlier one.
+        var best: [Int] = []
+        best.reserveCapacity(k + 1)
+        x.withUnsafeBufferPointer { b in
+            for i in 0..<n {
+                let v = b[i]
+                if best.count == k, !(v > b[best[k - 1]]) { continue }
+                var j = best.count
+                while j > 0, b[best[j - 1]] < v { j -= 1 }
+                best.insert(i, at: j)
+                if best.count > k { best.removeLast() }
+            }
+        }
+        top = best
+    }
+}
+
+@Suite("Inkling2 log-prob rows as the goldens record them")
+struct Inkling2LogProbRowTests {
+    @Test
+    func cappedLogSoftmaxAndTopKTiesToTheLowerId() throws {
+        let n = 64
+        var values = (0..<n).map { Float16(Float(($0 * 37) % 23) * 0.1 - 2) }   // at most 0.2
+        values[5] = 60          // capped to 30 tanh 2
+        values[9] = 3; values[40] = 3; values[12] = 3   // a three-way tie
+        values += [Float16(500)]   // past `count`: never read
+        let row = values.withUnsafeBufferPointer { Inkling2LogProbRow(halves: $0.baseAddress!, count: n,
+                                                                       softcap: 30, k: 4) }
+        let capped = values[..<n].map { 30 * tanh(Double(Float($0)) / 30) }
+        let lse = Foundation.log(capped.map { exp($0) }.reduce(0, +))
+        #expect(row.logits.count == n)
+        #expect(zip(row.logits, capped).allSatisfy { abs($0 - $1) < 1e-12 })
+        #expect(abs(row.logSumExp - lse) < 1e-12)
+        #expect(abs(row.logprob(5) - (30 * tanh(2.0) - lse)) < 1e-12)
+        #expect(abs((0..<n).map { exp(row.logprob($0)) }.reduce(0, +) - 1) < 1e-12)
+        // 60 first, then the tie at 3 in id order.
+        #expect(row.top == [5, 9, 12, 40])
+        // No cap: the raw values.
+        let raw = values.withUnsafeBufferPointer { Inkling2LogProbRow(halves: $0.baseAddress!, count: n,
+                                                                       softcap: 0, k: 2) }
+        #expect(raw.logits[5] == 60 && raw.top == [5, 9] && raw.rawFinite)
+        values[7] = .nan
+        let bad = values.withUnsafeBufferPointer { Inkling2LogProbRow(halves: $0.baseAddress!, count: n,
+                                                                       softcap: 30, k: 2) }
+        #expect(!bad.rawFinite)
+    }
+}
+
+/// The runner's position-logits hook (G6c) on the Mini-width toy, over a
+/// prefill of two chunks ([0, 3) and [3, 6): the runner's balanced plan for 6
+/// tokens at its 4-token chunk) with the window starting inside the first: every row against the CPU reference's logits for that token,
+/// teacher-forced on the runner's own visit outputs and routes as in
+/// `Inkling2ForwardRunnerToyTests` (the random toy amplifies a different
+/// kernel's rounding about twofold every six visits, so only the head is
+/// compared); the last row against the production head's output bit for
+/// bit; and the first chunk's rows against prefills of the prefix alone,
+/// which run the same kernels (chunks of 2 and 3 rows), bit for bit.
+/// Production shape (about 1.7 GB of buffers, a slow CPU reference), so full
+/// tier.
+@Suite("Inkling2ForwardRunner position logits on the toy", .serialized)
+struct Inkling2PositionLogitsToyTests {
+    /// `Inkling2ForwardRunnerToyTests.logitTolerance`: the runner's last-token
+    /// logits against the reference measured at most 3.6e-4.
+    static let tolerance: Float = 0.002
+
+    @Test(.fullTier)
+    func everyRowIsTheHeadForItsToken() async throws {
+        let context = try MetalContext()
+        let toy = try Inkling2RunnerToy(device: context.device)
+        let c = Inkling2RunnerToy.config
+        let d = c.hiddenSize, topK = c.topK, traceRows = 8
+        let runner = try Inkling2ForwardRunner(weights: toy.runnerWeights, context: context,
+                                               maxContext: 64, maxChunkTokens: 4)
+        let device = context.device
+        let rowBytes = c.vocabPadded * 2
+        let tokens: [Int32] = [17, 401, 3, 250, 99, 7]
+        let chunks = [0..<3, 3..<6]
+        #expect(Inkling2ForwardRunner.prefillSpans(tokenCount: tokens.count, startPosition: 0, chunkTokens: 4)
+                    .map { $0.tokenOffset..<$0.completedCount } == chunks)
+        let positions = 1..<6
+        let hook = try #require(device.makeBuffer(length: positions.count * rowBytes, options: .storageModeShared))
+        let out = try #require(device.makeBuffer(length: rowBytes, options: .storageModeShared))
+        let outputs = try #require(device.makeBuffer(length: 48 * traceRows * d * 4, options: .storageModeShared))
+        let routes = try #require(device.makeBuffer(length: 48 * traceRows * topK * 4, options: .storageModeShared))
+        func prefill(_ count: Int) async throws {
+            runner.reset()
+            // The runner caps the spans at its 4-token chunk.
+            _ = try await runner.prefillChunked(tokens: tokens[..<count], startPosition: 0, outputMode: .logits,
+                                                config: .production(chunkTokens: 64), into: out,
+                                                onProgress: { _ in })
+        }
+        func bits(_ buffer: MTLBuffer, row: Int) -> [UInt16] {
+            let p = (buffer.contents() + row * rowBytes).bindMemory(to: UInt16.self, capacity: c.vocabUnpadded)
+            return (0..<c.vocabUnpadded).map { p[$0] }
+        }
+        func floats(_ v: [UInt16]) -> [Float] { v.map { Float(Float16(bitPattern: $0)) } }
+        func relative(_ got: [Float], _ want: [Float]) -> Float {
+            guard got.count == want.count, got.allSatisfy(\.isFinite), want.allSatisfy(\.isFinite) else {
+                return .infinity
+            }
+            return zip(got, want).map { abs($0 - $1) }.max()! / max(want.map(abs).max()!, 1e-6)
+        }
+
+        runner.positionLogits = .init(buffer: hook, positions: positions)
+        runner.visitTrace = .init(outputs: outputs, routes: routes, rows: traceRows)
+        try await prefill(tokens.count)
+        runner.positionLogits = nil
+        runner.visitTrace = nil
+        let rows = positions.map { bits(hook, row: $0 - positions.lowerBound) }
+        #expect(rows.last! == bits(out, row: 0), "the last row is the production head's")
+
+        // Each chunk teacher-forced through the reference, logits for every token.
+        let reference = try Inkling2ReferenceModel(config: c, weights: toy.referenceWeights)
+        reference.precision = .metalRunner
+        let ids = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * traceRows * topK)
+        for chunk in chunks {
+            reference.forcedRoutes = (0..<48).map { visit in
+                chunk.map { t in (0..<topK).map { Int(ids[(visit * traceRows + t) * topK + $0]) } }
+            }
+            reference.forcedVisitOutputs = (0..<48).map { visit in
+                chunk.map { t in Inkling2BufferMatrix.floats(outputs, offset: (visit * traceRows + t) * d * 4, count: d) }
+            }
+            let want = reference.forward(tokens: Array(tokens[chunk]), logits: .all)
+            try #require(want.count == chunk.count)
+            for position in chunk where positions.contains(position) {
+                let error = relative(floats(rows[position - positions.lowerBound]), want[position - chunk.lowerBound])
+                print("inkling2 toy position logits at \(position) against the reference: \(error)")
+                #expect(error < Self.tolerance, "position \(position)")
+            }
+        }
+
+        // The first chunk's rows: prefills of the prefix alone end there.
+        for position in positions where position < chunks[0].upperBound {
+            try await prefill(position + 1)
+            #expect(rows[position - positions.lowerBound] == bits(out, row: 0), "position \(position)")
+        }
+    }
+}
+
+/// The runner's trace margins (re-based G6c rule (a)) on the Mini-width
+/// toy: a prefill in balanced chunks of 3 and 3, then a decode step. The router logits
+/// the trace records come from the visit's own MoE input, so their top-8 is
+/// the runner's own expert set wherever the margin is not a near-tie; and
+/// the margins they give equal the reference's at the runner's states
+/// (teacher-forced on its outputs and routes). Full tier.
+@Suite("Inkling2ForwardRunner trace margins on the toy", .serialized)
+struct Inkling2TraceMarginsToyTests {
+    /// The reference's router input differs from the runner's by the visit
+    /// error (at most 2e-3 relative on the toy), which moves a sigmoid score
+    /// far less than this.
+    static let tolerance: Float = 2e-3
+
+    @Test(.fullTier)
+    func traceMarginsAreTheRunnersRoutesAndTheReferencesMargins() async throws {
+        let context = try MetalContext()
+        let toy = try Inkling2RunnerToy(device: context.device)
+        let c = Inkling2RunnerToy.config
+        let d = c.hiddenSize, topK = c.topK, experts = c.numExperts, rows = 8
+        let device = context.device
+        let runner = try Inkling2ForwardRunner(weights: toy.runnerWeights, context: context,
+                                               maxContext: 64, maxChunkTokens: 4)
+        let out = try #require(device.makeBuffer(length: c.vocabPadded * 2, options: .storageModeShared))
+        let outputs = try #require(device.makeBuffer(length: 48 * rows * d * 4, options: .storageModeShared))
+        let routes = try #require(device.makeBuffer(length: 48 * rows * topK * 4, options: .storageModeShared))
+        let logits = try #require(device.makeBuffer(length: 48 * rows * experts * 4, options: .storageModeShared))
+        runner.visitTrace = .init(outputs: outputs, routes: routes, rows: rows, routerLogits: logits)
+        let ids = routes.contents().bindMemory(to: UInt32.self, capacity: 48 * rows * topK)
+        let lp = logits.contents().bindMemory(to: Float.self, capacity: 48 * rows * experts)
+        let reference = try Inkling2ReferenceModel(config: c, weights: toy.referenceWeights)
+        reference.captureTrace = true
+        reference.precision = .metalRunner
+        let schedule = c.schedule
+
+        var position = 0, compared = 0, ties = 0
+        var worst: Float = 0
+        for chunk: [Int32] in [[17, 401, 3, 250, 99, 7], [333]] {
+            let n = chunk.count
+            if n == 1 {
+                try await runner.produce(token: chunk[0], position: position, into: out)
+            } else {
+                _ = try await runner.prefillChunked(tokens: chunk[...], startPosition: position, outputMode: .logits,
+                                                    config: .production(chunkTokens: 64), into: out,
+                                                    onProgress: { _ in })
+            }
+            reference.forcedRoutes = (0..<48).map { v in
+                (0..<n).map { t in (0..<topK).map { Int(ids[(v * rows + position + t) * topK + $0]) } }
+            }
+            reference.forcedVisitOutputs = (0..<48).map { v in
+                (0..<n).map { t in Inkling2BufferMatrix.floats(outputs, offset: (v * rows + position + t) * d * 4,
+                                                               count: d) }
+            }
+            _ = reference.forward(tokens: chunk, logits: .none)
+            let trace = try #require(reference.lastTrace)
+            for v in 0..<48 {
+                let bias = toy.referenceWeights.layers[schedule[v].layer].routerBias
+                for t in 0..<n {
+                    let row = v * rows + position + t
+                    let margin = Inkling2G6cTests.selectionMargin(logits: lp + row * experts, bias: bias, topK: topK)
+                    let difference = abs(margin - trace.routeMargins[v][t])
+                    #expect(difference.isFinite, "visit \(v) token \(position + t)")
+                    worst = max(worst, difference)
+                    // The top-8 by these logits is the runner's own set.
+                    let scores = (0..<experts).map { e in
+                        1 / (1 + exp(-min(max(lp[row * experts + e], -80), 80))) + bias[e]
+                    }
+                    let top = Set((0..<experts).sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }
+                        .prefix(topK))
+                    let own = Set((0..<topK).map { Int(ids[row * topK + $0]) })
+                    if margin > 1e-5 {
+                        #expect(top == own, "visit \(v) token \(position + t)")
+                        compared += 1
+                    } else {
+                        ties += 1
+                    }
+                }
+            }
+            position += n
+        }
+        print("inkling2 toy trace margins: \(compared) token-visits select the runner's experts (\(ties) near-ties "
+              + "skipped); worst margin difference from the reference \(worst)")
+        #expect(compared >= 48 * 7 - 4)
+        #expect(worst < Self.tolerance)
+    }
+}
+
+/// G6c: the runner's teacher-forced output on the real install, written in
+/// ink-golden's `generate` layout for `Scripts/parity/inkling2/g6c_verdict.py`
+/// (K0's schema, option A). For each prompt of
+/// `Scripts/parity/inkling2/inputs/generate_prompts_tf.json` (a log-prob
+/// golden's prompt plus all but its last generated id, as one ids prompt):
+/// one production prefill (the product's chunk, the install's expert store),
+/// then `<out>/tf/<id>/golden.json` and `logprobs.json` with the top 20
+/// log-probs at every recorded position (the last 80 where the entry has
+/// `logprobs_last`). For trace01, trace02 and trace03-tool-result (the
+/// prompt ids of `goldens/generate{,2,3}/metal/<id>`): the per-visit running
+/// sums and expert sets in `<out>/traces/<id>/`. Then:
+///
+///     python3 -I Scripts/parity/inkling2/g6c_verdict.py <out>/tf --traces <out>/traces
+///
+/// Each trace also holds, per visit and token, the router's selection
+/// margin (`margins`, from the router logits the trace records), so the
+/// re-based tier's rule (a) can check every expert-set flip against `.fp32`.
+/// The prefill chunk is the product's (`familyPrefillChunkTokens`, 2,048).
+///
+/// Loads the install, so it runs only with `MFERENCE_INKLING2_GTURBO`,
+/// `MFERENCE_INKLING2_GOLDENS_DIR` and `MFERENCE_INKLING2_G6C_OUT` set, and
+/// then only inside `model-hold.sh`. `MFERENCE_INKLING2_G6C_PROMPTS` (comma
+/// separated ids) picks the prompts, in that order; all by default.
+/// `MFERENCE_INKLING2_G6C_TRACE_ALL` also traces every teacher-forced prompt
+/// of up to 512 tokens (rule (a)'s coverage), into `<out>/traces/<id>/`.
+/// `MFERENCE_INKLING2_G6C_TRACE_LOGPROBS` also writes log-probs at every
+/// position of a trace prompt with no teacher-forced golden, into
+/// `<out>/tf-trace/<id>/` (outside `tf/`, so the gate does not count them).
+@Suite("Inkling2 G6c: the runner's teacher-forced output", .serialized)
+struct Inkling2G6cTests {
+    static let environment = ProcessInfo.processInfo.environment
+    static var install: URL? { environment["MFERENCE_INKLING2_GTURBO"].map { URL(fileURLWithPath: $0) } }
+    static var goldens: URL? { environment["MFERENCE_INKLING2_GOLDENS_DIR"].map { URL(fileURLWithPath: $0) } }
+    static var output: URL? { environment["MFERENCE_INKLING2_G6C_OUT"].map { URL(fileURLWithPath: $0) } }
+    static let traceGoldens = ["trace01": "generate/metal", "trace02": "generate2/metal",
+                               "trace03-tool-result": "generate3/metal"]
+    /// K0's order: by length, the two long prompts last.
+    static let defaultOrder = ["trace01", "trace02", "lp10-multilingual", "g01-capital", "lp09-chat-default",
+                               "g06-chat-none", "lp08-code", "lp11-multi-turn", "lp04-chat-thinking",
+                               "g05-wetlands", "trace03-tool-result", "lp05-tool-result",
+                               "lp06-raw-1300", "lp07-raw-2600"]
+
+    static var repositoryRoot: URL {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        return root
+    }
+
+    struct Prompt: Decodable {
+        let id: String
+        let kind: String
+        let ids: [Int32]
+        let logprobs_last: Int?
+    }
+    struct GoldenIDs: Decodable { let prompt_ids: [Int32] }
+
+    struct Pair: Encodable {
+        let id: Int
+        let logprob: Double
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.unkeyedContainer()
+            try c.encode(id)
+            try c.encode(logprob)
+        }
+    }
+    struct LogProbRecord: Encodable {
+        let pos: Int
+        let next: Int
+        let next_logprob: Double
+        let top: [Pair]
+    }
+    struct GoldenRecord: Encodable {
+        let id: String
+        let kind: String
+        let prompt_ids: [Int32]
+        let generated_ids: [Int]
+        let logprobs_file: String?
+        let logprobs_first_pos: Int?
+        let prefill_s: Double
+        let runner: String
+    }
+    struct TraceVisit: Encodable {
+        let visit: Int
+        let slot: Int
+        let layer: Int
+        let experts: [[Int]]
+        /// Per token, the router's selection margin at this visit: the 8th
+        /// minus the 9th largest selection score (sigmoid plus bias).
+        var margins: [Float]? = nil
+    }
+
+    /// The routers' selection margin for one token-visit: the `topK`-th minus
+    /// the next largest of `sigmoid(clamp(logit, -80, 80)) + bias`, the
+    /// scores both routers select by.
+    static func selectionMargin(logits: UnsafePointer<Float>, bias: [Float], topK: Int) -> Float {
+        let scores = bias.indices.map { e -> Float in
+            let z = min(max(logits[e], -80), 80)
+            return 1 / (1 + exp(-z)) + bias[e]
+        }.sorted(by: >)
+        return scores[topK - 1] - scores[topK]
+    }
+    struct TraceRecord: Encodable {
+        let hidden_file: String
+        let hidden_shape: [Int]
+        let hidden_tensor: String
+        let visits: [TraceVisit]
+    }
+
+    /// This process's physical footprint now and at its peak.
+    static func footprint() -> (current: UInt64, peak: UInt64) {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard status == KERN_SUCCESS else { return (0, 0) }
+        return (info.phys_footprint, UInt64(max(0, info.ledger_phys_footprint_peak)))
+    }
+
+    private func write<T: Encodable>(_ value: T, to url: URL) throws {
+        try JSONEncoder().encode(value).write(to: url)
+    }
+
+    @Test(.enabled(if: install != nil && goldens != nil && output != nil,
+                   "needs MFERENCE_INKLING2_GTURBO, MFERENCE_INKLING2_GOLDENS_DIR and MFERENCE_INKLING2_G6C_OUT"))
+    func writeTheRunnersTeacherForcedOutput() async throws {
+        let installURL = try #require(Self.install), goldensURL = try #require(Self.goldens)
+        let outURL = try #require(Self.output)
+        let promptsURL = Self.repositoryRoot.appendingPathComponent(
+            "Scripts/parity/inkling2/inputs/generate_prompts_tf.json")
+        let prompts = try JSONDecoder().decode([Prompt].self, from: Data(contentsOf: promptsURL))
+        let byID = Dictionary(uniqueKeysWithValues: prompts.map { ($0.id, $0) })
+        let order = Self.environment["MFERENCE_INKLING2_G6C_PROMPTS"]?.split(separator: ",").map(String.init)
+            ?? Self.defaultOrder
+        for id in order {
+            try #require(byID[id] != nil || Self.traceGoldens[id] != nil, "unknown prompt \(id)")
+        }
+
+        let context = try MetalContext()
+        let device = context.device
+        // `.pread`: the Model never opens an expert file; the runner's store does.
+        // The CLI and server default: the receipt's size checks, not a SHA-256
+        // pass over 15.8 GB of layer files through the file cache.
+        let model = try Model.load(directoryURL: installURL, device: device, expecting: .inkling2Mini,
+                                   integrityPolicy: .trustedReceiptWhenValid)
+        let c = model.config
+        let d = c.hiddenSize, topK = c.topKExperts
+        let vocab = c.unpaddedVocabSize, vocabRows = c.vocabSize
+        let softcap = Double(c.finalLogitSoftcap)
+        try #require(softcap == 30 && vocab == 200_058)
+        // The product's runner and prefill: what ForwardRunnerFactory builds,
+        // with the product's chunk for this family (2,048 on every path).
+        let configuration = RuntimeConfiguration(
+            prefillChunkTokens: RuntimeConfiguration.familyPrefillChunkTokens(for: c.family) ?? 128)
+        let traceAll = Self.environment["MFERENCE_INKLING2_G6C_TRACE_ALL"] != nil
+        let traceLogProbs = Self.environment["MFERENCE_INKLING2_G6C_TRACE_LOGPROBS"] != nil
+        let experts = c.numExperts
+        let biases = try (0..<c.numLayers).map { layer -> [Float] in
+            let t = try model.inkling2RouterSelectionBias(layer: layer)
+            return Inkling2BufferMatrix.floats(t.buffer, offset: Int(t.offset), count: experts)
+        }
+        let runner = try Inkling2ForwardRunner(model: model, context: context, maxContext: 4096,
+                                               runtimeConfiguration: configuration)
+        let out = try #require(device.makeBuffer(length: vocabRows * 2, options: .storageModeShared))
+        let schedule = Inkling2ReferenceConfig.mini.schedule
+        print("inkling2 G6c: model loaded, footprint \(Self.footprint().current >> 20) MiB, "
+              + "chunk \(configuration.prefillChunkTokens)")
+
+        for id in order {
+            let tf = byID[id]
+            var ids: [Int32]
+            if let tf {
+                try #require(tf.kind == "ids")
+                ids = tf.ids
+            } else {
+                ids = []
+            }
+            if let golden = Self.traceGoldens[id] {
+                let traceIDs = try JSONDecoder().decode(GoldenIDs.self, from: Data(contentsOf: goldensURL
+                    .appendingPathComponent(golden).appendingPathComponent(id).appendingPathComponent("golden.json")))
+                    .prompt_ids
+                try #require(tf == nil || traceIDs == ids, "\(id): the trace's prompt is the teacher-forced one")
+                ids = traceIDs
+            }
+            let n = ids.count
+            try #require(n > 0 && n <= 4096)
+            // As ink-golden reads it: `logprobs_last` absent or 0 means every position.
+            let first = tf.map { n - 1 - (($0.logprobs_last ?? 0) > 0 ? $0.logprobs_last! : n - 1) }
+                ?? (traceLogProbs && Self.traceGoldens[id] != nil ? 0 : nil)
+            try #require(first.map { (0..<n).contains($0) } ?? true)
+
+            var logitRows: MTLBuffer?
+            if let first {
+                let buffer = try #require(device.makeBuffer(length: (n - first) * vocabRows * 2,
+                                                            options: .storageModeShared))
+                runner.positionLogits = .init(buffer: buffer, positions: first..<n)
+                logitRows = buffer
+            }
+            var trace: Inkling2ForwardRunner.VisitTrace?
+            if Self.traceGoldens[id] != nil || (traceAll && n <= 512) {
+                trace = .init(outputs: try #require(device.makeBuffer(length: 48 * n * d * 4,
+                                                                      options: .storageModeShared)),
+                              routes: try #require(device.makeBuffer(length: 48 * n * topK * 4,
+                                                                     options: .storageModeShared)),
+                              rows: n,
+                              routerLogits: try #require(device.makeBuffer(length: 48 * n * experts * 4,
+                                                                           options: .storageModeShared)))
+                runner.visitTrace = trace
+            }
+            runner.reset()
+            let started = Date()
+            _ = try await runner.prefillChunked(tokens: ids[...], startPosition: 0, outputMode: .logits,
+                                                config: configuration.prefillConfig, into: out,
+                                                onProgress: { _ in })
+            let seconds = Date().timeIntervalSince(started)
+            runner.positionLogits = nil
+            runner.visitTrace = nil
+
+            if let first, let logitRows {
+                let dir = outURL.appendingPathComponent(tf == nil ? "tf-trace" : "tf").appendingPathComponent(id)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                // The hook's last row is the production head's, bit for bit.
+                let lastRow = logitRows.contents() + (n - 1 - first) * vocabRows * 2
+                #expect(memcmp(lastRow, out.contents(), vocab * 2) == 0, "\(id): last row")
+                var records: [LogProbRecord] = []
+                var argmax = -1
+                for position in first..<n {
+                    let p = (logitRows.contents() + (position - first) * vocabRows * 2)
+                        .bindMemory(to: Float16.self, capacity: vocab)
+                    let row = Inkling2LogProbRow(halves: p, count: vocab, softcap: softcap)
+                    let top = row.top.map { Pair(id: $0, logprob: row.logprob($0)) }
+                    try #require(row.rawFinite && row.logSumExp.isFinite && top.allSatisfy { $0.logprob.isFinite },
+                                 "\(id): non-finite log-probs at \(position)")
+                    if position == n - 1 { argmax = row.top[0] }
+                    let next = position < n - 1 ? Int(ids[position + 1]) : row.top[0]
+                    records.append(LogProbRecord(pos: position, next: next, next_logprob: row.logprob(next), top: top))
+                }
+                try write(records, to: dir.appendingPathComponent("logprobs.json"))
+                try write(GoldenRecord(id: id, kind: "ids", prompt_ids: ids, generated_ids: [argmax],
+                                       logprobs_file: "logprobs.json", logprobs_first_pos: first,
+                                       prefill_s: seconds, runner: "Inkling2ForwardRunner"),
+                          to: dir.appendingPathComponent("golden.json"))
+                print("inkling2 G6c \(id): \(n) tokens, log-probs at \(first)..<\(n), next \(argmax)")
+            }
+            if let trace {
+                let dir = outURL.appendingPathComponent("traces").appendingPathComponent(id)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                // [48][n][d] F32 little-endian, straight from the trace buffer.
+                try Data(bytesNoCopy: try #require(trace.outputs).contents(), count: 48 * n * d * 4, deallocator: .none)
+                    .write(to: dir.appendingPathComponent("hidden_after_visit.f32"))
+                let routes = trace.routes.contents().bindMemory(to: UInt32.self, capacity: 48 * n * topK)
+                // Eight distinct experts of 128 per visit and token.
+                let routesValid = (0..<(48 * n)).allSatisfy { r in
+                    let set = Set((0..<topK).map { routes[r * topK + $0] })
+                    return set.count == topK && set.allSatisfy { $0 < UInt32(c.numExperts) }
+                }
+                #expect(routesValid, "\(id): expert ids")
+                let logits = try #require(trace.routerLogits).contents()
+                    .bindMemory(to: Float.self, capacity: 48 * n * experts)
+                let visits = (0..<48).map { v in
+                    TraceVisit(visit: v, slot: schedule[v].cacheSlot, layer: schedule[v].layer,
+                               experts: (0..<n).map { t in (0..<topK).map { Int(routes[(v * n + t) * topK + $0]) } },
+                               margins: (0..<n).map { t in
+                                   Self.selectionMargin(logits: logits + (v * n + t) * experts,
+                                                        bias: biases[schedule[v].layer], topK: topK)
+                               })
+                }
+                try write(TraceRecord(hidden_file: "hidden_after_visit.f32", hidden_shape: [48, n, d],
+                                      hidden_tensor: "the running block sum after each visit (l_out)",
+                                      visits: visits),
+                          to: dir.appendingPathComponent("trace.json"))
+                try write(GoldenRecord(id: id, kind: "ids", prompt_ids: ids, generated_ids: [],
+                                       logprobs_file: nil, logprobs_first_pos: nil, prefill_s: seconds,
+                                       runner: "Inkling2ForwardRunner"),
+                          to: dir.appendingPathComponent("golden.json"))
+                print("inkling2 G6c \(id): trace of \(n) tokens written")
+            }
+            let footprint = Self.footprint()
+            print("inkling2 G6c \(id): prefill \(n) tokens in \(String(format: "%.2f", seconds)) s, "
+                  + "footprint \(footprint.current >> 20) MiB, peak \(footprint.peak >> 20) MiB")
+        }
+    }
+}
+
+/// G6c's gate as a test (spec v1.12): `Scripts/parity/inkling2/g6c_verdict.py`
+/// on a runner candidate (`<candidate>/tf` and `<candidate>/traces`, as
+/// `Inkling2G6cTests` writes them), against K0's goldens and the reference
+/// runs under the precision root. The gate is the re-based tier: rules 1, 3
+/// and 4, and rule 2 as (a) the runner against the exact `.fp32` reference,
+/// (b) the reference in llama.cpp's rounding against the Metal goldens, (c1)
+/// and (c2) the runner against the CPU goldens, (d) next-token quality. The
+/// tool exits 0 when it passes, 1 when a rule fails and 4 when a rule's
+/// inputs are missing (incomplete, never a pass). The v1.8 rule as written,
+/// which the exact model fails where llama.cpp's own 8-bit rounding of the
+/// experts' input separates them, is recorded as a known issue, not gated.
+///
+/// Model-free (it reads files), but it needs the candidate and the goldens:
+/// `MFERENCE_INKLING2_G6C_CANDIDATE` and `MFERENCE_INKLING2_GOLDENS_DIR`;
+/// `MFERENCE_INKLING2_PRECISION_ROOT` overrides the tool's default reference
+/// root (`$INK/results/k4/precision`).
+@Suite("Inkling2 G6c verdict")
+struct Inkling2G6cVerdictTests {
+    static let environment = ProcessInfo.processInfo.environment
+    static var candidate: URL? { environment["MFERENCE_INKLING2_G6C_CANDIDATE"].map { URL(fileURLWithPath: $0) } }
+    static var goldens: URL? { environment["MFERENCE_INKLING2_GOLDENS_DIR"].map { URL(fileURLWithPath: $0) } }
+
+    @Test(.enabled(if: candidate != nil && goldens != nil,
+                   "needs MFERENCE_INKLING2_G6C_CANDIDATE and MFERENCE_INKLING2_GOLDENS_DIR"))
+    func reBasedGatePassesWithV18AsWrittenOnRecord() throws {
+        let candidate = try #require(Self.candidate), goldens = try #require(Self.goldens)
+        let script = Inkling2G6cTests.repositoryRoot.appendingPathComponent("Scripts/parity/inkling2/g6c_verdict.py")
+        let report = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inkling2-g6c-verdict-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: report) }
+        var arguments = ["-I", script.path, candidate.appendingPathComponent("tf").path,
+                         "--traces", candidate.appendingPathComponent("traces").path,
+                         "--goldens", goldens.path, "--json", report.path]
+        if let root = Self.environment["MFERENCE_INKLING2_PRECISION_ROOT"] {
+            arguments += ["--precision-root", root]
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        print(String(decoding: output, as: UTF8.self))
+
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any])
+        let rule2 = json["rule2_state"] as? [String: Any] ?? [:]
+        // The gate.
+        #expect(process.terminationStatus == 0,
+                "g6c_verdict exit \(process.terminationStatus) (1: a rule fails, 4: incomplete); rule 2: \(rule2)")
+        #expect(json["gate_pass"] as? Bool == true)
+        // For the record: v1.8 as written.
+        withKnownIssue("""
+            v1.8 as written fails where llama.cpp rounds the experts' input to 8 bits and the exact model \
+            does not (spec v1.12, section 8)
+            """) {
+            #expect(json["as_written_v18_pass"] as? Bool == true)
+        }
+    }
+}

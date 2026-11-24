@@ -46,6 +46,22 @@ struct LayerLayout: Sendable {
     let layer: Int
     let file: String          // basename, e.g. "layer_00.bin"
     let experts: [ExpertEntry]
+    /// This layer's own expert stride (`layers[].expertStride`), written when
+    /// the block format varies by layer (an install copied from a GGUF); nil
+    /// means the layout's single `expertStride`.
+    let expertStride: UInt64?
+    /// This layer's routed-expert block format (`layers[].format`, a GGML
+    /// format name such as `"NVFP4"`); nil when the layout does not say.
+    let format: String?
+
+    init(layer: Int, file: String, experts: [ExpertEntry],
+         expertStride: UInt64? = nil, format: String? = nil) {
+        self.layer = layer
+        self.file = file
+        self.experts = experts
+        self.expertStride = expertStride
+        self.format = format
+    }
 }
 
 struct PackedExpertsLayout: Sendable {
@@ -69,6 +85,27 @@ struct PackedExpertsLayout: Sendable {
     /// Bytes of one expert in its layer file; expert offsets and sizes in the
     /// layout are file values.
     var storedExpertStride: UInt64 { storage?.storedExpertStride ?? expertStride }
+
+    /// True when the layers carry their own strides (`layers[].expertStride`).
+    var hasPerLayerStrides: Bool { layers.contains { $0.expertStride != nil } }
+
+    /// Bytes of one expert of `layer` as the kernels address it: the layer's
+    /// own stride when the layout gives one, else `expertStride`.
+    func expertStride(layer: Int) -> UInt64 {
+        layers[layer].expertStride ?? expertStride
+    }
+
+    /// Bytes of one expert of `layer` in its file. A per-layer stride is both
+    /// the addressed and the stored stride (such layouts carry no
+    /// `expertStorage`); otherwise `storedExpertStride`.
+    func storedExpertStride(layer: Int) -> UInt64 {
+        storedExpertStride(of: layers[layer])
+    }
+
+    /// `storedExpertStride(layer:)` for a layer entry in hand.
+    func storedExpertStride(of layer: LayerLayout) -> UInt64 {
+        layer.expertStride ?? storedExpertStride
+    }
 
     /// Resolve `(layer, expert)` -> `ExpertEntry`. O(1).
     func expert(layer: Int, expert: Int) -> ExpertEntry {
@@ -120,10 +157,25 @@ enum PackedExpertsLayoutReader {
             else {
                 throw ModelError.indexCorrupt(detail: "layout.json: malformed layer entry")
             }
+            var layerStride: UInt64?
+            if let value = layerObj["expertStride"] {
+                guard let stride = Self.positiveInteger(value) else {
+                    throw ModelError.indexCorrupt(detail: "layout.json: malformed layer expertStride")
+                }
+                layerStride = stride
+            }
+            var layerFormat: String?
+            if let value = layerObj["format"] {
+                guard let name = value as? String else {
+                    throw ModelError.indexCorrupt(detail: "layout.json: malformed layer format")
+                }
+                layerFormat = name
+            }
             // Leading dense-FFN layers carry no routed experts; the writer
             // emits an empty entry and no blob file (Inkling's layers 0-1).
             if expertsArr.isEmpty {
-                layers.append(LayerLayout(layer: layerIdx, file: file, experts: []))
+                layers.append(LayerLayout(layer: layerIdx, file: file, experts: [],
+                                          expertStride: layerStride, format: layerFormat))
                 continue
             }
             var experts = [ExpertEntry?](repeating: nil, count: expertsPerLayer)
@@ -174,7 +226,9 @@ enum PackedExpertsLayoutReader {
             }
             layers.append(LayerLayout(layer: layerIdx,
                                       file: file,
-                                      experts: experts.map { $0! }))
+                                      experts: experts.map { $0! },
+                                      expertStride: layerStride,
+                                      format: layerFormat))
         }
 
         var storage: ExpertStorage?
@@ -184,11 +238,57 @@ enum PackedExpertsLayoutReader {
             }
             storage = try parseStorage(storageObj, expertStride: expertStride, layers: layers)
         }
+        try validatePerLayerStrides(layers: layers, expertStride: expertStride, storage: storage)
         return PackedExpertsLayout(expertStride: expertStride,
                                    numLayers: numLayers,
                                    expertsPerLayer: expertsPerLayer,
                                    layers: layers,
                                    storage: storage)
+    }
+
+    /// A JSON number that is a positive whole integer (not a Boolean, not a
+    /// fraction), or nil.
+    static func positiveInteger(_ value: Any) -> UInt64? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number),
+              number.int64Value > 0 else { return nil }
+        return number.uint64Value
+    }
+
+    /// A layout whose layers carry their own strides must give one to every
+    /// routed layer, place each expert at `expert * stride` with `size ==
+    /// stride`, keep the top-level `expertStride` as the largest of them, and
+    /// carry no `expertStorage` (the two are different ways of describing a
+    /// stored expert). A layout without per-layer strides is not touched.
+    static func validatePerLayerStrides(layers: [LayerLayout], expertStride: UInt64,
+                                        storage: ExpertStorage?) throws {
+        guard layers.contains(where: { $0.expertStride != nil }) else { return }
+        func invalid(_ detail: String) -> ModelError {
+            .indexCorrupt(detail: "layout.json: per-layer stride " + detail)
+        }
+        guard storage == nil else { throw invalid("and expertStorage are mutually exclusive") }
+        var largest: UInt64 = 0
+        for layer in layers where !layer.experts.isEmpty {
+            guard let stride = layer.expertStride else {
+                throw invalid("missing on layer \(layer.layer)")
+            }
+            for expert in layer.experts {
+                let (place, overflow) = UInt64(expert.expert).multipliedReportingOverflow(by: stride)
+                guard !overflow, expert.size == stride, expert.offset == place else {
+                    throw invalid("layer \(layer.layer) expert \(expert.expert) is not at expert * stride")
+                }
+                for (role, tensor) in expert.subTensors {
+                    guard tensor.offset <= stride, tensor.size <= stride - tensor.offset else {
+                        throw invalid("layer \(layer.layer) tensor \(role) exceeds the stride")
+                    }
+                }
+            }
+            largest = max(largest, stride)
+        }
+        guard largest == expertStride else {
+            throw invalid("top-level expertStride \(expertStride) is not the largest layer stride \(largest)")
+        }
     }
 
     /// Parses `expertStorage` and proves it reconstructs every byte the

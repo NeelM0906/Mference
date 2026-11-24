@@ -1,0 +1,198 @@
+[
+ {
+  "id": "lp04-chat-thinking",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   },
+   {
+    "role": "assistant",
+    "reasoning_content": "The user asks for the capital of France. That is Paris.",
+    "content": "Paris."
+   },
+   {
+    "role": "user",
+    "content": "Thanks. And Spain?"
+   }
+  ],
+  "reasoning_effort": "low",
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "lp05-tool-result",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You can call tools."
+   },
+   {
+    "role": "user",
+    "content": "What's the weather in Paris?"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "arguments": {
+        "city": "Paris",
+        "unit": "celsius"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "{\"temp_c\": 18, \"sky\": \"cloudy\"}"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "search_files",
+     "description": "Search the user's files.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       },
+       "limit": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ],
+  "reasoning_effort": "none",
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "lp06-raw-1300",
+  "kind": "raw",
+  "text": " -->|mmap, no heap copy| RB\n    LF -->|bounded pread on miss| EC\n    RB --> AT\n    RB --> SE\n    EC --> RE\n    KV <--> AT\n    WS <--> GPU\n    AT --> SE\n    AT --> RE\n    SE --> HD\n    RE --> HD\n\n    classDef disk fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:1.5px;\n    classDef memory fill:#DCFCE7,stroke:#16A34A,color:#052E16,stroke-width:1.5px;\n    classDef compute fill:#FFEDD5,stroke:#EA580C,color:#431407,stroke-width:1.5px;\n    classDef output fill:#F3E8FF,stroke:#9333EA,color:#3B0764,stroke-width:1.5px;\n    class MF,MW,LF disk;\n    class RB,KV,EC,WS memory;\n    class AT,SE,RE compute;\n    class HD output;\n\n    style Disk fill:#EFF6FF,stroke:#93C5FD,color:#1E3A8A,stroke-width:2px\n    style Memory fill:#F0FDF4,stroke:#86EFAC,color:#14532D,stroke-width:2px\n    style GPU fill:#FFF7ED,stroke:#FDBA74,color:#7C2D12,stroke-width:2px\n    linkStyle default stroke:#64748B,stroke-width:1.5px\n```\n\n## Instruction framing\n\nGemma 4 CLI chat/message modes and the loopback server use the same canonical\nGoogle Jinja template, bundled with the app at revision\n`35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. The installed tokenizer vocabulary\nand model receipt remain unchanged; cache identity hashes the effective app\nresource. Assistant messages render with Gemma's `model` role. The template\nalso frames developer messages, function declarations, assistant tool calls,\nand tool results. Thinking is opt-in, with separate `reasoning_content` output\nand template-driven historical thought stripping. The decoder starts from\nthe actual generation suffix, including an already open thought after a tool\nresult. Tool syntax within thoughts remains reasoning text.\n\nThe local Swift Jinja snapshot in `Vendor/swift-jinja` corrects whitespace\nhandling at lexer boundaries so literal braces in the unchanged canonical\ntemplate do not introduce extra prompt spaces. Independent Python fixtures\ncheck the resulting bytes and token IDs; upstream Jinja tests and existing\nQwen template regressions also run through the package test wrapper.\n\nThe runtime stops generation on `<eos>` (token 1), `<turn|>` (token 106), or\n`<|tool_response>` (token 50). The app and CLI treat the third token as a\ndefensive boundary. The server instead parses complete native\n`<|tool_call>` blocks before returning OpenAI function calls and fails closed\non malformed output. CLI `--prompt` bypasses chat framing for raw completion\nand reproducible comparisons.\n\n## Prefill\n\nThe production profile handles up to 128 prompt tokens at a time. Execution\nstays layer-major: it moves each bounded group of rows through the transformer\none layer at a time, without holding expert activations for the full prompt.\n\nFor each chunk and layer, Mference:\n\n- runs projection GEMM/QMM paths where the row count can amortize setup;\n- applies causal sliding-window or full attention and writes K/V rows;\n- computes router outputs for all rows in the chunk;\n- groups token/expert pairs into bounded routed-MoE work;\n- streams experts in tiles of at most eight;\n- may fetch the next tile while GPU work for the current tile remains queued,\n  with both tiles fitting in the 16-slot cache;\n- never reuses a slot while queued GPU work still owns it; and\n- combines the resident shared branch and routed branch before the layer tail.\n\nEligible 4-bit prefill projections use staged affine Metal Performance\nPrimitives (MPP). The runtime unpacks each tile of affine-quantized weights into\nbounded FP16 staging, then passes it to MPP. Grouped routed MoE reuses its\nargument and activation scratch. The language-model head runs only for the\nfinal prompt row needed to start generation.\n\n## Decode\n\nDecode generates one token at a time. In each layer, the first Metal\ncommand-buffer phase, `cb1`, produces the router's top-8 result. The CPU must\nread those expert IDs before it knows which files to access, creating a CPU and\nI/O handoff before `cb2`.\n\nThe resident router normalizes and scales the layer's post-attention hidden\nstate, then projects it to 128 expert scores:\n\n```text\nrouter_input = rmsnorm_no_scale(hidden)\nscaled_input = router_input * router_scale / sqrt(hidden_size)\nlogits       = int8_affine(scaled_input)\ntop8         = highest_8(logits)\nweights      = softmax(logits[top8]) * per_expert_scale[top8]\n```\n\nThe GPU returns eight expert IDs and eight FP16 routing weights. The IDs drive\nthe cache-hit, eviction, and file-read plan.\n\nThe implementation labels this handoff as three phases:\n\n| Phase | Work |\n| --- | --- |\n| `cb1` | Metal runs input norm, Q/K/V projections, RoPE",
+  "n_gen": 16,
+  "logprobs": true,
+  "logprobs_last": 64
+ },
+ {
+  "id": "lp07-raw-2600",
+  "kind": "raw",
+  "text": " install and `.gturbo` layout.** Start with\n  [`SupportedModelSource`](../Sources/MferenceRepack/Core/Remote/SupportedModelSource.swift),\n  [`RemoteStreamingRepacker`](../Sources/MferenceRepack/Core/Remote/RemoteStreamingRepacker.swift),\n  and [`RepackPlanner`](../Sources/MferenceRepack/Core/Planning/RepackPlanner.swift)\n  for the pinned source, bounded range repack, and resident/per-layer file plan.\n- **Integrity and model load.** [`ManifestReader`](../Sources/Mference/Infrastructure/ModelIO/ManifestReader.swift),\n  [`VerifiedInstallReceipt`](../Sources/Mference/Infrastructure/ModelIO/VerifiedInstallReceipt.swift),\n  and [`Model.load`](../Sources/Mference/Runtime/Inference/Model.swift) cover\n  validation, resident mapping, and lazy layer verification.\n- **Resident and streamed weights.** [`ResidentBuffer`](../Sources/Mference/Infrastructure/ModelIO/ResidentBuffer.swift),\n  [`ModelExpertIO`](../Sources/Mference/Runtime/Inference/ModelExpertIO.swift),\n  and [`PreadExpertStreamer`](../Sources/Mference/Infrastructure/Streaming/PreadExpertStreamer.swift)\n  own common weights, expert-cache planning, slots, and parallel bounded reads.\n- **KV cache and attention.** [`KVCacheManager`](../Sources/Mference/Runtime/KVCache/KVCacheManager.swift)\n  owns bounded circular SWA storage and linear full-attention storage.\n  [`Attention`](../Sources/Mference/Kernels/Attention/Attention.swift) and\n  [`PrefillAttention`](../Sources/Mference/Kernels/Attention/PrefillAttention.swift)\n  consume distinct FP16 K/V ranges.\n- **Prompt and decode orchestration.** [`runRawCompletion`](../Sources/Mference/Runtime/Generation/RawCompletion.swift)\n  owns the outer generation loop; [`RealForwardRunner`](../Sources/Mference/Runtime/Inference/RealForwardRunner.swift)\n  owns the per-layer prefill and decode graph.\n- **Prefill memory and scheduling.** [`PrefillChunkScratch`](../Sources/Mference/Runtime/Prefill/PrefillChunkScratch.swift),\n  [`PrefillRoutedTileScheduler`](../Sources/Mference/Kernels/Prefill/MoE/PrefillRoutedTileScheduler.swift),\n  and [`MPPPrefillInt4QMM`](../Sources/Mference/Kernels/TensorCore/MPPPrefillInt4QMM.swift)\n  show bounded scratch, slot-safe expert tiles, and staged affine MPP projections.\n- **Router and routed MoE.** [`MoE`](../Sources/Mference/Kernels/MoE/MoE.swift)\n  and [`moe.metal`](../Sources/Mference/Metal/MoE/moe.metal) implement\n  top-8 selection, cached-hit work, affine GeGLU, and weighted down reduction.\n- **Metal library and fusions.** [`MetalContext`](../Sources/Mference/Infrastructure/Metal/MetalContext.swift),\n  [`tensorops.metal`](../Sources/Mference/Metal/TensorCore/tensorops.metal),\n  and [`fused.metal`](../Sources/Mference/Metal/Fusions/fused.metal) show\n  runtime compilation, the MPP tensor-ops kernel, and production decode fusions.\n\n## Correctness and safety invariants\n\n- The importer preserves source affine values. Lossless repack and load-width\n  changes require exact byte or output identity.\n- K and V remain distinct after their separate normalization and positional\n  paths, even where the raw projection is shared.\n- Every queued GPU consumer owns its slot and scratch bank until completion.\n  CPU reuse cannot race an earlier command buffer.\n- Kernels that reorder floating-point operations must remain deterministic\n  within each tested path and stay within the reference tolerances. Exact\n  output identity is not required across every path.\n- No normal install, load, test, or benchmark may place a whole model, shard,\n  expert, or source tensor in Swift heap memory.\n- Only one real-model process runs at a time on the 8 GB validation host.\n- Slow profiling modes are diagnostic evidence, not production throughput\n  evidence.\n\n## Scope and limitations\n\nThe runtime supports text-only generation from five pinned checkpoints: Gemma\n4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small\n276B-A12B, and Maple Preview. Mference omits vision towers and multimodal input.\n\nQwen 3.6 is selected from `manifest.json -> arch.family`. It is a hybrid of 30\ngated-DeltaNet linear-attention layers and 10 gated full-attention layers, with\n256 routed experts per layer and a gated shared expert. It holds the same\nbounded-memory contract as Gemma 4 and in fact uses less: a measured 1,448 MiB\npeak process footprint at 4K context against Gemma's ~2,126 MiB, because its\nexperts are half the size and only a quarter of its layers keep a KV cache.\nThat was verified with the working set constrained to about 8 GB. Its install\nneeds about 19.6 GB of disk against Gemma's 14.3 GB. Acceptance evidence covers\n4K context. See [Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md) and\n[Benchmarks](BENCHMARKS.md#qwen-36-35b-a3b-measured-decode).\n\nThe CLI and server offer 4K, 8K, 16K, 32K, 64K, and 128K context lengths.\nMaple's runtime, CLI, and server accept up to 128,000 tokens, but no final acceptance\nrun establishes that boundary. Vision input, training, fine-tuning, server\nbatching, and generic model discovery are outside the current scope. Each of\nthe five architectures is explicitly enumerated with its own pinned checkpoint,\ncompile-time baseline, and manifest contract; a new family merges only after\npassing the [family acceptance gate](FAMILY_GATE.md). The optional HTTP server owns one\nwarm model, serializes generation, and retains one verified conversational KV\nprefix by default. Gemma additionally retains one server-only SWA recovery\nimage at the active user turn's pre-thought boundary, derived from the pinned\ntemplate. New-user thought stripping resumes from the longest valid current\nprefix or that image, replaying only the remaining canonical suffix. Recovery\nvalidates physical ring rows, restores K and V separately, and commits the cursor\nafter all copies complete. Full-attention rows stay in place. The image has at\nmost `2 * 25 * 4096 * 1023 = 209510400` payload bytes for the pinned model:\nthe next query supplies its own row of the 1,024-token window. It is provisional\nuntil the request succeeds and is released on reset/failure/model replacement.\nTool rounds retain it; new user turns replace it. Other families and CLI\nreset behavior do not use this capability. The server binds to loopback unless the user explicitly selects the\nmachine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).\n\nMference is a research system. The CLI and server expose a small set of typed\nruntime controls. Existing families use FP16 KV and their family-specific prefill\npaths; Maple uses native BF16 KV and layer-major chunked prefill with a\ntoken-ordered cache/attention sweep. Its exact full head remains the default;\nthe CLI can explicitly select the approximate singleton-decode FlashHead when\nthe installed model contains its validated centroid/map data. The memory-first\nexpert cache defaults to 16 slots per layer; the allowed rungs are 8, 16, 24,\n32, 64, 96, and 128, plus an explicit `resident` opt-in, and the CLI/server\nauto profile always uses the slot cache — 96 slots for Qwen on hosts with at\nleast 24 GiB, 32 on at least 16 GiB, and 16 everywhere else. File-read advice\n(`RDADVISE`) is off by default.\n\n## Read next\n\n- [Local OpenAI-compatible server](OPENAI_SERVER.md)\n- [Benchmarks](BENCHMARKS.md)\n- [The experiments that shaped Mference](OPTIMIZATION_JOURNEY.md)\n- [Complete experiment inventory](experiments/EXPERIMENT_INVENTORY.md)\n- [Implementation references](IMPLEMENTATION_REFERENCES.md)\n</document>\n\n<document path=\"docs/FAMILY_CONTRACT.md\">\n# The family contract\n\n`ArchConfig` in\n[`Sources/Mference/Infrastructure/ModelIO/ModelTypes.swift`](../Sources/Mference/Infrastructure/ModelIO/ModelTypes.swift)\nis the declarative contract a model family satisfies. A family is a\nselection over its axes: the runner's branches, the kernels it dispatches,\nand the tensor shapes it expects are all conditioned on these fields, and\n`manifest.json -> arch` must match the compiled baseline field-by-field or\n`Model.load` throws `ModelError.archMismatch`.\n\nThis document is the canonical enumeration of those axes. It is\nrot-checked: `FamilyContractDocTests` in\n[`Tests/Mference/Core/Infrastructure/ModelIO/FamilyContractDocTests.swift`](../Tests/Mference/Core/Infrastructure/ModelIO/FamilyContractDocTests.swift)\nreflects over every registered family config, collects the stored-property\nnames of `ArchConfig` and of the nested config structs it holds, and fails\nif any of them is missing from this file. Adding an axis without a row here\nbreaks the suite; the failure names the undocumented fields.\n\nThe enumeration is of axes, not of behavior. What a kernel does with an\naxis lives in the family's own page —\n[Gemma 4](../README.md), [DeepSeek-V4-Flash](DEEPSEEK_V4_FLASH.md),\n[Inkling-Small](INKLING_SMALL.md), [Qwen 3.8](QWEN38_LONG_CONTEXT.md),\n    [Flint-40B-A2.5B](families/FLINT.md),\n[MiniCPM5](families/MINICPM5.md),\n[GLM-5",
+  "n_gen": 16,
+  "logprobs": true,
+  "logprobs_last": 64
+ },
+ {
+  "id": "lp08-code",
+  "kind": "raw",
+  "text": "import json\n\ndef load_config(path):\n    \"\"\"Read a JSON config file and return a dict.\"\"\"\n",
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "lp09-chat-default",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Name three primary colors."
+   }
+  ],
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "lp10-multilingual",
+  "kind": "raw",
+  "text": "東京は日本の首都です。Paris est la capitale de la France. Berlin ist",
+  "n_gen": 32,
+  "logprobs": true
+ },
+ {
+  "id": "lp11-multi-turn",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a concise assistant."
+   },
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   },
+   {
+    "role": "assistant",
+    "content": "Paris."
+   },
+   {
+    "role": "user",
+    "content": "And of Italy?"
+   }
+  ],
+  "reasoning_effort": "none",
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "trace02",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "none",
+  "n_gen": 1,
+  "trace": true,
+  "logprobs": true,
+  "loop": {
+   "n_phys": 24,
+   "start": 6,
+   "end": 18,
+   "passes": 3
+  }
+ }
+]

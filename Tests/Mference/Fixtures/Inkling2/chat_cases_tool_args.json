@@ -1,0 +1,295 @@
+[
+ {
+  "id": "t01-nested-order",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"query\":\"tax\",\"filter\":{\"year\":2025,\"kind\":\"pdf\",\"tags\":[\"b\",\"a\"],\"range\":{\"to\":10,\"from\":1}},\"limit\":5}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "t02-numbers",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"f1\":1.0,\"f2\":5.0,\"f3\":1e3,\"f4\":-0.0,\"f5\":0.1,\"f6\":2.5e-7,\"f7\":1e16,\"f8\":9.9e15,\"f9\":0.00001,\"f10\":123.456,\"i1\":-3,\"i2\":0,\"i3\":9223372036854775807}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "t03-strings",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"text\":\"café ☕ 東京 😀\",\"esc\":\"a/b \\\"q\\\" back\\\\slash\\nnl\\ttab\",\"ctl\":\"\\u0001x\",\"uesc\":\"\\u00e9\\ud83d\\ude00\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "t04-structure",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"items\":[{\"b\":1,\"a\":2},{\"z\":null,\"y\":true,\"x\":false}],\"empty_obj\":{},\"empty_arr\":[],\"nested_arr\":[[1,2],[]]}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "t05-whitespace",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{ \"b\" : 1 ,\n  \"a\" : { \"y\": 2, \"x\": 1 } }"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "t06-two-calls",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"query\":\"tax\",\"filter\":{\"year\":2025,\"kind\":\"pdf\",\"tags\":[\"b\",\"a\"],\"range\":{\"to\":10,\"from\":1}},\"limit\":5}"
+      }
+     },
+     {
+      "id": "call_2",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"z\":{\"b\":2,\"a\":1}}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_2",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "t07-int-beyond-int64",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Look this up in my records."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "query_records",
+       "arguments": "{\"big\":12345678901234567890,\"small\":1}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "query_records",
+     "description": "Query the user's records.",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   }
+  ]
+ }
+]

@@ -2,13 +2,17 @@
 
 A private on-device assistant for the Mac (the SwiftUI app in `App/`) on its own
 Swift and Metal inference engine. Native pinned checkpoints: Qwen 3.6
-35B-A3B, Maple Preview, Qwen 3.8 27B, and MiniCPM5-2B. The shared core and KV
+35B-A3B, Maple Preview, Qwen 3.8 27B, MiniCPM5-2B, and Inkling 2 Mini (the
+Unsloth UD-Q4_K_XL GGUF, every tensor copied unchanged). The shared core and KV
 cache stay resident; routed experts stream from SSD per token. Qwen 3.8 27B
-and MiniCPM5-2B are dense and fully resident. Through the `MferenceEngine` library, the app and `MferenceServer --library`
+and MiniCPM5-2B are dense and fully resident. Inkling 2 Mini keeps its looped
+core's experts resident and stages the rest on 32 to 47 GB Macs, and holds
+every layer from 48 GB; it is offered on Macs with 32 GB or more. Through the `MferenceEngine` library, the app and `MferenceServer --library`
 run GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
 UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
-GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers five models: Quick,
-Deep, Qwen 3.6, MiniCPM5 and Maple; see [the engine](docs/ENGINE.md).
+GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers six models: Quick,
+Deep, Qwen 3.6, MiniCPM5, Maple and Inkling 2 Mini (32 GB and up); see
+[the engine](docs/ENGINE.md).
 
 ## Scope
 
@@ -38,6 +42,13 @@ swift run -c release MferenceCLI \
 ```
 
 The installer streams each pinned checkpoint without staging the full source.
+Inkling 2 Mini (`--model inkling2mini`) reads one pinned file,
+`unsloth/Inkling-2-Mini-GGUF` at commit
+`45fd08764f2b0bf16b03a5483a80e5c7aaec8772`,
+`Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf_file` (17,629,760,736 bytes,
+SHA-256 `e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3`),
+and copies every tensor unchanged; `--local-gguf <file>` installs from a local
+copy of that file after checking its size and SHA-256.
 Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) up
 to the vendor BF16 repo that the `qwen36original` control install reads,
 producing installs from ~1.4 GB to ~20 GB; check disk before installing.

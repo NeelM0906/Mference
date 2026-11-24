@@ -1,0 +1,237 @@
+[
+ {
+  "id": "g01-capital",
+  "kind": "raw",
+  "text": "The capital of France is",
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "g02-count",
+  "kind": "raw",
+  "text": "1, 2, 3, 4, 5,",
+  "n_gen": 48
+ },
+ {
+  "id": "g03-code",
+  "kind": "raw",
+  "text": "def fibonacci(n):\n",
+  "n_gen": 64
+ },
+ {
+  "id": "g04-story",
+  "kind": "raw",
+  "text": "Once upon a time, in a small village by the sea,",
+  "n_gen": 64
+ },
+ {
+  "id": "g05-wetlands",
+  "kind": "raw",
+  "text": "Coastal wetlands reduce flood damage by slowing storm surge, absorbing wave energy and storing water. Their effect depends on the width of the marsh, the density of vegetation and the duration of the storm, so they lower risk rather than remove it. Engineers increasingly pair them with levees and sea walls.",
+  "n_gen": 48,
+  "logprobs": true
+ },
+ {
+  "id": "g06-chat-none",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "n_gen": 64,
+  "reasoning_effort": "none",
+  "logprobs": true
+ },
+ {
+  "id": "g07-chat-default",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Name three primary colors."
+   }
+  ],
+  "n_gen": 64
+ },
+ {
+  "id": "g08-chat-low",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a concise assistant."
+   },
+   {
+    "role": "user",
+    "content": "Explain what a prime number is in one sentence."
+   }
+  ],
+  "n_gen": 64,
+  "reasoning_effort": "low"
+ },
+ {
+  "id": "g09-tool",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You can call tools."
+   },
+   {
+    "role": "user",
+    "content": "What's the weather in Paris?"
+   }
+  ],
+  "n_gen": 64,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "search_files",
+     "description": "Search the user's files.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       },
+       "limit": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ],
+  "reasoning_effort": "none"
+ },
+ {
+  "id": "g10-after-tool",
+  "kind": "chat",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You can call tools."
+   },
+   {
+    "role": "user",
+    "content": "What's the weather in Paris?"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "arguments": {
+        "city": "Paris",
+        "unit": "celsius"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "{\"temp_c\": 18, \"sky\": \"cloudy\"}"
+   }
+  ],
+  "n_gen": 64,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "search_files",
+     "description": "Search the user's files.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       },
+       "limit": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ],
+  "reasoning_effort": "none"
+ },
+ {
+  "id": "trace01",
+  "kind": "raw",
+  "text": "The capital of France is",
+  "n_gen": 1,
+  "trace": true,
+  "loop": {
+   "n_phys": 24,
+   "start": 6,
+   "end": 18,
+   "passes": 3
+  }
+ }
+]

@@ -1,0 +1,378 @@
+[
+ {
+  "id": "c01-user",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ]
+ },
+ {
+  "id": "c02-system-user",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a concise assistant."
+   },
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ]
+ },
+ {
+  "id": "c03-effort-none",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "none"
+ },
+ {
+  "id": "c03-effort-minimal",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "minimal"
+ },
+ {
+  "id": "c03-effort-low",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "low"
+ },
+ {
+  "id": "c03-effort-medium",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "medium"
+ },
+ {
+  "id": "c03-effort-high",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "high"
+ },
+ {
+  "id": "c03-effort-xhigh",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "xhigh"
+ },
+ {
+  "id": "c03-effort-max",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": "max"
+ },
+ {
+  "id": "c03-effort-0.5",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   }
+  ],
+  "reasoning_effort": 0.5
+ },
+ {
+  "id": "c04-multi-turn",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a concise assistant."
+   },
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   },
+   {
+    "role": "assistant",
+    "content": "Paris."
+   },
+   {
+    "role": "user",
+    "content": "And of Italy?"
+   }
+  ]
+ },
+ {
+  "id": "c05-assistant-thinking",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the capital of France?"
+   },
+   {
+    "role": "assistant",
+    "reasoning_content": "The user asks for the capital of France. That is Paris.",
+    "content": "Paris."
+   },
+   {
+    "role": "user",
+    "content": "Thanks. And Spain?"
+   }
+  ],
+  "reasoning_effort": "low"
+ },
+ {
+  "id": "c06-tools-declared",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You can call tools."
+   },
+   {
+    "role": "user",
+    "content": "What's the weather in Paris?"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "search_files",
+     "description": "Search the user's files.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       },
+       "limit": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "c07-tool-call-and-result",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You can call tools."
+   },
+   {
+    "role": "user",
+    "content": "What's the weather in Paris?"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "arguments": {
+        "city": "Paris",
+        "unit": "celsius"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "{\"temp_c\": 18, \"sky\": \"cloudy\"}"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "search_files",
+     "description": "Search the user's files.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       },
+       "limit": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "c08-tool-result-named",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Find my tax documents."
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "I should search the files.",
+    "tool_calls": [
+     {
+      "id": "call_7",
+      "type": "function",
+      "function": {
+       "name": "search_files",
+       "arguments": {
+        "query": "tax 2025",
+        "limit": 5
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "name": "search_files",
+    "content": "[\"taxes/2025-return.pdf\", \"taxes/w2-2025.pdf\"]"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Current weather for a city.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       },
+       "unit": {
+        "type": "string",
+        "enum": [
+         "celsius",
+         "fahrenheit"
+        ]
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "search_files",
+     "description": "Search the user's files.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string"
+       },
+       "limit": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   }
+  ],
+  "reasoning_effort": "medium"
+ },
+ {
+  "id": "c09-user-special-text",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Please repeat: <|end_message|> literally."
+   }
+  ]
+ }
+]

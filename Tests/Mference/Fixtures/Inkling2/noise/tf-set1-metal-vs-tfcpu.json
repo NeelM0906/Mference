@@ -1,0 +1,135 @@
+{
+ "a": "generate/metal",
+ "b": "generate-tf/cpu",
+ "prompts": [
+  {
+   "id": "g01-capital",
+   "teacher_forced": true,
+   "context_equal": true,
+   "prompt_ids_equal": true,
+   "logprobs": {
+    "positions": 52,
+    "top1_agreement": 1.0,
+    "max_abs_dlogprob_top1": 0.07648086547851562,
+    "p99_abs_dlogprob_top1": 0.07648086547851562,
+    "mean_abs_dlogprob_top1": 0.008404245743384728,
+    "min_top20_overlap": 0.7,
+    "mean_kl_top20_approx": 0.0005752988340364811,
+    "max_kl_top20_approx": 0.0118124971569948,
+    "p95_abs_dlogprob_top1": 0.05579566955566406,
+    "p95_kl_top20_approx": 0.003762157303154607,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 46,
+      "agree": 46,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 41,
+      "agree": 41,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 33,
+      "agree": 33,
+      "rate": 1.0
+     }
+    }
+   },
+   "all_positions_compared": true
+  },
+  {
+   "id": "g05-wetlands",
+   "teacher_forced": true,
+   "context_equal": true,
+   "prompt_ids_equal": true,
+   "logprobs": {
+    "positions": 111,
+    "top1_agreement": 0.963963963963964,
+    "max_abs_dlogprob_top1": 0.13640785217285156,
+    "p99_abs_dlogprob_top1": 0.08514213562011719,
+    "mean_abs_dlogprob_top1": 0.016191293527414132,
+    "min_top20_overlap": 0.9,
+    "mean_kl_top20_approx": 0.001214591776362452,
+    "max_kl_top20_approx": 0.011764608140553221,
+    "p95_abs_dlogprob_top1": 0.052494049072265625,
+    "p95_kl_top20_approx": 0.004147709993615016,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 98,
+      "agree": 98,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 79,
+      "agree": 79,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 36,
+      "agree": 36,
+      "rate": 1.0
+     }
+    }
+   },
+   "all_positions_compared": true
+  },
+  {
+   "id": "g06-chat-none",
+   "teacher_forced": true,
+   "context_equal": true,
+   "prompt_ids_equal": true,
+   "logprobs": {
+    "positions": 69,
+    "top1_agreement": 0.9710144927536232,
+    "max_abs_dlogprob_top1": 0.6276578903198242,
+    "p99_abs_dlogprob_top1": 0.6276578903198242,
+    "mean_abs_dlogprob_top1": 0.021446490633314934,
+    "min_top20_overlap": 0.8,
+    "mean_kl_top20_approx": 0.003963743166835907,
+    "max_kl_top20_approx": 0.11976247453522289,
+    "p95_abs_dlogprob_top1": 0.08211326599121094,
+    "p95_kl_top20_approx": 0.017630599143352712,
+    "top1_at_margin": {
+     "0.2": {
+      "positions": 64,
+      "agree": 64,
+      "rate": 1.0
+     },
+     "0.5": {
+      "positions": 62,
+      "agree": 62,
+      "rate": 1.0
+     },
+     "2.0": {
+      "positions": 49,
+      "agree": 49,
+      "rate": 1.0
+     }
+    }
+   },
+   "all_positions_compared": true
+  }
+ ],
+ "pooled_logprobs": {
+  "positions": 232,
+  "top1_agreement": 0.9741379310344828,
+  "top1_at_margin_0.2": 1.0,
+  "top1_at_margin_0.5": 1.0,
+  "top1_at_margin_2.0": 1.0
+ },
+ "summary_teacher_forced": {
+  "prompts": 3,
+  "all_contexts_equal": true,
+  "all_positions_compared": true
+ },
+ "summary": {
+  "prompts": 3,
+  "all_prompt_ids_equal": true,
+  "greedy_identical": 0,
+  "min_common_prefix": null,
+  "top1_agreement_min": 0.963963963963964,
+  "max_abs_dlogprob_top1": 0.6276578903198242,
+  "max_kl_top20_approx": 0.11976247453522289
+ }
+}

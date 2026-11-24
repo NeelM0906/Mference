@@ -3,10 +3,11 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <qwen36|qwen36original|qwen38|maple|minicpm5|minicpm5mlx>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <qwen36|qwen36original|qwen38|maple|minicpm5|minicpm5mlx|inkling2mini>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>] [--local-gguf <file>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
+  MferenceRepack --verify-gguf-copy --input-gturbo <model.gturbo> --local-gguf <file>
   MferenceRepack --help
 
 --attach-mtp appends the Qwen 3.8 MTP draft-layer tensors from a local BF16
@@ -26,6 +27,14 @@ quantizer-quality gate.
 minicpm5 reads openbmb/MiniCPM5-2B's BF16 upload and quantizes to INT4 affine
 group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the
 vendor's own MLX INT4 conversion of the same checkpoint, the W2.1b control.
+inkling2mini installs Unsloth's UD-Q4_K_XL GGUF of Thinking Machines Inkling 2
+Mini (~17.6 GB read and written): every tensor is copied unchanged, nothing is
+re-quantized. --local-gguf reads a local copy of that pinned file instead of the
+Hub; it must match the pin's size and SHA-256, and the install is the same. The
+path must name the file itself, not a symbolic link (a Hugging Face cache
+snapshot entry is one: pass the blob it points to).
+--verify-gguf-copy compares every tensor of a GGUF install with the GGUF it was
+copied from, byte for byte.
 
 The installer streams the selected checkpoint (default: the supported Qwen 3.6
 checkpoint) from Hugging Face and repackages it without materializing the
@@ -65,6 +74,9 @@ private struct Arguments {
     var baseURL: URL?
     var dryRun = false
     var skipMTP = false
+    var localGGUF: String?
+    var verifyGGUFCopy = false
+    var modelGiven = false
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -89,9 +101,18 @@ private struct Arguments {
             case "--discard-partial":
                 parsed.discardPartial = true
                 index += 1
+            case "--verify-gguf-copy":
+                parsed.verifyGGUFCopy = true
+                index += 1
             case "--verify-install":
                 parsed.verifyInstall = true
                 index += 1
+            case "--local-gguf":
+                guard index + 1 < values.count else {
+                    throw ParseError.missingValue(flag)
+                }
+                parsed.localGGUF = values[index + 1]
+                index += 2
             case "--attach-mtp":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
@@ -108,6 +129,7 @@ private struct Arguments {
                         + SupportedModelSource.all.map(\.name).joined(separator: ", "))
                 }
                 parsed.model = source
+                parsed.modelGiven = true
                 index += 2
             case "--base-url":
                 guard index + 1 < values.count else {
@@ -137,6 +159,26 @@ private struct Arguments {
 
         guard !(parsed.resume && parsed.discardPartial) else {
             throw ParseError.invalidMode("--resume and --discard-partial are mutually exclusive")
+        }
+        if parsed.verifyGGUFCopy {
+            guard parsed.inputGTurbo != nil, parsed.localGGUF != nil else {
+                throw ParseError.missingRequired("--input-gturbo and --local-gguf")
+            }
+            guard parsed.output == nil, !parsed.verifyInstall, !parsed.resume, !parsed.overwrite,
+                  parsed.attachMTP == nil, !parsed.discardPartial, !parsed.modelGiven,
+                  parsed.baseURL == nil, !parsed.dryRun, !parsed.skipMTP else {
+                throw ParseError.invalidMode("--verify-gguf-copy accepts only --input-gturbo and --local-gguf")
+            }
+            return parsed
+        }
+        if parsed.localGGUF != nil {
+            guard parsed.model.kind == .gguf else {
+                throw ParseError.invalidMode("--local-gguf needs a GGUF model (inkling2mini)")
+            }
+            guard parsed.baseURL == nil, !parsed.discardPartial, !parsed.verifyInstall,
+                  parsed.attachMTP == nil else {
+                throw ParseError.invalidMode("--local-gguf only accepts an install")
+            }
         }
         if parsed.discardPartial {
             guard parsed.output != nil else {
@@ -238,6 +280,18 @@ private func run(_ values: [String]) async -> Int32 {
         }
     }
 
+    if arguments.verifyGGUFCopy, let input = arguments.inputGTurbo, let gguf = arguments.localGGUF {
+        do {
+            let result = try GGUFCopyVerifier.run(installDirectory: input, ggufPath: gguf)
+            print("Identical: \(result.residentTensors) resident and \(result.expertTensors) expert tensors, "
+                + "\(result.bytesCompared) bytes")
+            return 0
+        } catch {
+            printError("GGUF copy verification failed: \(error)")
+            return 1
+        }
+    }
+
     if arguments.verifyInstall, let input = arguments.inputGTurbo {
         do {
             let result = try VerifiedInstallTool.run(
@@ -253,7 +307,7 @@ private func run(_ values: [String]) async -> Int32 {
 
     guard let output = arguments.output else { return 2 }
     let source = arguments.model
-    let options = source.installOptions(
+    var options = source.installOptions(
         outputDirectory: URL(fileURLWithPath: output),
         overwrite: arguments.overwrite,
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],
@@ -261,6 +315,7 @@ private func run(_ values: [String]) async -> Int32 {
         baseURL: arguments.baseURL,
         dryRunSpaceCheck: arguments.dryRun,
         sidecarPolicy: SidecarPolicy(carryMTP: !arguments.skipMTP))
+    options.localGGUFPath = arguments.localGGUF
     do {
         let printer = InstallProgressPrinter()
         let audit = RepackAudit()

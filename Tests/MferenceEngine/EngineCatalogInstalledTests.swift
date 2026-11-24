@@ -4,11 +4,12 @@ import MferenceEngine
 
 /// Opt-in check of discovery over this machine's real library roots. Gate:
 /// `MFERENCE_ENGINE_CATALOG_CHECK=1`. Reads manifests, receipts, and GGUF
-/// headers only; loads no model. Expects all five product models installed.
+/// headers only; loads no model. Expects every product model installed and
+/// runnable (Inkling 2 Mini needs its runner and a Mac with 32 GB or more).
 @Suite struct EngineCatalogInstalledTests {
     private static let enabled = ProcessInfo.processInfo.environment["MFERENCE_ENGINE_CATALOG_CHECK"] == "1"
 
-    @Test(.enabled(if: enabled)) func realLibraryListsExactlyTheFiveProductModels() {
+    @Test(.enabled(if: enabled)) func realLibraryListsExactlyTheProductModels() {
         let started = ContinuousClock.now
         let catalog = EngineCatalogDiscovery.discoverDefault()
         let elapsed = started.duration(to: .now)

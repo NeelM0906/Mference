@@ -41,13 +41,54 @@ import Tokenizers
 ///
 /// `flush()` is terminal in the generation loop, but pushing afterwards is not a
 /// trap: the committed prefix is clamped so that it can never rewind.
+///
+/// Cost: `push(_:)` needs the decode of every stable ID so far, but decoding
+/// them all on each push made a long generation quadratic (about 0.63 µs per
+/// token of history with Inkling 2's tokenizer: 5 ms a token at position
+/// 8,000). `decoded` keeps that decode instead. Each push re-decodes only
+/// the old IDs from the `contextTokens`-th last one that changed the decode
+/// (unknown IDs, skipped specials and empty tokens do not count), with and
+/// without the new ones (`extendedDecode`). The result is the full decode
+/// whenever no new token changes text more than `contextTokens` such tokens
+/// back: a UTF-8 scalar spans at most four byte tokens, and the leading-space
+/// rules touch only the first token. Two cases reach further, and both take
+/// the full decode as before:
+/// - a tokenizer that applies `cleanUpTokenizationSpaces` (its " ' " rule
+///   rewrites a chain of quotes from arbitrarily far back);
+/// - a window that cannot show that the old text is unchanged.
+/// None of the shipped tokenizers applies clean-up.
+/// `DetokenizerLinearOracleTests` requires every emitted chunk to equal the
+/// full-decode implementation's on long adversarial streams for each
+/// tokenizer.
 struct MFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
     @usableFromInline var emitted: String = ""
+    /// `tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)`, kept
+    /// current by `push(_:)`.
+    @usableFromInline var decoded: String = ""
+    /// Indices in `stableIDs` of the pushed tokens whose push changed the
+    /// decode. Byte-fallback IDs moved in with a push are not counted on their
+    /// own: the library drops one that is flagged special, so counting them
+    /// could narrow the window. Leaving them out can only widen it.
+    @usableFromInline var contentIndices: [Int] = []
+    /// Start in `stableIDs` of a byte-fallback run that only IDs with no text
+    /// of their own follow (unknown IDs, skipped specials). The library drops
+    /// a byte-fallback run that ends the decoded tokens, so this run is
+    /// missing from `decoded` until text follows it, and then the decode gains
+    /// text from its start. The window then starts `contextTokens`
+    /// contributing IDs before it, so the run has context on its left.
+    @usableFromInline var danglingByteRunStart: Int?
+    /// False when the tokenizer's decode applies clean-up: every push then
+    /// decodes everything, exactly as before.
+    @usableFromInline let decodesIncrementally: Bool
+    /// Old text-contributing IDs re-decoded with each push (see the type's cost
+    /// note).
+    static let contextTokens = 16
     init(tokenizer: MFTokenizer, skipSpecialTokens: Bool = true) {
         self.tokenizer = tokenizer.tokenizer
+        self.decodesIncrementally = !tokenizer.decodeCleansUpSpaces
     }
 
     mutating func push(_ id: Int32) -> String {
@@ -58,14 +99,72 @@ struct MFDetokenizer {
             return ""
         }
 
-        if !trailingByteIDs.isEmpty {
+        let previousCount = stableIDs.count
+        let previousContent = contentIndices.count
+        let floor = danglingByteRunStart
+        let movedBytes = trailingByteIDs.count
+        if movedBytes > 0 {
             stableIDs.append(contentsOf: trailingByteIDs)
             trailingByteIDs.removeAll(keepingCapacity: true)
         }
         stableIDs.append(tokenID)
 
-        let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        return commitDelta(current)
+        let previous = decoded
+        decoded = extendedDecode(previousCount: previousCount, previousContent: previousContent, floor: floor)
+        // Whether the push changed the decode, rather than the token's own
+        // decode: no single-token decode is needed (WordPiece's decoder traps
+        // on an empty token list), and a token that ends a dangling run
+        // counts here, whatever its own text.
+        if !Self.utf8(of: decoded, equals: previous) {
+            contentIndices.append(stableIDs.count - 1)
+            danglingByteRunStart = nil
+        } else if movedBytes > 0, danglingByteRunStart == nil {
+            danglingByteRunStart = previousCount
+        }
+        return commitDelta(decoded)
+    }
+
+    /// The decode of all of `stableIDs`, given `decoded` for its first
+    /// `previousCount`, of which `previousContent` contribute text. The old
+    /// IDs from the `contextTokens`-th last contributing one are decoded alone
+    /// (`before`) and with the new ones (`after`). With a dangling run at
+    /// `floor`, the window starts `contextTokens` contributing IDs before the
+    /// run when that is earlier. When `after` starts with
+    /// `before`, the new IDs changed none of that text and only append to it,
+    /// so `decoded` plus `after`'s remainder is the full decode. Otherwise the
+    /// full decode is computed.
+    ///
+    /// One exception is allowed: a trailing run of U+FFFD in `before`, a
+    /// scalar whose last bytes were still to come. `decoded` ends with the
+    /// same run, and it is replaced along with `after`'s new text. Anything
+    /// else falls back.
+    @usableFromInline
+    func extendedDecode(previousCount: Int, previousContent: Int, floor: Int?) -> String {
+        func fullDecode() -> String { tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true) }
+        guard decodesIncrementally, previousContent > Self.contextTokens else { return fullDecode() }
+        var start = contentIndices[previousContent - Self.contextTokens]
+        if let floor {
+            // Contributing IDs before the run: the first index at or past it.
+            var low = 0, high = previousContent
+            while low < high {
+                let mid = (low + high) / 2
+                if contentIndices[mid] < floor { low = mid + 1 } else { high = mid }
+            }
+            guard low >= Self.contextTokens else { return fullDecode() }
+            start = min(start, contentIndices[low - Self.contextTokens])
+        }
+        let before = tokenizer.decode(tokens: Array(stableIDs[start..<previousCount]), skipSpecialTokens: true)
+        let after = tokenizer.decode(tokens: Array(stableIDs[start...]), skipSpecialTokens: true)
+        let pending = Self.trailingReplacementByteCount(before)
+        let stem = before.utf8.dropLast(pending)
+        guard after.utf8.starts(with: stem),
+              decoded.utf8.count >= pending,
+              decoded.utf8.suffix(pending).elementsEqual(before.utf8.suffix(pending)) else {
+            return fullDecode()
+        }
+        let appended = String(decoding: after.utf8.dropFirst(stem.count), as: UTF8.self)
+        guard pending > 0 else { return decoded + appended }
+        return String(decoding: decoded.utf8.dropLast(pending), as: UTF8.self) + appended
     }
 
     mutating func flush() -> String {
@@ -114,7 +213,7 @@ struct MFDetokenizer {
             held == 0 ? current : String(decoding: committed, as: UTF8.self)
         }
 
-        guard cur.starts(with: emitted.utf8) else {
+        guard Self.utf8(of: current, startsWith: emitted) else {
             // The decode contradicts what was already handed out (see the
             // clean-up note above). The stale text cannot be retracted, but
             // dropping the divergent tail loses characters outright — "do n't"
@@ -136,6 +235,26 @@ struct MFDetokenizer {
         let delta = String(decoding: committed.dropFirst(emitted.utf8.count), as: UTF8.self)
         emitted = committedText()
         return delta
+    }
+
+    /// Byte equality, as one contiguous compare (`String ==` is canonical
+    /// equivalence, not bytes).
+    @usableFromInline
+    static func utf8(of text: String, equals other: String) -> Bool {
+        text.utf8.count == other.utf8.count && utf8(of: text, startsWith: other)
+    }
+
+    /// `text.utf8.starts(with: prefix.utf8)`, as one contiguous byte compare:
+    /// the element-by-element walk over every emitted byte was most of a
+    /// push's remaining cost on a long generation.
+    @usableFromInline
+    static func utf8(of text: String, startsWith prefix: String) -> Bool {
+        var text = text, prefix = prefix
+        return text.withUTF8 { t in
+            prefix.withUTF8 { p in
+                p.count <= t.count && (p.isEmpty || memcmp(t.baseAddress!, p.baseAddress!, p.count) == 0)
+            }
+        }
     }
 
     /// Byte length of the longest common prefix of `a` and `b`, backed off to a

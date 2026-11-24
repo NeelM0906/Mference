@@ -4,10 +4,27 @@ import Mference
 /// Prefill chunk selection. `.fixed` must name an allowed size;
 /// `.auto` resolves to the smallest allowed size covering the prompt,
 /// which minimizes routed-expert re-reads (expert I/O scales with
-/// prompt_tokens / chunk_tokens).
+/// prompt_tokens / chunk_tokens), up to the family's own chunk
+/// (`RuntimeConfiguration.autoPrefillChunkTokens`).
 public enum PrefillChunkChoice: Equatable, Sendable {
     case fixed(Int)
     case auto
+
+    /// A raw run knows its prompt before prefill, so `auto` takes the
+    /// smallest allowed chunk covering it, up to the family's own chunk
+    /// (`RuntimeConfiguration.autoPrefillChunkTokens`). The family comes
+    /// from the install's manifest; when that cannot be read, the allowed
+    /// sizes alone bound it, as before the family cap, and the load reports
+    /// the error. A fixed size is used as given.
+    func rawChunkTokens(promptTokens: Int, modelDirectory: URL) -> Int {
+        switch self {
+        case .fixed(let n): return n
+        case .auto:
+            return RuntimeConfiguration.autoPrefillChunkTokens(
+                promptTokens: promptTokens,
+                family: try? ManifestReader.peekFamily(directoryURL: modelDirectory))
+        }
+    }
 
     /// Interactive chat has no prompt at load time, so `auto` takes the
     /// family's server chunk: both prefill a growing conversation turn after
@@ -46,6 +63,11 @@ public struct Args: Equatable, Sendable {
     // are explicit overrides even when they equal a shared default or zero.
     var omittedSamplingOptions: Set<SamplingOption> = []
     public var reasoningEffort: QwenReasoningEffort?
+    /// `--reasoning-effort` given one of Inkling 2's own names beyond the
+    /// shared four (minimal, high, max; `Inkling2Effort.knownName`). Parsing
+    /// cannot know the model; `run` refuses it for any other dialect exactly
+    /// as parsing refuses an unknown value (`inkling2EffortRefusal`).
+    public var inkling2Effort: MFTokenizer.Inkling2Effort?
     public var model: String
     public var prompt: String?
     public var messagesFile: String?
@@ -59,6 +81,9 @@ public struct Args: Equatable, Sendable {
     /// `--max-context max`: `maxContext` becomes the model's native context in
     /// `resolvingModelMaxContext()`.
     public var usesModelMaxContext: Bool = false
+    /// Set by `resolvingModelMaxContext()` when the family's cap for this
+    /// Mac's memory lowered `maxContext` (Inkling 2 under 48 GB).
+    public var hostContextCap: Int?
     public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
     public var topK: Int? { didSet { omittedSamplingOptions.remove(.topK) } }
     public var topP: Float? { didSet { omittedSamplingOptions.remove(.topP) } }
@@ -245,8 +270,9 @@ extension Args {
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to
-                                the prompt (--chat uses the server's chunk
-                                for the model family). Allowed:
+                                the prompt, at most 2048 for Inkling 2 Mini
+                                (--chat uses the server's chunk for the
+                                model family). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
       --flash-head              Enable Maple's approximate sparse decode head.
                                 Prefill remains exact; unsupported models use
@@ -269,6 +295,7 @@ extension Args {
       --reasoning-effort <mode>  Qwen chat: xhigh, medium, low, or none.
                                 Qwen 3.6 uses binary on/off aliases. Not
                                 applied to raw prompts.
+                                Inkling 2 also takes minimal, high, or max.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -309,6 +336,7 @@ extension Args {
         var kvPoolPages: Int? = nil
         var reserveFullKV = false
         var reasoningEffort: QwenReasoningEffort?
+        var inkling2Effort: MFTokenizer.Inkling2Effort?
 
         var index = 0
         while index < argv.count {
@@ -391,10 +419,15 @@ extension Args {
                 temperature = parsed
             case "--reasoning-effort":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = QwenReasoningEffort(rawValue: value) else {
+                if let parsed = QwenReasoningEffort(rawValue: value) {
+                    reasoningEffort = parsed
+                    inkling2Effort = nil
+                } else if let own = MFTokenizer.Inkling2Effort.knownName(value) {
+                    inkling2Effort = own
+                    reasoningEffort = nil
+                } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
-                reasoningEffort = parsed
             case "--top-k":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), (0...256).contains(parsed) else {
@@ -498,7 +531,7 @@ extension Args {
         }
 
         guard let model else { throw ArgsError.requiredMissing("--model") }
-        if reasoningEffort != nil && prompt != nil {
+        if (reasoningEffort != nil || inkling2Effort != nil) && prompt != nil {
             throw ArgsError.invalidValue(flag: "--reasoning-effort", value: "requires chat or messages, not raw --prompt")
         }
         if prompt != nil && messagesFile != nil {
@@ -556,18 +589,40 @@ extension Args {
                     kvPoolPages: kvPoolPages,
                     reserveFullKV: reserveFullKV,
                     reasoningEffort: reasoningEffort)
+        result.inkling2Effort = inkling2Effort
         result.omittedSamplingOptions = Set(SamplingOption.allCases).subtracting(providedSamplingOptions)
         result.usesModelMaxContext = usesModelMaxContext
         return result
     }
 
-    /// Replaces `--max-context max` with the installed model's native context.
-    public func resolvingModelMaxContext() throws -> Args {
-        guard usesModelMaxContext else { return self }
+    /// Replaces `--max-context max` with the installed model's native context,
+    /// and lowers it, or a larger explicit value, to the family's cap for this
+    /// Mac's memory where it has one (`ModelFamily.memoryContextCap`: Inkling
+    /// 2 on a Mac whose expert residency plan stages layers). For an explicit
+    /// value the family is peeked without failing, so a model the peek cannot
+    /// read fails later, exactly as before.
+    public func resolvingModelMaxContext(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory)
+        throws -> Args {
+        let directory = URL(fileURLWithPath: model)
+        let family = usesModelMaxContext
+            ? try ManifestReader.peekFamily(directoryURL: directory)
+            : try? ManifestReader.peekFamily(directoryURL: directory)
+        return resolvingMaxContext(family: family, physicalMemory: physicalMemory)
+    }
+
+    /// `resolvingModelMaxContext` once the family is known (nil: not known,
+    /// for an explicit value only). `hostContextCap` is set when the cap
+    /// lowered the context.
+    func resolvingMaxContext(family: ModelFamily?, physicalMemory: UInt64) -> Args {
         var resolved = self
-        resolved.maxContext = try ManifestReader.peekFamily(
-            directoryURL: URL(fileURLWithPath: model)).maximumContext
-        resolved.usesModelMaxContext = false
+        if usesModelMaxContext, let family {
+            resolved.maxContext = family.maximumContext
+            resolved.usesModelMaxContext = false
+        }
+        if let cap = family?.memoryContextCap(physicalMemory: physicalMemory), resolved.maxContext > cap {
+            resolved.maxContext = cap
+            resolved.hostContextCap = cap
+        }
         return resolved
     }
 

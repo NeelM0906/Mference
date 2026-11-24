@@ -1,0 +1,150 @@
+{
+ "id": "F05-reasoning-effort",
+ "checklist_items": [
+  6
+ ],
+ "status_on_trunk_6a646319": "PRESENT after ruling D (K1 hand-in 12): Inkling 2 takes every name of its template's effort_map (none, minimal, low, medium, high, xhigh, max); tested through the server in Inkling2EffortServerTests. On trunk 6a646319 only none, low, medium and xhigh were accepted.",
+ "variants": [
+  {
+   "name": "low",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "low"
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: .named(\"low\")); the render's effort line prints 0.2 (Inkling2ChatTests.effortLevelsPrintAsTheTemplatePrintsThem)"
+   }
+  },
+  {
+   "name": "omitted",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: nil); the effort line prints 0.9 (Inkling2ChatTests.singleUserMessageGetsTheDefaultEffort)"
+   }
+  },
+  {
+   "name": "high",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "high"
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: .named(\"high\")); the effort line prints 0.9 (ruling D, K1 hand-in 12: Inkling 2 takes its template's own names)"
+   }
+  },
+  {
+   "name": "minimal",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "minimal"
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: .named(\"minimal\")); the effort line prints 0.1 (ruling D, K1 hand-in 12: Inkling 2 takes its template's own names)"
+   }
+  },
+  {
+   "name": "max",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "max"
+   },
+   "expect": {
+    "http_status": 200,
+    "backend_prompt": "encodeInkling2Chat(messages, effort: .named(\"max\")); the effort line prints 0.99 (ruling D, K1 hand-in 12: Inkling 2 takes its template's own names)"
+   }
+  },
+  {
+   "name": "unknown-name-is-refused",
+   "request": {
+    "model": "inkling-2-mini-ud-q4_k_xl",
+    "stream": true,
+    "stream_options": {
+     "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "seed": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "reasoning_effort": "ultra"
+   },
+   "expect": {
+    "http_status": 400,
+    "error": {
+     "param": "reasoning_effort",
+     "code": "unsupported_value"
+    },
+    "note": "only the template effort_map names are accepted: none, minimal, low, medium, high, xhigh, max"
+   }
+  }
+ ]
+}

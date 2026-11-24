@@ -23,7 +23,7 @@ behaviour is in [OPENAI_SERVER.md](OPENAI_SERVER.md).
 
 ## Models and identifiers
 
-The product offers five models, and the catalog lists only these by default.
+The product offers six models, and the catalog lists only these by default.
 
 | Slot | ID | Engine | On disk |
 | --- | --- | --- | --- |
@@ -32,6 +32,7 @@ The product offers five models, and the catalog lists only these by default.
 | Qwen 3.6 | `qwen3.6-35b-a3b` | `mference` | `qwen36.gturbo` |
 | MiniCPM5 | `minicpm5-2b-int4g64` | `mference` | `minicpm5.gturbo` |
 | Maple | `maple-preview-2bit-mlx` | `mference` | `maple.gturbo` |
+| Inkling 2 Mini | `inkling-2-mini-ud-q4_k_xl` | `mference` | `inkling2mini.gturbo` (32 GB of memory and up) |
 
 Deep decodes with its MTP head: `LlamaBackend` loads the GGUF's nextn
 layer and drafts with llama.cpp's own `draft-mtp` (`common_speculative`, up
@@ -148,7 +149,10 @@ backend per kind and calls `load` only with no other model resident.
 
 - `nativeMaxContext`: the context of `.gturbo` models. It defaults to the
   server's `--max-context` default of 16,384, and nil means each model's
-  native maximum (`--max-context max`).
+  native maximum (`--max-context max`). A descriptor's `hostContextCap`
+  lowers either: Inkling 2 Mini runs at most 16,384 tokens (the tested
+  maximum on 32 GB) on a Mac under 48 GB, where its expert residency plan
+  stages layers.
 - `ggufMaxContext`: the context of GGUF models. Nil means 32,768 tokens, and
   a GGUF never runs past its native context.
 - `EngineModelDescriptor.resolvedContext(options:)` gives the value before
@@ -230,13 +234,18 @@ a weight file or a tensor.
 
 ### Product allowlist
 
-With the default scope (`EngineCatalogScope.product`), only the five
+With the default scope (`EngineCatalogScope.product`), only the six
 product models are listed:
 
 - A native product model is the install whose family identifier is the
   slot's ID. When several are found, the one in the earliest root wins,
-  then the one labelled `qwen36`, `minicpm5`, or `maple`, then path order.
-  The others are skipped, and the skip names the winner.
+  then the one labelled `qwen36`, `minicpm5`, `maple`, or `inkling2mini`,
+  then path order. The others are skipped, and the skip names the winner.
+- A native product model with a memory floor
+  (`EngineProductSlot.minimumPhysicalMemory`, 32 GB for Inkling 2 Mini) is
+  skipped in either scope on a Mac with less physical memory, with the reason
+  under its identifier ("Needs a Mac with 32 GB of memory or more.").
+  `discover` takes the memory as a parameter, for tests.
 - A product GGUF is recognized by its exact file name from D1. It needs a
   readable header with a context length. Deep also needs its MTP tensors,
   so a renamed non-MTP file is refused.

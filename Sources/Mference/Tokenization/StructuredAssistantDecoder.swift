@@ -35,6 +35,49 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var emittedCalls = 0
     private var failed = false
 
+    /// Inkling 2: where the generation is. Between blocks, in a
+    /// `<|message_model|>` header (a tool name may follow), or inside a
+    /// thinking, visible or tool-call block; every block ends at
+    /// `<|end_message|>`.
+    private enum Inkling2Block { case between, header, thinking, visible, toolCall }
+    private var inkling2Block: Inkling2Block = .between
+    private var inkling2Header = ""
+    private var inkling2CallHeader = ""
+
+    /// Inkling 2 only, off by default: a JSON tool-call block that does not
+    /// parse (invalid JSON, a tool the request did not offer, a header and
+    /// body naming different tools) or is still open at the end becomes
+    /// visible text, the block's body without framing, instead of an error.
+    /// The servers turn it on so an OpenAI client gets the model's text with
+    /// `finish_reason: stop` rather than a failed request. An oversized body
+    /// still fails.
+    public var inkling2MalformedToolCallsAsText = false
+
+    /// How many tool-call blocks `inkling2MalformedToolCallsAsText` turned
+    /// into text. A turn with any is not what a re-render of its reply gives
+    /// (the KV holds tool-call framing, the reply is plain text), so servers
+    /// do not keep it for prompt-prefix reuse.
+    public private(set) var convertedInkling2MalformedToolCalls = 0
+
+    /// The body of an Inkling 2 tool-call block as text: its tokens without
+    /// any special token (EOS, when the block was still open).
+    private func inkling2CallBody(_ tokens: [Int32]) -> String {
+        tokenizer.decode(tokens.filter { !tokenizer.stopTokenIDs.contains($0) }, skipSpecialTokens: true)
+    }
+
+    /// A block's body turned into text: the content event, counted as visible
+    /// payload (special tokens, which the text drops, are not counted).
+    private func inkling2BodyAsText(_ tokens: [Int32]) -> [StructuredAssistantEvent] {
+        convertedInkling2MalformedToolCalls += 1
+        payloadCounts.visible += tokens.filter { id in
+            !tokenizer.stopTokenIDs.contains(id)
+                && !(tokenizer.decode([id], skipSpecialTokens: true).isEmpty
+                     && !tokenizer.decode([id], skipSpecialTokens: false).isEmpty)
+        }.count
+        let body = inkling2CallBody(tokens)
+        return body.isEmpty ? [] : [.content(body)]
+    }
+
     public convenience init(tokenizer: MFTokenizer,
                             allowedTools: Set<String>,
                             idGenerator: @escaping @Sendable () -> String = {
@@ -88,6 +131,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw ToolCallParserError.malformed }
+        if tokenizer.dialect == .inkling2 {
+            return try consumeInkling2(tokenID: tokenID, delta: delta)
+        }
         if payloadTokenCounts != nil, tokenID >= 0,
            !tokenizer.stopTokenIDs.contains(tokenID),
            tokenID != tokenizer.thinkStartID, tokenID != tokenizer.thinkEndID,
@@ -100,6 +146,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         switch tokenizer.dialect {
         case .chatml: return try consumeChatML(tokenID: tokenID, delta: delta)
         case .minicpm: return try consumeMiniCPM(tokenID: tokenID, delta: delta)
+        case .inkling2: return try consumeInkling2(tokenID: tokenID, delta: delta)
         }
     }
 
@@ -241,6 +288,98 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return delta.isEmpty ? [] : [.content(delta)]
     }
 
+    /// Inkling 2 transitions. A turn is a list of blocks,
+    ///   `<|message_model|><|content_thinking|>…<|end_message|>`
+    ///   `<|message_model|><|content_text|>…<|end_message|>`
+    ///   `<|message_model|>NAME<|content_invoke_tool_json|>{"name":…,"args":…}<|end_message|>`
+    /// then `<|content_model_end_sampling|>`. Thinking goes to `onReasoning`;
+    /// text, tool-error and text-invoke blocks are visible (the vendor's
+    /// response template reads all three as content); a JSON block is a tool
+    /// call for `Inkling2ToolCallParser`. Header text is a tool name, never
+    /// content. Text outside any block is shown rather than dropped.
+    private func consumeInkling2(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        guard let t = tokenizer.inkling2Tokens else {
+            failed = true
+            throw ToolCallParserError.malformed
+        }
+        if inkling2Block == .toolCall {
+            if tokenID == t.endMessage {
+                let tokens = toolTokens ?? []
+                toolTokens = nil
+                inkling2Block = .between
+                inkling2Header = ""
+                let text = tokenizer.decode(tokens, skipSpecialTokens: false)
+                do {
+                    let call = try Inkling2ToolCallParser().parse(
+                        text, headerName: inkling2CallHeader,
+                        allowedTools: allowedTools, id: idGenerator())
+                    emittedCalls += 1
+                    return [.toolCall(call)]
+                } catch {
+                    if inkling2MalformedToolCallsAsText {
+                        return inkling2BodyAsText(tokens)
+                    }
+                    failed = true
+                    throw error
+                }
+            }
+            var tokens = toolTokens ?? []
+            if tokenID >= 0 {
+                tokens.append(tokenID)
+            } else if !delta.isEmpty, !inkling2MalformedToolCallsAsText {
+                // Flushed text at the end: its bytes are already in `tokens`
+                // by id, so the text fallback must not add them twice.
+                tokens += tokenizer.encode(delta, addBOS: false)
+            }
+            guard tokens.count * MemoryLayout<Int32>.size <= Inkling2ToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            toolTokens = tokens
+            return []
+        }
+        switch tokenID {
+        case t.messageModel:
+            inkling2Block = .header
+            inkling2Header = ""
+            return []
+        case t.contentThinking:
+            inkling2Block = .thinking
+            return []
+        case t.contentText, t.contentToolError, t.contentInvokeToolText:
+            inkling2Block = .visible
+            return []
+        case t.contentInvokeToolJSON:
+            inkling2Block = .toolCall
+            inkling2CallHeader = inkling2Header
+            toolTokens = []
+            return []
+        case t.endMessage:
+            // A header names only the block it opens.
+            inkling2Block = .between
+            inkling2Header = ""
+            return []
+        case _ where tokenizer.stopTokenIDs.contains(tokenID):
+            return []
+        default:
+            break
+        }
+        switch inkling2Block {
+        case .header:
+            inkling2Header += delta
+            return []
+        case .thinking:
+            if tokenID >= 0 { payloadCounts.reasoning += 1 }
+            if !delta.isEmpty { onReasoning?(delta) }
+            return []
+        case .visible, .between:
+            if tokenID >= 0 { payloadCounts.visible += 1 }
+            return delta.isEmpty ? [] : [.content(delta)]
+        case .toolCall:
+            return []
+        }
+    }
+
     /// Release any withheld text. Every supported dialect frames tool calls
     /// with special tokens, so nothing is ever withheld; kept so callers can
     /// drain before deciding whether to finish.
@@ -248,6 +387,11 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     /// End of stream: validates that no tool-call block was left unclosed.
     public func finish() throws -> [StructuredAssistantEvent] {
+        if !failed, let tokens = toolTokens, inkling2MalformedToolCallsAsText, tokenizer.dialect == .inkling2 {
+            // A tool-call block still open at the end: its body as text.
+            toolTokens = nil
+            return inkling2BodyAsText(tokens)
+        }
         guard !failed, toolTokens == nil else {
             throw ToolCallParserError.malformed
         }

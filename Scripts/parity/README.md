@@ -36,3 +36,11 @@ Chat-template fixtures for the same family are produced by
 [`minicpm5_make_template_fixtures.py`](minicpm5_make_template_fixtures.py) from
 the real `tokenizer.json` + `chat_template.jinja` (16 renders through
 `apply_chat_template`, keys of tool-call arguments given sorted).
+
+## Inkling 2 Mini reference goldens
+
+Generators, the cmake-free build of the upstream llama.cpp reference and the
+guarded run scripts are in [`inkling2/`](inkling2/README.md); the committed
+fixtures (GGUF header and tensor table, tokenizer ids, chat-template renders)
+are in `Tests/Mference/Fixtures/Inkling2/`. The reference is the shipped
+weights file itself run through stock llama.cpp at tag b12641.

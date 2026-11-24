@@ -95,7 +95,7 @@ nonisolated public enum MemoryFitVerdict: Sendable, Hashable {
 nonisolated public struct ModelEntry: Sendable, Hashable, Identifiable {
     /// The engine catalog id (`qwen3.5-4b`, `qwen3.8-27b`, ...).
     public var id: String
-    /// "Quick", "Deep", "Qwen 3.6", "MiniCPM5", "Maple".
+    /// "Quick", "Deep", "Inkling 2 Mini", "Qwen 3.6", "MiniCPM5", "Maple".
     public var productName: String
     /// "Qwen3.5 4B", "Qwen3.8 27B", "35B-A3B", "2B"; empty when the product name says it all.
     public var variantName: String

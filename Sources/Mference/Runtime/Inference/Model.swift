@@ -76,6 +76,9 @@ public struct Model {
     let packedExpertsLayout: PackedExpertsLayout
     let manifest: Manifest
     let directoryURL: URL
+    /// The validated routed-expert layout of an `inkling2Loop` install, set
+    /// once at load; nil for every other family.
+    let validatedInkling2Experts: Inkling2ExpertLayout?
 
     /// Lazy state. Held inside a reference box so `Model` can stay a struct
     /// while still letting accessors mutate layer state via a serial queue.
@@ -110,7 +113,8 @@ public struct Model {
          residentIndex: ResidentIndex,
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
-         directoryURL: URL) {
+         directoryURL: URL,
+         inkling2ExpertLayout: Inkling2ExpertLayout? = nil) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -121,6 +125,7 @@ public struct Model {
         self.packedExpertsLayout = packedExpertsLayout
         self.manifest = manifest
         self.directoryURL = directoryURL
+        self.validatedInkling2Experts = inkling2ExpertLayout
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "mference.expert-streamers")
         self.prefillSweepBypassesPageCache = Self.prefillSweepBypassesPageCache(
@@ -142,16 +147,20 @@ public struct Model {
         guard case .pread(let slotCount) = streamingMode else { return false }
         // File bytes, since those are what the page cache would hold.
         let poolBytes = layout.layers.reduce(UInt64(0)) { total, layer in
-            total + UInt64(layer.experts.count) * layout.storedExpertStride
+            total + UInt64(layer.experts.count) * layout.storedExpertStride(of: layer)
         }
-        let routedLayers = UInt64(layout.layers.filter { !$0.experts.isEmpty }.count)
-        let slotBytes = UInt64(PreadExpertStreamer.slotAllocationSize(
-            expertStride: layout.expertStride))
+        // Each routed layer's slots are sized from its own stride (the single
+        // stride for every layout without per-layer strides).
+        let wiredSlotBytes = layout.layers.enumerated().reduce(UInt64(0)) { total, entry in
+            guard !entry.element.experts.isEmpty else { return total }
+            return total + UInt64(slotCount) * UInt64(PreadExpertStreamer.slotAllocationSize(
+                expertStride: layout.expertStride(layer: entry.offset)))
+        }
         return RuntimeConfiguration.prefillSweepBypassesPageCache(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes,
             expertPoolBytes: poolBytes,
-            wiredSlotBytes: UInt64(slotCount) * routedLayers * slotBytes,
+            wiredSlotBytes: wiredSlotBytes,
             coreWeightsBytes: coreWeightsBytes)
     }
 
@@ -165,6 +174,8 @@ public struct Model {
         case .qwen36, .qwen38: return "language_model.model."
         case .maple: return "model."
         case .minicpm5: return "model."
+        // Installed under the GGUF's own names (`blk.N.*`, `token_embd`).
+        case .inkling2Loop: return ""
         }
     }
     private var lmHeadName: String {
@@ -172,6 +183,7 @@ public struct Model {
         case .qwen36, .qwen38: return "language_model.lm_head.weight"
         case .maple: return "lm_head.weight"
         case .minicpm5: return "lm_head.weight"
+        case .inkling2Loop: return Self.inkling2OutputHeadName
         }
     }
     /// Maple names the token embedding `word_embeddings`, not `embed_tokens`.
@@ -183,6 +195,8 @@ public struct Model {
             return "\(trunkPrefix)word_embeddings.weight"
         case .minicpm5:
             return "\(trunkPrefix)embed_tokens.weight"
+        case .inkling2Loop:
+            return Self.inkling2EmbeddingName
         }
     }
 
@@ -223,6 +237,8 @@ public struct Model {
             // Dense: no router tensor exists; the accessor throws
             // tensorNotFound if a caller ever asks.
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp.gate.weight")
+        case .inkling2Loop:
+            return try inkling2Router(layer: L)
         }
     }
     /// Shared-expert FFN. Qwen 3.6 and Maple keep the source's
@@ -249,6 +265,10 @@ public struct Model {
         case .minicpm5:
             // Dense llama: the per-layer MLP under the bare `.mlp.` names.
             return "\(trunkPrefix)layers.\(L).mlp.\(proj).weight"
+        case .inkling2Loop:
+            // No shared expert: llama.cpp's shared-expert name, which the
+            // install never carries, so the accessor throws tensorNotFound.
+            return Self.inkling2LayerName(L, "ffn_\(proj.replacingOccurrences(of: "_proj", with: ""))_shexp.weight")
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
@@ -510,14 +530,16 @@ public struct Model {
             }
             streamersBox.layerVerified[L] = true
         }
+        // A layout with per-layer strides sizes each layer by its own stride;
+        // otherwise both accessors return the layout's single values.
         let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.storedExpertStride
+            * packedExpertsLayout.storedExpertStride(layer: L)
         let layout = StreamLayout(
             path: url.path,
             streamOffset: 0,
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-            expertStride: packedExpertsLayout.expertStride,
+            expertStride: packedExpertsLayout.expertStride(layer: L),
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
             storage: packedExpertsLayout.storage)
         switch streamingMode {
@@ -671,6 +693,17 @@ extension Model {
 
         let residentIndex = try ResidentIndexReader.load(fileURL: weightsURL)
         let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
+        // Per-layer strides are the format of an install copied from a GGUF,
+        // which proves its expert formats, shapes and strides against the
+        // baseline before anything is mapped; no other family writes them.
+        var inkling2Experts: Inkling2ExpertLayout?
+        if expecting.family == .inkling2Loop {
+            inkling2Experts = try Inkling2ExpertLayout.validated(layout: layout, config: expecting)
+            try Inkling2ResidentContract.validate(index: residentIndex, config: expecting)
+        } else if layout.hasPerLayerStrides {
+            throw ModelError.indexCorrupt(
+                detail: "layout.json: per-layer expert strides are not a \(expecting.family.rawValue) format")
+        }
 
         // The resident index must account for the complete weights file.
         let attrs = try FileManager.default.attributesOfItem(atPath: weightsURL.path)
@@ -709,6 +742,10 @@ extension Model {
             residentSize: residentIndex.header.residentSize,
             device: device,
             tensorSpans: tensorSpans)
+        if expecting.family == .inkling2Loop {
+            try Inkling2ResidentContract.validateOneBuffer(chunkCount: residentBuffer.chunks.count,
+                                                           residentSize: residentIndex.header.residentSize)
+        }
 
         try receiptCheck {
             try validateTrustedReceiptLayerLayout(directoryURL: directoryURL,
@@ -726,9 +763,12 @@ extension Model {
             residentIndex: residentIndex,
             packedExpertsLayout: layout,
             manifest: manifest,
-            directoryURL: directoryURL)
+            directoryURL: directoryURL,
+            inkling2ExpertLayout: inkling2Experts)
         model.integrityFallbackDetail = fallbackDetail
-        if case .resident = streamingMode {
+        // Inkling 2's runner reads its experts through its own store and never
+        // these streamers; warming them would page in the whole 15.8 GB pool.
+        if case .resident = streamingMode, model.config.family != .inkling2Loop {
             let warmupStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try model.warmUpResidentBackends()
             stats.residentWarmupNanos =
@@ -790,7 +830,7 @@ extension Model {
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")
             }
-            let storedStride = layout.storedExpertStride
+            let storedStride = layout.storedExpertStride(of: layer)
             guard storedStride % pageSize == 0 else {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) stored stride \(storedStride) is not page-aligned")

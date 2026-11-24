@@ -1,0 +1,11 @@
+[
+ {
+  "id": "trace01b",
+  "kind": "ids",
+  "ids": [371, 151451, 149879, 151194, 149884, 152717],
+  "n_gen": 1,
+  "logprobs": true,
+  "trace": true,
+  "loop": {"n_phys": 24, "start": 6, "end": 18, "passes": 3}
+ }
+]

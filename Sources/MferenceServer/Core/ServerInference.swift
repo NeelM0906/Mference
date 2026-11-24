@@ -234,15 +234,25 @@ public actor ServerModelSession: ServerLoadedModel {
     }
 
     /// `multi-prefix` needs a runner that snapshots its prefix state; any
-    /// other runner is served exactly as `single-prefix`.
+    /// other runner is served exactly as `single-prefix`. Inkling 2 is served
+    /// as `single-prefix` too unless `inkling2MultiPrefix`
+    /// (`Inkling2PrefixSnapshots`), while its default is measured. `family`
+    /// has no default, so a caller cannot drop it and lift that rule.
     static func effectivePromptCacheMode(_ requested: ServerPromptCacheMode,
-                                         runnerSnapshotsPrefixes: Bool) -> ServerPromptCacheMode {
-        requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
+                                         runnerSnapshotsPrefixes: Bool,
+                                         family: ModelFamily?,
+                                         inkling2MultiPrefix: Bool = false) -> ServerPromptCacheMode {
+        if requested == .multiPrefix, family == .inkling2Loop, !inkling2MultiPrefix { return .singlePrefix }
+        return requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
     }
 
-    /// `--max-context max` (nil) is the model's native context.
-    static func resolvedMaxContext(_ requested: Int?, family: ModelFamily) -> Int {
-        requested ?? family.maximumContext
+    /// `--max-context max` (nil) is the model's native context; either is
+    /// lowered to the family's cap for this Mac's memory where it has one
+    /// (`ModelFamily.memoryContextCap`: Inkling 2 under 48 GB).
+    static func resolvedMaxContext(_ requested: Int?, family: ModelFamily,
+                                   physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let context = requested ?? family.maximumContext
+        return family.memoryContextCap(physicalMemory: physicalMemory).map { min(context, $0) } ?? context
     }
 
     public static func load(modelDirectory: URL,
@@ -364,7 +374,8 @@ public actor ServerModelSession: ServerLoadedModel {
             $0.supportsPrefixStateSnapshots ? $0 : nil
         }
         self.promptCacheMode = Self.effectivePromptCacheMode(
-            promptCacheMode, runnerSnapshotsPrefixes: snapshots != nil)
+            promptCacheMode, runnerSnapshotsPrefixes: snapshots != nil,
+            family: model.config.family, inkling2MultiPrefix: Inkling2PrefixSnapshots.multiPrefixEnabled())
         if self.promptCacheMode == .multiPrefix, let snapshots {
             self.snapshotRunner = snapshots
             let governor = PrefixCacheMemoryGovernor()
@@ -410,7 +421,8 @@ public actor ServerModelSession: ServerLoadedModel {
         do {
             promptIDs = try tokenizer.encodeChat(messages: request.messages, tools: request.tools,
                                                 reasoningEffort: request.reasoningEffort,
-                                                preserveThinking: request.preserveThinking)
+                                                preserveThinking: request.preserveThinking,
+                                                inkling2Effort: request.inkling2Effort)
         } catch {
             throw ServerRequestError.invalid(message: String(describing: error),
                                               param: "messages", code: "invalid_chat_template")
@@ -507,6 +519,7 @@ public actor ServerModelSession: ServerLoadedModel {
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
             || tokenizer.dialect == .minicpm
+            || tokenizer.dialect == .inkling2
         let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
@@ -514,10 +527,17 @@ public actor ServerModelSession: ServerLoadedModel {
                 startsInThought: startsInThinking,
                 toolDefinitions: request.tools)
             : nil
+        // Inkling 2 only: a tool call the parser rejects, or one still open
+        // at the end, reaches the client as the model's text with
+        // `finish_reason: stop`, not as a failed request.
+        decoder?.inkling2MalformedToolCallsAsText = tokenizer.dialect == .inkling2
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
-        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort) {
+        // Inkling 2 always frames its thinking in blocks the template renders
+        // back, so its reasoning is reported like the source templates'.
+        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort)
+            || tokenizer.dialect == .inkling2 {
             decoder?.onReasoning = { text in
                 reasoning += text
                 onEvent(.reasoning(text))
@@ -624,7 +644,14 @@ public actor ServerModelSession: ServerLoadedModel {
             reason = "stop"
         }
         try Task.checkCancellation()
-        if let prefixStates, let snapshotRunner {
+        if (decoder?.convertedInkling2MalformedToolCalls ?? 0) > 0 {
+            // A malformed Inkling 2 tool call sent as text: the KV holds the
+            // call's framing, a re-render of the reply does not, so this
+            // turn is not kept for prefix reuse (as when such a turn failed).
+            promptCache.invalidate()
+            runner.reset()
+            prefixStates?.didFail()
+        } else if let prefixStates, let snapshotRunner {
             prefixStates.didFinish(
                 entry: PromptPrefixCache.makeEntry(
                     domain: promptCacheDomain,

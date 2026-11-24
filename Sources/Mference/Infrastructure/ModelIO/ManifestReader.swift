@@ -127,6 +127,21 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let indexerKNormEps: Double?
     public let kdaGateLowerBound: Double?
     public let rmsNormEps: Double?
+
+    // Inkling 2 extensions. Optional for the same reason: absent values
+    // validate against the zeroed `Inkling2Config.none`. Field names match
+    // what `MferenceRepack`'s `Inkling2Axes` publishes.
+    public let loopCoreStart: Int?
+    public let loopCoreEnd: Int?
+    public let loopNumPasses: Int?
+    public let loopGateRank: Int?
+    public let attnResBlockSize: Int?
+    public let qkClipThreshold: Double?
+    public let relClipThreshold: Double?
+    public let attentionSinkProjected: Bool?
+    public let expertGateSoftcap: Double?
+    public let expertUpSoftcap: Double?
+    public let routedExpertFormats: [String]?
 }
 
 /// Whether an optional tensor group from the source checkpoint was carried
@@ -298,8 +313,48 @@ public enum ManifestReader {
         return false
     }
 
+    /// The quant contract of an install copied from a GGUF (`inkling2Loop`):
+    /// nothing is re-quantized, so each slot names the GGUF's own format.
+    /// Embedding, output head and attention are Q8_0 (8-bit codes with one F16
+    /// scale per 32 values); the router is F32; there is no shared expert; the
+    /// routed experts are mixed per layer, so their slot names the dominant
+    /// NVFP4 (4-bit E2M1 codes, one E4M3 scale per 16 values) and
+    /// `arch.routedExpertFormats` with `layout.json` carry each layer's format.
+    /// The runtime dispatches on each tensor's own index dtype, never on these.
+    static let ggufQuantSlots: [String: ManifestQuantSlot] = [
+        "embedding": ManifestQuantSlot(weightBits: 8, scheme: "gguf", scaleType: "F16",
+                                       biasType: "none", groupSize: 32),
+        "attention": ManifestQuantSlot(weightBits: 8, scheme: "gguf", scaleType: "F16",
+                                       biasType: "none", groupSize: 32),
+        "router": ManifestQuantSlot(weightBits: 32, scheme: "gguf", scaleType: "none",
+                                    biasType: "none", groupSize: 0),
+        "sharedExpert": ManifestQuantSlot(weightBits: 0, scheme: "none", scaleType: "none",
+                                          biasType: "none", groupSize: 0),
+        "routedExpert": ManifestQuantSlot(weightBits: 4, scheme: "gguf", scaleType: "E4M3",
+                                          biasType: "none", groupSize: 16),
+    ]
+
     private static func validateQuant(_ quant: ManifestQuant,
                                       expected: ArchConfig) throws {
+        if expected.family == .inkling2Loop {
+            let slots: [(String, ManifestQuantSlot)] = [
+                ("embedding", quant.embedding), ("attention", quant.attention),
+                ("router", quant.router), ("sharedExpert", quant.sharedExpert),
+                ("routedExpert", quant.routedExpert),
+            ]
+            for (name, slot) in slots {
+                guard let want = ggufQuantSlots[name],
+                      slot.weightBits == want.weightBits,
+                      slot.scheme.lowercased() == want.scheme.lowercased(),
+                      slot.scaleType.lowercased() == want.scaleType.lowercased(),
+                      slot.biasType.lowercased() == want.biasType.lowercased(),
+                      slot.groupSize == want.groupSize else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported Inkling 2 quantization for \(name)")
+                }
+            }
+            return
+        }
         if expected.family == .minicpm5 {
             // Dense, like Qwen 3.8: INT4 affine group-64 embedding and
             // attention slots (the MLP shares the attention slot), and the
@@ -525,6 +580,47 @@ public enum ManifestReader {
                                               actual: "missing")
             }
         }
+        // Every axis Inkling 2 sets away from its absent default must be
+        // written, so a manifest that drops one cannot validate by default.
+        if e.family == .inkling2Loop {
+            let requiredExtensions: [(String, Bool)] = [
+                ("attentionScale", a.attentionScale != nil),
+                ("embeddingScaledBySqrtHidden", a.embeddingScaledBySqrtHidden != nil),
+                ("routerScaled", a.routerScaled != nil),
+                ("ffnSandwichNorms", a.ffnSandwichNorms != nil),
+                ("qkNorm", a.qkNorm != nil),
+                ("routerScoringFunc", a.routerScoringFunc != nil),
+                ("routedScalingFactor", a.routedScalingFactor != nil),
+                ("relDRel", a.relDRel != nil),
+                ("relExtent", a.relExtent != nil),
+                ("relProjDim", a.relProjDim != nil),
+                ("relLogScalingFloor", a.relLogScalingFloor != nil),
+                ("relLogScalingAlpha", a.relLogScalingAlpha != nil),
+                ("sconvKernelSize", a.sconvKernelSize != nil),
+                ("numSharedExperts", a.numSharedExperts != nil),
+                ("embedNormEnabled", a.embedNormEnabled != nil),
+                ("routerGateBias", a.routerGateBias != nil),
+                ("routerNormAfterTopK", a.routerNormAfterTopK != nil),
+                ("unpaddedVocabSize", a.unpaddedVocabSize != nil),
+                ("attentionSinks", a.attentionSinks != nil),
+                ("loopCoreStart", a.loopCoreStart != nil),
+                ("loopCoreEnd", a.loopCoreEnd != nil),
+                ("loopNumPasses", a.loopNumPasses != nil),
+                ("loopGateRank", a.loopGateRank != nil),
+                ("attnResBlockSize", a.attnResBlockSize != nil),
+                ("qkClipThreshold", a.qkClipThreshold != nil),
+                ("relClipThreshold", a.relClipThreshold != nil),
+                ("attentionSinkProjected", a.attentionSinkProjected != nil),
+                ("expertGateSoftcap", a.expertGateSoftcap != nil),
+                ("expertUpSoftcap", a.expertUpSoftcap != nil),
+                ("routedExpertFormats", a.routedExpertFormats != nil),
+            ]
+            if let missing = requiredExtensions.first(where: { !$0.1 }) {
+                throw ModelError.archMismatch(field: missing.0,
+                                              expected: "present",
+                                              actual: "missing")
+            }
+        }
 
         // Family extensions: absent fields mean the original install format's
         // values (`absentFieldDefaults`).
@@ -683,6 +779,22 @@ public enum ManifestReader {
         try check("indexerKNormEps",   a.indexerKNormEps ?? 0,   g.indexerKNormEps)
         try check("kdaGateLowerBound", a.kdaGateLowerBound ?? 0, g.kdaGateLowerBound)
         try check("rmsNormEps",        a.rmsNormEps ?? 0,        g.rmsNormEps)
+
+        let ink = e.inkling2
+        try check("loopCoreStart",    a.loopCoreStart ?? 0,    ink.loopCoreStart)
+        try check("loopCoreEnd",      a.loopCoreEnd ?? 0,      ink.loopCoreEnd)
+        try check("loopNumPasses",    a.loopNumPasses ?? 0,    ink.loopNumPasses)
+        try check("loopGateRank",     a.loopGateRank ?? 0,     ink.loopGateRank)
+        try check("attnResBlockSize", a.attnResBlockSize ?? 0, ink.attnResBlockSize)
+        try check("qkClipThreshold",  a.qkClipThreshold ?? 0,  ink.qkClipThreshold)
+        try check("relClipThreshold", a.relClipThreshold ?? 0, ink.relClipThreshold)
+        try check("attentionSinkProjected",
+                  a.attentionSinkProjected ?? false, ink.attentionSinkProjected)
+        try check("expertGateSoftcap", a.expertGateSoftcap ?? 0, ink.expertGateSoftcap)
+        try check("expertUpSoftcap",   a.expertUpSoftcap ?? 0,   ink.expertUpSoftcap)
+        try check("routedExpertFormats",
+                  (a.routedExpertFormats ?? []).description,
+                  ink.routedExpertFormats.description)
     }
 
     /// Metadata-only checkpoint identity, bounded like the family probe.
@@ -763,8 +875,9 @@ public enum ManifestReader {
     /// Families `MferenceRepack` can install but no forward runner can execute,
     /// mapped to the axes whose kernels are missing.
     ///
-    /// Empty today. Remove an entry only when `ForwardRunnerFactory` actually
-    /// dispatches to the family's runner.
+    /// Holds `inkling2Loop` while `Inkling2ForwardRunner` is built. Remove an
+    /// entry only when `ForwardRunnerFactory` actually dispatches to the
+    /// family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
     /// keyed by its `manifest.arch.family` string and valued with the axis
@@ -788,6 +901,16 @@ public enum ManifestReader {
     /// that decides whether it can be loaded, and it is checked in
     /// `peekFamily` before any of that machinery is reached.
     static let familiesWithoutRunner: [String: [String]] = [:]
+
+    /// The mechanisms the Inkling 2 runner implements, by axis name. The
+    /// installer publishes the same list as `manifest.arch.requiredAxes`; it
+    /// held `inkling2Loop` in `familiesWithoutRunner` until
+    /// `Inkling2ForwardRunner` landed.
+    public static let inkling2RequiredAxes: [String] = [
+        "loopedCore", "blockAttentionResiduals", "relativePositionBias",
+        "projectedAttentionSink", "shortConvolution", "situExpertActivation",
+        "nvfp4RoutedExperts", "q8_0Weights",
+    ]
 
     /// `arch.family` values of the families retired on 2026-11-18 (see
     /// `docs/RETIRED_FAMILIES.md`). Their installs on disk are left alone;

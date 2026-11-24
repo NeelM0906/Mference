@@ -34,15 +34,19 @@ public struct PromptPrefixCacheTurn: Sendable, Equatable {
     public let tools: [MFTokenizer.FunctionDefinition]
     public let reasoningEffort: QwenReasoningEffort?
     public let preserveThinking: Bool
+    /// Inkling 2's own effort name, when the request used one.
+    public let inkling2Effort: MFTokenizer.Inkling2Effort?
 
     public init(messages: [MFTokenizer.Message],
                 tools: [MFTokenizer.FunctionDefinition] = [],
                 reasoningEffort: QwenReasoningEffort? = nil,
-                preserveThinking: Bool = false) {
+                preserveThinking: Bool = false,
+                inkling2Effort: MFTokenizer.Inkling2Effort? = nil) {
         self.messages = messages
         self.tools = tools
         self.reasoningEffort = reasoningEffort
         self.preserveThinking = preserveThinking
+        self.inkling2Effort = inkling2Effort
     }
 }
 
@@ -61,6 +65,7 @@ public struct PromptPrefixCacheEntry: Sendable, Equatable {
     public let kvPosition: Int
     public var reasoningEffort: QwenReasoningEffort? = nil
     public var preserveThinking: Bool = false
+    public var inkling2Effort: MFTokenizer.Inkling2Effort? = nil
 }
 
 public enum PromptPrefixCacheMatch: Sendable, Equatable {
@@ -119,7 +124,8 @@ public struct PromptPrefixCache: Sendable {
             MFTokenizer.HistoricalToolCall(
                 id: $0.id,
                 name: $0.name,
-                arguments: $0.arguments)
+                arguments: $0.arguments,
+                argumentsText: $0.argumentsText)
         }
         let assistant = MFTokenizer.Message(
             role: .assistant,
@@ -137,7 +143,8 @@ public struct PromptPrefixCache: Sendable {
             uncommittedBoundaryTokenIDs: result.uncommittedBoundaryTokenIDs,
             kvPosition: result.kvPosition,
             reasoningEffort: turn.reasoningEffort,
-            preserveThinking: turn.preserveThinking)
+            preserveThinking: turn.preserveThinking,
+            inkling2Effort: turn.inkling2Effort)
     }
 
     public func match(
@@ -149,6 +156,16 @@ public struct PromptPrefixCache: Sendable {
         guard let entry else { return .miss }
         return Self.match(entry: entry, domain: domain, turn: turn,
                           renderedPromptIDs: renderedPromptIDs, tokenizer: tokenizer)
+    }
+
+    /// The effort level an Inkling 2 request renders: its own name, else the
+    /// shared setting's name, else the template's default.
+    static func inkling2EffortLevel(_ own: MFTokenizer.Inkling2Effort?,
+                                    _ shared: QwenReasoningEffort?) -> Double? {
+        guard let effort = own ?? shared.map({ .named($0.rawValue) }) else {
+            return MFTokenizer.Inkling2Effort.defaultLevel
+        }
+        return effort.level
     }
 
     /// Whether `turn` may continue from `entry`, by the same per-dialect rules
@@ -175,6 +192,14 @@ public struct PromptPrefixCache: Sendable {
             return .hit(
                 effectivePromptIDs: renderedPromptIDs,
                 cachedPromptTokens: entry.kvPosition)
+        }
+
+        // Inkling 2 renders its effort level into every prompt, so a turn at
+        // another level cannot continue from KV rendered at this one.
+        if tokenizer.dialect == .inkling2,
+           inkling2EffortLevel(turn.inkling2Effort, turn.reasoningEffort)
+            != inkling2EffortLevel(entry.inkling2Effort, entry.reasoningEffort) {
+            return .miss
         }
 
         // Qwen 3.8 source-template requests require an exact rendered prefix;
@@ -271,6 +296,13 @@ public struct PromptPrefixCache: Sendable {
               continuation[0].toolCallID == nil,
               entry.assistantTurn.rawStopReason == .endOfTurn
                 || entry.assistantTurn.rawStopReason == .maxTokens else {
+            return .miss
+        }
+        // Inkling 2's continuation starts with the sampled EOS, so after a
+        // turn the cap cut inside a text or thinking block it would leave
+        // that block without the `<|end_message|>` a fresh render writes.
+        // Such a turn continues only through the exact rendered prefix above.
+        if tokenizer.dialect == .inkling2, entry.assistantTurn.rawStopReason == .maxTokens {
             return .miss
         }
         var bridge = tokenizer.encodeTextContinuation(userContent: content)

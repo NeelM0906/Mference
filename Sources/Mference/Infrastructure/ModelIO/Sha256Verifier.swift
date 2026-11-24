@@ -6,14 +6,20 @@ public enum Sha256Verifier {
 
     /// Compute the lowercase-hex SHA-256 of the entire file at `fileURL` by
     /// streaming through a fixed-size scratch read. Does not allocate the
-    /// whole file.
+    /// whole file. `bypassCache` sets `F_NOCACHE` on the descriptor, so the
+    /// reads do not fill the file cache (pages already cached stay cached);
+    /// the digest is the same either way.
     public static func hashFile(at fileURL: URL,
-                                chunkBytes: Int = 1 << 20) throws -> String {
+                                chunkBytes: Int = 1 << 20,
+                                bypassCache: Bool = false) throws -> String {
         let fd = open(fileURL.path, O_RDONLY)
         guard fd >= 0 else {
             throw ModelError.posixFailed(call: "open(\(fileURL.path))", errno: errno)
         }
         defer { close(fd) }
+        if bypassCache, fcntl(fd, F_NOCACHE, 1) == -1 {
+            throw ModelError.posixFailed(call: "fcntl(F_NOCACHE)", errno: errno)
+        }
 
         var ctx = CC_SHA256_CTX()
         CC_SHA256_Init(&ctx)
@@ -55,10 +61,12 @@ public enum Sha256Verifier {
     /// Throw `ModelError.checksumMismatch(file)` if the on-disk file's
     /// SHA-256 does not match `expectedHex`. Hex comparison is
     /// case-insensitive on the expected side (writer outputs lowercase).
+    /// `bypassCache` is passed to `hashFile`.
     public static func verifyFile(at fileURL: URL,
                                   named name: String,
-                                  expectedHex: String) throws {
-        let actual = try hashFile(at: fileURL)
+                                  expectedHex: String,
+                                  bypassCache: Bool = false) throws {
+        let actual = try hashFile(at: fileURL, bypassCache: bypassCache)
         if actual.lowercased() != expectedHex.lowercased() {
             throw ModelError.checksumMismatch(file: name)
         }

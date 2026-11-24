@@ -1,0 +1,31 @@
+{
+ "file_bytes": 17629760736,
+ "gguf_version": 3,
+ "n_tensors": 744,
+ "n_kv": 63,
+ "alignment": 32,
+ "header_end": 11979984,
+ "data_start": 11980000,
+ "data_end_of_last_tensor": 17629760736,
+ "trailing_bytes": 0,
+ "tensor_bytes_total": 17617780736,
+ "by_type": {
+  "Q8_0": {
+   "tensors": 154,
+   "bytes": 6000224256
+  },
+  "F32": {
+   "tensors": 518,
+   "bytes": 147544064
+  },
+  "BF16": {
+   "tensors": 32,
+   "bytes": 3833856
+  },
+  "NVFP4": {
+   "tensors": 40,
+   "bytes": 11466178560
+  }
+ },
+ "layout_gaps": []
+}

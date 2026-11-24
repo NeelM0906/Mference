@@ -22,6 +22,10 @@ public func run(args: Args,
     } catch {
         return errored(stderr, "\(error)", 1)
     }
+    if let cap = args.hostContextCap {
+        stderr.write(Data(("notice: --max-context lowered to \(cap) tokens: the model's expert residency on "
+            + "this Mac's memory leaves room for no more\n").utf8))
+    }
     if args.chat {
         return await runChat(args: args, stdout: stdout, stderr: stderr)
     }
@@ -30,6 +34,10 @@ public func run(args: Args,
         let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
                                                          modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
+        if let refusal = inkling2EffortRefusal(args, dialect: tokenizer.dialect) {
+            stderr.write(Data(refusal.utf8))
+            return RunResult(exitCode: 2)
+        }
         let promptIds: [Int32]
         if let rawPrompt = args.prompt {
             promptIds = tokenizer.encode(rawPrompt, addBOS: true)
@@ -44,7 +52,8 @@ public func run(args: Args,
                 return MFTokenizer.Message(role: role, content: row.content,
                                            reasoningContent: row.reasoning_content)
             }
-            promptIds = try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort)
+            promptIds = try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort,
+                                                 inkling2Effort: args.inkling2Effort)
         } else {
             return errored(stderr, "one of --prompt or --messages-file is required", 2)
         }
@@ -58,18 +67,10 @@ public func run(args: Args,
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = try args.generationConfig(defaults: tokenizer.generationDefaults,
                                                maxNewTokens: effectiveMaxNew)
-        let prefillChunkTokens: Int
-        switch args.prefillChunk {
-        case .fixed(let n):
-            prefillChunkTokens = n
-        case .auto:
-            // Smallest allowed chunk that covers the prompt: one chunk per
-            // prompt when it fits, which reads each layer's routed experts
-            // exactly once during prefill.
-            prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
-                .first(where: { $0 >= promptIds.count })
-                ?? RuntimeConfiguration.allowedPrefillChunkTokens.last!
-        }
+        // `auto`: one chunk per prompt when it fits, which reads each layer's
+        // routed experts exactly once, up to the family's own chunk.
+        let prefillChunkTokens = args.prefillChunk.rawChunkTokens(promptTokens: promptIds.count,
+                                                                  modelDirectory: modelURL)
         let runtime = RuntimeConfiguration(
             expertCacheSlots: expertStreaming.configSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
@@ -107,7 +108,7 @@ public func run(args: Args,
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: args.reasoningEffort, promptIDs: promptIds)
         let decoder = args.messagesFile != nil && (tokenizer.usesSourceTemplate(reasoningEffort: args.reasoningEffort)
-            || startsInThinking)
+            || startsInThinking || tokenizer.dialect == .inkling2)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
                                          startsInThought: startsInThinking)
@@ -239,6 +240,11 @@ public func run(args: Args,
             stderr.write(Data(lines.utf8))
         }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let ink = runner as? any Inkling2DecodePhaseReporting, ink.decodePhaseStats.decodeSteps > 0 {
+            // The runner kept these only because the variable was set at load.
+            stderr.write(Data(inkling2PhaseReport(ink.decodePhaseStats, decodeSeconds: stats.decodeSeconds).utf8))
+        }
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
            let q38 = runner as? Qwen38ForwardRunner,
            let spec = q38.mtpSpecStats, spec.rounds > 0 {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
@@ -279,6 +285,17 @@ public func run(args: Args,
     } catch {
         return errored(stderr, "\(error)", 1)
     }
+}
+
+/// What `run` writes, exiting 2, when `--reasoning-effort` gave one of
+/// Inkling 2's own names (minimal, high, max) and the model's dialect is not
+/// Inkling 2: exactly what parsing writes for an unknown value (the error,
+/// then the usage), so every other model refuses these names as it always
+/// has, only once its tokenizer is loaded instead of while parsing. Nil when
+/// there is nothing to refuse.
+func inkling2EffortRefusal(_ args: Args, dialect: ChatDialect) -> String? {
+    guard case .named(let name)? = args.inkling2Effort, dialect != .inkling2 else { return nil }
+    return "error: \(ArgsError.invalidValue(flag: "--reasoning-effort", value: name))\n\n" + Args.usage + "\n"
 }
 
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
@@ -352,6 +369,10 @@ private func runChat(args: Args,
         let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
                                                          modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
+        if let refusal = inkling2EffortRefusal(args, dialect: tokenizer.dialect) {
+            stderr.write(Data(refusal.utf8))
+            return RunResult(exitCode: 2)
+        }
         let baseConfig = try args.generationConfig(defaults: tokenizer.generationDefaults,
                                                    maxNewTokens: args.maxNew)
         let prefillChunkTokens = args.prefillChunk.chatChunkTokens(
@@ -407,7 +428,8 @@ private func runChat(args: Args,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: "")
         let promptTokens = { (messages: [MFTokenizer.Message]) throws -> Int in
-            try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort).count
+            try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort,
+                                     inkling2Effort: args.inkling2Effort).count
         }
 
         stderr.write(Data("Interactive chat. Commands: /clear, /history, /quit.\n".utf8))
@@ -450,8 +472,10 @@ private func runChat(args: Args,
             }
             history = fitted.messages
 
-            let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort)
-            let cacheTurn = PromptPrefixCacheTurn(messages: history, reasoningEffort: args.reasoningEffort)
+            let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort,
+                                                     inkling2Effort: args.inkling2Effort)
+            let cacheTurn = PromptPrefixCacheTurn(messages: history, reasoningEffort: args.reasoningEffort,
+                                                  inkling2Effort: args.inkling2Effort)
             var plan = ChatPrefixReuse.Plan(promptIDs: promptIds, start: .reset)
             let checkpoint: (position: Int, capture: () throws -> Void)? = nil
             if args.reusePrefix {
@@ -569,8 +593,10 @@ private func streamChatTurn(promptIds: [Int32],
     var reasoning = ""
     let startsInThinking = tokenizer.startsInThinking(
         reasoningEffort: reasoningEffort, promptIDs: promptIds)
+    // Inkling 2's turns are message blocks; only the decoder separates the
+    // thinking from the answer.
     let decoder = tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort)
-        || startsInThinking
+        || startsInThinking || tokenizer.dialect == .inkling2
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],
                                      startsInThought: startsInThinking)
@@ -585,7 +611,8 @@ private func streamChatTurn(promptIds: [Int32],
         stdout.write(Data(text.utf8))
         reply += text
     }
-    if tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort) {
+    if tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort)
+        || tokenizer.dialect == .inkling2 {
         decoder?.onReasoning = { text in
             reasoning += text
             if showReasoning { stderr.write(Data(echo.reasoning(text).utf8)) }

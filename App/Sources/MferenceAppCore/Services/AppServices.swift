@@ -278,6 +278,7 @@ public final class AppServices {
         switch model {
         case .quick: 2_910_000_000
         case .deep: 12_100_000_000
+        case .inkling2Mini: 17_650_000_000
         case .qwen36: 19_800_000_000
         case .minicpm5: 1_400_000_000
         case .maple: 7_600_000_000

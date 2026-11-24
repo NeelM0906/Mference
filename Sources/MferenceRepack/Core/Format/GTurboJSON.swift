@@ -32,6 +32,9 @@ enum GTurboJSON {
             return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
         case .qwen36, .qwen38, .maple:
             return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
+        case .inkling2Loop:
+            // Never quantized at install: its tensors are the GGUF's bytes.
+            return "none-gguf-bytes-copied"
         }
     }
 
@@ -97,6 +100,9 @@ enum GTurboJSON {
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["denseIntermediateSize"] = arch.denseIntermediateSize
             archDict["qkNorm"] = arch.qkNorm
+        }
+        if arch.family == .inkling2Loop {
+            try addInkling2ArchFields(&archDict, arch: arch)
         }
         if arch.family == .maple {
             archDict["routerScoringFunc"] = arch.routerScoringFunc
@@ -169,6 +175,10 @@ enum GTurboJSON {
                 "biasType": "BF16",
                 "groupSize": 64,
             ]
+        }
+
+        if arch.family == .inkling2Loop {
+            quantDict = inkling2QuantSlots
         }
 
         var filesDict: [String: Any] = [:]

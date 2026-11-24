@@ -13,6 +13,11 @@ extension MFTokenizer {
         var value = self
         value.isBaseQwen38 = modelID == CheckpointIdentity.baseQwen38
         value.generationDefaults = try CheckpointGeneration.defaults(inFolder: value.localTokenizerFolder)
+        if value.dialect == .inkling2, !value.hasGenerationConfig {
+            // The vendor's sampling (generation_config.json at b85c3cf):
+            // temperature 1.0 and no truncation, even without the file.
+            value.generationDefaults = Self.inkling2GenerationDefaults
+        }
         if value.supportsQwenReasoningEffort, value.dialect != .chatml {
             throw MFTokenizerError.unsupportedForDialect("Qwen 3.8 requires ChatML")
         }
@@ -21,9 +26,24 @@ extension MFTokenizer {
 
     public var supportsQwenReasoningEffort: Bool { isBaseQwen38 }
 
-    /// Whether a request may carry `reasoning_effort` at all.
+    /// Inkling 2's sampling: temperature 1.0, no top-k, top-p or min-p, no
+    /// penalties (the vendor's `generation_config.json`, the GGUF's sampling
+    /// keys and Unsloth's recommendation agree).
+    static let inkling2GenerationDefaults = GenerationConfig(
+        temperature: 1.0, topK: nil, topP: nil, repetitionPenalty: 1,
+        presencePenalty: 0, frequencyPenalty: 0, minP: 0)
+
+    private var hasGenerationConfig: Bool {
+        guard let folder = localTokenizerFolder else { return false }
+        return FileManager.default.fileExists(
+            atPath: folder.appendingPathComponent("generation_config.json").path)
+    }
+
+    /// Whether a request may carry `reasoning_effort` at all. Inkling 2's
+    /// template takes the same names (`none`, `low`, `medium`, `xhigh`) among
+    /// its own levels.
     public var acceptsReasoningEffort: Bool {
-        supportsQwenReasoningEffort || supportsOptInThinking
+        supportsQwenReasoningEffort || supportsOptInThinking || dialect == .inkling2
     }
 
     /// Base Qwen 3.8 renders through its source template when the request
@@ -96,9 +116,18 @@ extension MFTokenizer {
 
     /// Selects the family's installed source template for both ordinary and
     /// tool chat when the checkpoint and request call for it.
+    /// `inkling2Effort` is Inkling 2's own effort (its names beyond the four
+    /// shared ones); for that dialect it takes precedence over
+    /// `reasoningEffort`, and every other dialect ignores it.
     public func encodeChat(messages: [Message], tools: [FunctionDefinition] = [],
                            reasoningEffort: QwenReasoningEffort? = nil,
-                           preserveThinking: Bool = false) throws -> [Int32] {
+                           preserveThinking: Bool = false,
+                           inkling2Effort: Inkling2Effort? = nil) throws -> [Int32] {
+        if dialect == .inkling2 {
+            // One render for every Inkling 2 conversation: the vendor template.
+            return try encodeInkling2Chat(messages: messages, tools: tools,
+                                          effort: inkling2Effort ?? reasoningEffort.map { .named($0.rawValue) })
+        }
         if usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
             // The source rejects developer turns. Do not silently rewrite their
             // role or discard their instructions.

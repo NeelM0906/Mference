@@ -5,8 +5,9 @@ import SwiftUI
 /// The per-chat model picker (mockup 02b, decisions L2/L3): Recommended
 /// (Quick, Deep, Auto "Coming later"), Built into macOS (Apple's on-device
 /// model, only while Settings > Models > Apple Intelligence model is on and
-/// this Mac can run it) and Also on this Mac (Qwen 3.6, MiniCPM5, Maple),
-/// each with its live state and, small under it, the engine.
+/// this Mac can run it) and Also on this Mac (Inkling 2 Mini, Qwen 3.6,
+/// MiniCPM5, Maple), each with its live state and, small under it, the
+/// engine.
 struct ModelPicker: View {
     @Bindable var model: ChatViewModel
     @Binding var isOpen: Bool

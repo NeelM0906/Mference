@@ -1,0 +1,26 @@
+{
+ "id": "trace01b",
+ "kind": "ids",
+ "prompt_text": "The capital of France is Paris",
+ "prompt_ids": [
+  371,
+  151451,
+  149879,
+  151194,
+  149884,
+  152717
+ ],
+ "generated_ids": [
+  13
+ ],
+ "generated_text": ".",
+ "generated_pieces": [
+  "."
+ ],
+ "stop": "n_gen",
+ "prefill_s": 0.853859334,
+ "decode_s": 0.006458166,
+ "logprobs_file": "logprobs.json",
+ "logprobs_first_pos": 0,
+ "trace_file": "trace.json"
+}

@@ -10,7 +10,7 @@ Mference's runtime, installer, and application code are derived from
 Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
-rebrand throughout; support for Qwen 3.6, Qwen 3.8 27B, Maple, and MiniCPM5-2B
+rebrand throughout; support for Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5-2B, and Inkling 2 Mini
 across architecture configuration,
 streaming installation, Metal kernels, forward runners, tokenization, and
 products; model-derived kernel specialization; and expanded validation and
@@ -87,6 +87,21 @@ weights in a model card, LICENSE file, or Hub license tag. Downloading, using,
 or redistributing those weights therefore requires separately establishing
 that the necessary rights have been obtained; Mference makes no grant of
 rights to them.
+
+Inkling 2 Mini: revision `45fd08764f2b0bf16b03a5483a80e5c7aaec8772` of
+[`unsloth/Inkling-2-Mini-GGUF`](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF),
+the file `Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf_file` (17,629,760,736
+bytes, SHA-256
+`e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3`), a
+quantization of Thinking Machines'
+[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini). The
+installer copies every tensor unchanged. Both model cards declare
+`license: apache-2.0` (Thinking Machines' with a `license_link` to the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)), as read
+from their main branches on 2026-11-23 and not re-checked at the pinned
+revision; the GGUF's own metadata declares no license. The terms on the
+pinned repository and on the original checkpoint govern those weights, and
+Mference makes no grant of rights to them.
 
 MiniCPM5-2B: revision `cd199ce3ee67549c42ef7372f809f2c63599a3e9` of
 [`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B), the

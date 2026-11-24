@@ -26,6 +26,12 @@ public enum ForwardRunnerFactory {
         guard maxContext <= maximum else {
             throw ContextLimitError(family: model.config.family, requested: maxContext, maximum: maximum)
         }
+        // A family the capability gate holds has no runner yet; refuse it here
+        // too, so a model loaded with an explicit baseline never falls
+        // through to the shared runner below. Nil for every shipped family.
+        if let refusal = ManifestReader.capabilityRefusal(family: model.config.family.rawValue) {
+            throw refusal
+        }
         if model.config.family == .maple {
             return ForwardRuntime(producer: try MapleForwardRunner(
                 model: model, context: context, maxContext: maxContext,
@@ -35,6 +41,13 @@ public enum ForwardRunnerFactory {
         }
         if model.config.family == .qwen38 {
             return ForwardRuntime(producer: try Qwen38ForwardRunner(
+                model: model, context: context, maxContext: maxContext,
+                runtimeConfiguration: runtimeConfiguration),
+                                  prefillConfig: runtimeConfiguration.prefillConfig,
+                                  kvStorageMode: .fp16)
+        }
+        if model.config.family == .inkling2Loop {
+            return ForwardRuntime(producer: try Inkling2ForwardRunner(
                 model: model, context: context, maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration),
                                   prefillConfig: runtimeConfiguration.prefillConfig,

@@ -1,0 +1,3395 @@
+[
+ {
+  "id": 37812,
+  "token": "chffff",
+  "text": "chffff",
+  "bpe": [
+   "ch",
+   "ff",
+   "ff"
+  ]
+ },
+ {
+  "id": 37817,
+  "token": "chffffff",
+  "text": "chffffff",
+  "bpe": [
+   "ch",
+   "ff",
+   "ff",
+   "ff"
+  ]
+ },
+ {
+  "id": 49919,
+  "token": "Aleksandr",
+  "text": "Aleksandr",
+  "bpe": [
+   "Alek",
+   "s",
+   "andr"
+  ]
+ },
+ {
+  "id": 53960,
+  "token": "Klebsiella",
+  "text": "Klebsiella",
+  "bpe": [
+   "Kleb",
+   "sie",
+   "lla"
+  ]
+ },
+ {
+  "id": 55562,
+  "token": "Rijks",
+  "text": "Rijks",
+  "bpe": [
+   "R",
+   "ijk",
+   "s"
+  ]
+ },
+ {
+  "id": 61018,
+  "token": "VBORw",
+  "text": "VBORw",
+  "bpe": [
+   "V",
+   "BO",
+   "Rw"
+  ]
+ },
+ {
+  "id": 61148,
+  "token": "AAAANSUh",
+  "text": "AAAANSUh",
+  "bpe": [
+   "AA",
+   "AA",
+   "NS",
+   "Uh"
+  ]
+ },
+ {
+  "id": 63651,
+  "token": "QIECBAg",
+  "text": "QIECBAg",
+  "bpe": [
+   "QIEC",
+   "B",
+   "Ag"
+  ]
+ },
+ {
+  "id": 67926,
+  "token": "vdfbsdfgb",
+  "text": "vdfbsdfgb",
+  "bpe": [
+   "v",
+   "dfb",
+   "sdf",
+   "gb"
+  ]
+ },
+ {
+  "id": 67927,
+  "token": "svsfvdfbsdfgb",
+  "text": "svsfvdfbsdfgb",
+  "bpe": [
+   "svsf",
+   "v",
+   "dfb",
+   "sdf",
+   "gb"
+  ]
+ },
+ {
+  "id": 80179,
+  "token": "zijds",
+  "text": "zijds",
+  "bpe": [
+   "zij",
+   "d",
+   "s"
+  ]
+ },
+ {
+  "id": 83316,
+  "token": "szÃ¼ks",
+  "text": "szüks",
+  "bpe": [
+   "sz",
+   "Ã¼k",
+   "s"
+  ]
+ },
+ {
+  "id": 87550,
+  "token": "kwargs",
+  "text": "kwargs",
+  "bpe": [
+   "kwar",
+   "g",
+   "s"
+  ]
+ },
+ {
+  "id": 88196,
+  "token": "wiÄĻks",
+  "text": "więks",
+  "bpe": [
+   "wiÄĻ",
+   "k",
+   "s"
+  ]
+ },
+ {
+  "id": 90239,
+  "token": "szÃ¼ksÃ©g",
+  "text": "szükség",
+  "bpe": [
+   "sz",
+   "Ã¼k",
+   "sÃ©g"
+  ]
+ },
+ {
+  "id": 91149,
+  "token": "ãģ«ãģ¤ãģĦãģ¦",
+  "text": "について",
+  "bpe": [
+   "ãģ«",
+   "ãģ¤",
+   "ãģĦãģ¦"
+  ]
+ },
+ {
+  "id": 93407,
+  "token": "anderzijds",
+  "text": "anderzijds",
+  "bpe": [
+   "ander",
+   "zij",
+   "d",
+   "s"
+  ]
+ },
+ {
+  "id": 95585,
+  "token": "swegs",
+  "text": "swegs",
+  "bpe": [
+   "swe",
+   "g",
+   "s"
+  ]
+ },
+ {
+  "id": 95867,
+  "token": "keineswegs",
+  "text": "keineswegs",
+  "bpe": [
+   "keine",
+   "swe",
+   "g",
+   "s"
+  ]
+ },
+ {
+  "id": 98875,
+  "token": "enerzijds",
+  "text": "enerzijds",
+  "bpe": [
+   "ener",
+   "zij",
+   "d",
+   "s"
+  ]
+ },
+ {
+  "id": 102057,
+  "token": "GebÃ¤ude",
+  "text": "Gebäude",
+  "bpe": [
+   "Ge",
+   "bÃ¤",
+   "ude"
+  ]
+ },
+ {
+  "id": 103413,
+  "token": "ãģıãģłãģķãģĦ",
+  "text": "ください",
+  "bpe": [
+   "ãģı",
+   "ãģł",
+   "ãģķ",
+   "ãģĦ"
+  ]
+ },
+ {
+  "id": 104703,
+  "token": "ãģ¾ãģĽãĤĵ",
+  "text": "ません",
+  "bpe": [
+   "ãģ¾",
+   "ãģĽ",
+   "ãĤĵ"
+  ]
+ },
+ {
+  "id": 107857,
+  "token": "wiÄĻksz",
+  "text": "większ",
+  "bpe": [
+   "wiÄĻ",
+   "k",
+   "sz"
+  ]
+ },
+ {
+  "id": 112016,
+  "token": "ãģ«ãģĬãģĦãģ¦",
+  "text": "において",
+  "bpe": [
+   "ãģ«",
+   "ãģĬ",
+   "ãģĦãģ¦"
+  ]
+ },
+ {
+  "id": 115881,
+  "token": "yticks",
+  "text": "yticks",
+  "bpe": [
+   "y",
+   "tick",
+   "s"
+  ]
+ },
+ {
+  "id": 116021,
+  "token": "hyvÃ¤ksy",
+  "text": "hyväksy",
+  "bpe": [
+   "hyvÃ¤",
+   "k",
+   "sy"
+  ]
+ },
+ {
+  "id": 117783,
+  "token": "ãģ«ãģĬãģĳãĤĭ",
+  "text": "における",
+  "bpe": [
+   "ãģ«",
+   "ãģĬ",
+   "ãģĳãĤĭ"
+  ]
+ },
+ {
+  "id": 120146,
+  "token": "hÃ¼bsch",
+  "text": "hübsch",
+  "bpe": [
+   "hÃ¼",
+   "b",
+   "sch"
+  ]
+ },
+ {
+  "id": 122689,
+  "token": "kÃ¼lÃ¶nleges",
+  "text": "különleges",
+  "bpe": [
+   "kÃ¼lÃ¶n",
+   "lege",
+   "s"
+  ]
+ },
+ {
+  "id": 124300,
+  "token": "ãĥķãĤ¡ãĤ¤ãĥ«",
+  "text": "ファイル",
+  "bpe": [
+   "ãĥķãĤ¡",
+   "ãĤ¤",
+   "ãĥ«"
+  ]
+ },
+ {
+  "id": 124696,
+  "token": "iseksi",
+  "text": "iseksi",
+  "bpe": [
+   "ise",
+   "k",
+   "si"
+  ]
+ },
+ {
+  "id": 126340,
+  "token": "aposent",
+  "text": "aposent",
+  "bpe": [
+   "a",
+   "pos",
+   "ent"
+  ]
+ },
+ {
+  "id": 126594,
+  "token": "ãģ«ãĤĪãĤĭ",
+  "text": "による",
+  "bpe": [
+   "ãģ«",
+   "ãĤĪ",
+   "ãĤĭ"
+  ]
+ },
+ {
+  "id": 127792,
+  "token": "periksa",
+  "text": "periksa",
+  "bpe": [
+   "peri",
+   "k",
+   "sa"
+  ]
+ },
+ {
+  "id": 130603,
+  "token": "ÂĿÂĳ",
+  "text": "",
+  "bpe": [
+   "ÂĿ",
+   "Â",
+   "ĳ"
+  ]
+ },
+ {
+  "id": 132899,
+  "token": "iseks",
+  "text": "iseks",
+  "bpe": [
+   "ise",
+   "k",
+   "s"
+  ]
+ },
+ {
+  "id": 134231,
+  "token": "krebs",
+  "text": "krebs",
+  "bpe": [
+   "k",
+   "reb",
+   "s"
+  ]
+ },
+ {
+  "id": 135578,
+  "token": "ãĤ·ãĤ¹ãĥĨ",
+  "text": "システ",
+  "bpe": [
+   "ãĤ·",
+   "ãĤ¹",
+   "ãĥĨ"
+  ]
+ },
+ {
+  "id": 135606,
+  "token": "maravillos",
+  "text": "maravillos",
+  "bpe": [
+   "marav",
+   "il",
+   "los"
+  ]
+ },
+ {
+  "id": 135685,
+  "token": "ãģĹãģ¦ãģıãģłãģķãģĦ",
+  "text": "してください",
+  "bpe": [
+   "ãģĹãģ¦",
+   "ãģı",
+   "ãģł",
+   "ãģķ",
+   "ãģĦ"
+  ]
+ },
+ {
+  "id": 139133,
+  "token": "ãĤµãĥ¼ãĥĵãĤ¹",
+  "text": "サービス",
+  "bpe": [
+   "ãĤµãĥ¼",
+   "ãĥĵ",
+   "ãĤ¹"
+  ]
+ },
+ {
+  "id": 139473,
+  "token": "ãĤ¨ãĥįãĥ«",
+  "text": "エネル",
+  "bpe": [
+   "ãĤ¨",
+   "ãĥį",
+   "ãĥ«"
+  ]
+ },
+ {
+  "id": 140160,
+  "token": "ãĤ¨ãĥįãĥ«ãĤ®ãĥ¼",
+  "text": "エネルギー",
+  "bpe": [
+   "ãĤ¨",
+   "ãĥį",
+   "ãĥ«",
+   "ãĤ®ãĥ¼"
+  ]
+ },
+ {
+  "id": 142014,
+  "token": "ãģĨãĤĭãģķãģĦ",
+  "text": "うるさい",
+  "bpe": [
+   "ãģĨãĤĭ",
+   "ãģķ",
+   "ãģĦ"
+  ]
+ },
+ {
+  "id": 142766,
+  "token": "goimports",
+  "text": "goimports",
+  "bpe": [
+   "go",
+   "import",
+   "s"
+  ]
+ },
+ {
+  "id": 144641,
+  "token": "ãģ«ãģªãĤĭ",
+  "text": "になる",
+  "bpe": [
+   "ãģ«",
+   "ãģª",
+   "ãĤĭ"
+  ]
+ },
+ {
+  "id": 145069,
+  "token": "ufrg",
+  "text": "ufrg",
+  "bpe": [
+   "u",
+   "fr",
+   "g"
+  ]
+ },
+ {
+  "id": 145104,
+  "token": "szÃ¼ksÃ©ge",
+  "text": "szüksége",
+  "bpe": [
+   "sz",
+   "Ã¼k",
+   "sÃ©ge"
+  ]
+ },
+ {
+  "id": 145129,
+  "token": "Esitek",
+  "text": "Esitek",
+  "bpe": [
+   "E",
+   "site",
+   "k"
+  ]
+ },
+ {
+  "id": 145134,
+  "token": "Ufrg",
+  "text": "Ufrg",
+  "bpe": [
+   "U",
+   "fr",
+   "g"
+  ]
+ },
+ {
+  "id": 145135,
+  "token": "Appendik",
+  "text": "Appendik",
+  "bpe": [
+   "Ap",
+   "pendi",
+   "k"
+  ]
+ },
+ {
+  "id": 145170,
+  "token": "undotb",
+  "text": "undotb",
+  "bpe": [
+   "un",
+   "dot",
+   "b"
+  ]
+ },
+ {
+  "id": 145180,
+  "token": "gnumonk",
+  "text": "gnumonk",
+  "bpe": [
+   "g",
+   "num",
+   "onk"
+  ]
+ },
+ {
+  "id": 145203,
+  "token": "Dierk",
+  "text": "Dierk",
+  "bpe": [
+   "D",
+   "ier",
+   "k"
+  ]
+ },
+ {
+  "id": 145215,
+  "token": "Bldg",
+  "text": "Bldg",
+  "bpe": [
+   "B",
+   "ld",
+   "g"
+  ]
+ },
+ {
+  "id": 145232,
+  "token": "hldg",
+  "text": "hldg",
+  "bpe": [
+   "h",
+   "ld",
+   "g"
+  ]
+ },
+ {
+  "id": 145256,
+  "token": "ortodok",
+  "text": "ortodok",
+  "bpe": [
+   "or",
+   "todo",
+   "k"
+  ]
+ },
+ {
+  "id": 145275,
+  "token": "nethog",
+  "text": "nethog",
+  "bpe": [
+   "ne",
+   "tho",
+   "g"
+  ]
+ },
+ {
+  "id": 145298,
+  "token": "Borcherd",
+  "text": "Borcherd",
+  "bpe": [
+   "Bor",
+   "cher",
+   "d"
+  ]
+ },
+ {
+  "id": 145305,
+  "token": "Phantek",
+  "text": "Phantek",
+  "bpe": [
+   "Ph",
+   "ante",
+   "k"
+  ]
+ },
+ {
+  "id": 145320,
+  "token": "javacrumb",
+  "text": "javacrumb",
+  "bpe": [
+   "jav",
+   "ac",
+   "rumb"
+  ]
+ },
+ {
+  "id": 145353,
+  "token": "trkwk",
+  "text": "trkwk",
+  "bpe": [
+   "tr",
+   "kw",
+   "k"
+  ]
+ },
+ {
+  "id": 145376,
+  "token": "bmvb",
+  "text": "bmvb",
+  "bpe": [
+   "b",
+   "mv",
+   "b"
+  ]
+ },
+ {
+  "id": 145408,
+  "token": "gethonk",
+  "text": "gethonk",
+  "bpe": [
+   "ge",
+   "thon",
+   "k"
+  ]
+ },
+ {
+  "id": 145423,
+  "token": "fÃ³lk",
+  "text": "fólk",
+  "bpe": [
+   "f",
+   "Ã³l",
+   "k"
+  ]
+ },
+ {
+  "id": 145432,
+  "token": "Gramed",
+  "text": "Gramed",
+  "bpe": [
+   "G",
+   "rame",
+   "d"
+  ]
+ },
+ {
+  "id": 145479,
+  "token": "hashalg",
+  "text": "hashalg",
+  "bpe": [
+   "has",
+   "hal",
+   "g"
+  ]
+ },
+ {
+  "id": 145493,
+  "token": "Freivald",
+  "text": "Freivald",
+  "bpe": [
+   "Fre",
+   "ival",
+   "d"
+  ]
+ },
+ {
+  "id": 145505,
+  "token": "nablavk",
+  "text": "nablavk",
+  "bpe": [
+   "n",
+   "abl",
+   "av",
+   "k"
+  ]
+ },
+ {
+  "id": 145514,
+  "token": "KEhg",
+  "text": "KEhg",
+  "bpe": [
+   "K",
+   "Eh",
+   "g"
+  ]
+ },
+ {
+  "id": 145515,
+  "token": "Noratek",
+  "text": "Noratek",
+  "bpe": [
+   "Nor",
+   "ate",
+   "k"
+  ]
+ },
+ {
+  "id": 145518,
+  "token": "vectordb",
+  "text": "vectordb",
+  "bpe": [
+   "vect",
+   "ord",
+   "b"
+  ]
+ },
+ {
+  "id": 145520,
+  "token": "adovb",
+  "text": "adovb",
+  "bpe": [
+   "ad",
+   "ov",
+   "b"
+  ]
+ },
+ {
+  "id": 145559,
+  "token": "pedrovg",
+  "text": "pedrovg",
+  "bpe": [
+   "ped",
+   "rov",
+   "g"
+  ]
+ },
+ {
+  "id": 145567,
+  "token": "Lourd",
+  "text": "Lourd",
+  "bpe": [
+   "L",
+   "our",
+   "d"
+  ]
+ },
+ {
+  "id": 145585,
+  "token": "Tulek",
+  "text": "Tulek",
+  "bpe": [
+   "T",
+   "ule",
+   "k"
+  ]
+ },
+ {
+  "id": 145604,
+  "token": "zvkd",
+  "text": "zvkd",
+  "bpe": [
+   "z",
+   "vk",
+   "d"
+  ]
+ },
+ {
+  "id": 145616,
+  "token": "Lemberg",
+  "text": "Lemberg",
+  "bpe": [
+   "L",
+   "ember",
+   "g"
+  ]
+ },
+ {
+  "id": 145631,
+  "token": "QFzg",
+  "text": "QFzg",
+  "bpe": [
+   "Q",
+   "Fz",
+   "g"
+  ]
+ },
+ {
+  "id": 145633,
+  "token": "dataturk",
+  "text": "dataturk",
+  "bpe": [
+   "dat",
+   "at",
+   "urk"
+  ]
+ },
+ {
+  "id": 145635,
+  "token": "wwwwd",
+  "text": "wwwwd",
+  "bpe": [
+   "ww",
+   "ww",
+   "d"
+  ]
+ },
+ {
+  "id": 145636,
+  "token": "tshog",
+  "text": "tshog",
+  "bpe": [
+   "t",
+   "sho",
+   "g"
+  ]
+ },
+ {
+  "id": 145675,
+  "token": "appendik",
+  "text": "appendik",
+  "bpe": [
+   "ap",
+   "pendi",
+   "k"
+  ]
+ },
+ {
+  "id": 145677,
+  "token": "xynb",
+  "text": "xynb",
+  "bpe": [
+   "x",
+   "yn",
+   "b"
+  ]
+ },
+ {
+  "id": 145712,
+  "token": "alusek",
+  "text": "alusek",
+  "bpe": [
+   "al",
+   "use",
+   "k"
+  ]
+ },
+ {
+  "id": 145722,
+  "token": "hÃ¼bsche",
+  "text": "hübsche",
+  "bpe": [
+   "hÃ¼",
+   "b",
+   "sche"
+  ]
+ },
+ {
+  "id": 145723,
+  "token": "euromd",
+  "text": "euromd",
+  "bpe": [
+   "eu",
+   "rom",
+   "d"
+  ]
+ },
+ {
+  "id": 145733,
+  "token": "Eulek",
+  "text": "Eulek",
+  "bpe": [
+   "E",
+   "ule",
+   "k"
+  ]
+ },
+ {
+  "id": 145737,
+  "token": "obslb",
+  "text": "obslb",
+  "bpe": [
+   "ob",
+   "sl",
+   "b"
+  ]
+ },
+ {
+  "id": 145750,
+  "token": "Bibliotek",
+  "text": "Bibliotek",
+  "bpe": [
+   "Bib",
+   "liote",
+   "k"
+  ]
+ },
+ {
+  "id": 145773,
+  "token": "kwrg",
+  "text": "kwrg",
+  "bpe": [
+   "k",
+   "wr",
+   "g"
+  ]
+ },
+ {
+  "id": 145784,
+  "token": "procerg",
+  "text": "procerg",
+  "bpe": [
+   "pro",
+   "cer",
+   "g"
+  ]
+ },
+ {
+  "id": 145807,
+  "token": "lxyb",
+  "text": "lxyb",
+  "bpe": [
+   "l",
+   "xy",
+   "b"
+  ]
+ },
+ {
+  "id": 145815,
+  "token": "sinhrk",
+  "text": "sinhrk",
+  "bpe": [
+   "sin",
+   "hr",
+   "k"
+  ]
+ },
+ {
+  "id": 145824,
+  "token": "ggrk",
+  "text": "ggrk",
+  "bpe": [
+   "g",
+   "gr",
+   "k"
+  ]
+ },
+ {
+  "id": 145837,
+  "token": "mpipk",
+  "text": "mpipk",
+  "bpe": [
+   "mp",
+   "ip",
+   "k"
+  ]
+ },
+ {
+  "id": 145840,
+  "token": "proplyd",
+  "text": "proplyd",
+  "bpe": [
+   "pro",
+   "ply",
+   "d"
+  ]
+ },
+ {
+  "id": 158100,
+  "token": "ĠÃītats",
+  "text": " États",
+  "bpe": [
+   "Ġ",
+   "Ãītat",
+   "s"
+  ]
+ },
+ {
+  "id": 165542,
+  "token": "ĠwiÄĻks",
+  "text": " więks",
+  "bpe": [
+   "Ġ",
+   "wiÄĻ",
+   "k",
+   "s"
+  ]
+ },
+ {
+  "id": 168366,
+  "token": "ĠespecÃŃficos",
+  "text": " específicos",
+  "bpe": [
+   "Ġ",
+   "especÃŃfic",
+   "os"
+  ]
+ },
+ {
+  "id": 168384,
+  "token": "Ġkeineswegs",
+  "text": " keineswegs",
+  "bpe": [
+   "Ġkeine",
+   "swe",
+   "g",
+   "s"
+  ]
+ },
+ {
+  "id": 169179,
+  "token": "Ġbehaviors",
+  "text": " behaviors",
+  "bpe": [
+   "Ġ",
+   "behavi",
+   "ors"
+  ]
+ },
+ {
+  "id": 169469,
+  "token": "Ġenerzijds",
+  "text": " enerzijds",
+  "bpe": [
+   "Ġener",
+   "zij",
+   "d",
+   "s"
+  ]
+ },
+ {
+  "id": 169648,
+  "token": "Ġsegundos",
+  "text": " segundos",
+  "bpe": [
+   "Ġ",
+   "segun",
+   "dos"
+  ]
+ },
+ {
+  "id": 170247,
+  "token": "ĠespecÃŃficas",
+  "text": " específicas",
+  "bpe": [
+   "Ġ",
+   "especÃŃfic",
+   "as"
+  ]
+ },
+ {
+  "id": 170418,
+  "token": "Ġmismas",
+  "text": " mismas",
+  "bpe": [
+   "Ġ",
+   "mism",
+   "as"
+  ]
+ },
+ {
+  "id": 170532,
+  "token": "ĠlÃŃneas",
+  "text": " líneas",
+  "bpe": [
+   "Ġ",
+   "lÃŃne",
+   "as"
+  ]
+ },
+ {
+  "id": 170730,
+  "token": "Ġfocuses",
+  "text": " focuses",
+  "bpe": [
+   "Ġ",
+   "focuse",
+   "s"
+  ]
+ },
+ {
+  "id": 170791,
+  "token": "ĠmÃ©thodes",
+  "text": " méthodes",
+  "bpe": [
+   "Ġ",
+   "mÃ©tho",
+   "des"
+  ]
+ },
+ {
+  "id": 170818,
+  "token": "Ġestrategias",
+  "text": " estrategias",
+  "bpe": [
+   "Ġ",
+   "estrateg",
+   "ias"
+  ]
+ },
+ {
+  "id": 170846,
+  "token": "Ġejemplos",
+  "text": " ejemplos",
+  "bpe": [
+   "Ġ",
+   "ejem",
+   "plos"
+  ]
+ },
+ {
+  "id": 171174,
+  "token": "Ġcriterios",
+  "text": " criterios",
+  "bpe": [
+   "Ġ",
+   "criter",
+   "ios"
+  ]
+ },
+ {
+  "id": 171222,
+  "token": "ĠGebÃ¤ude",
+  "text": " Gebäude",
+  "bpe": [
+   "ĠGe",
+   "bÃ¤",
+   "ude"
+  ]
+ },
+ {
+  "id": 171256,
+  "token": "Ġwelches",
+  "text": " welches",
+  "bpe": [
+   "Ġ",
+   "welch",
+   "es"
+  ]
+ },
+ {
+  "id": 171606,
+  "token": "ĠcompÃ©tences",
+  "text": " compétences",
+  "bpe": [
+   "Ġ",
+   "compÃ©t",
+   "ences"
+  ]
+ },
+ {
+  "id": 172223,
+  "token": "ĠpÃ¡ginas",
+  "text": " páginas",
+  "bpe": [
+   "Ġ",
+   "pÃ¡gin",
+   "as"
+  ]
+ },
+ {
+  "id": 172600,
+  "token": "ĠtÃ©cnicos",
+  "text": " técnicos",
+  "bpe": [
+   "Ġ",
+   "tÃ©cnic",
+   "os"
+  ]
+ },
+ {
+  "id": 172626,
+  "token": "Ġcoisas",
+  "text": " coisas",
+  "bpe": [
+   "Ġ",
+   "cois",
+   "as"
+  ]
+ },
+ {
+  "id": 173297,
+  "token": "Ġconnaissances",
+  "text": " connaissances",
+  "bpe": [
+   "Ġ",
+   "connaiss",
+   "ances"
+  ]
+ },
+ {
+  "id": 173337,
+  "token": "Ġnuestras",
+  "text": " nuestras",
+  "bpe": [
+   "Ġ",
+   "nuestr",
+   "as"
+  ]
+ },
+ {
+  "id": 174305,
+  "token": "Ġcolleagues",
+  "text": " colleagues",
+  "bpe": [
+   "Ġ",
+   "colleague",
+   "s"
+  ]
+ },
+ {
+  "id": 174657,
+  "token": "Ġanderzijds",
+  "text": " anderzijds",
+  "bpe": [
+   "Ġander",
+   "zij",
+   "d",
+   "s"
+  ]
+ },
+ {
+  "id": 175113,
+  "token": "Ġnecesarios",
+  "text": " necesarios",
+  "bpe": [
+   "Ġ",
+   "necesari",
+   "os"
+  ]
+ },
+ {
+  "id": 175523,
+  "token": "Ġtiempos",
+  "text": " tiempos",
+  "bpe": [
+   "Ġ",
+   "tiem",
+   "pos"
+  ]
+ },
+ {
+  "id": 175592,
+  "token": "ĠServicios",
+  "text": " Servicios",
+  "bpe": [
+   "Ġ",
+   "Servic",
+   "ios"
+  ]
+ },
+ {
+  "id": 175733,
+  "token": "Ġnecesarias",
+  "text": " necesarias",
+  "bpe": [
+   "Ġ",
+   "neces",
+   "arias"
+  ]
+ },
+ {
+  "id": 175793,
+  "token": "Ġejercicios",
+  "text": " ejercicios",
+  "bpe": [
+   "Ġ",
+   "ejercic",
+   "ios"
+  ]
+ },
+ {
+  "id": 176318,
+  "token": "ĠderniÃ¨res",
+  "text": " dernières",
+  "bpe": [
+   "Ġ",
+   "derni",
+   "Ã¨res"
+  ]
+ },
+ {
+  "id": 176628,
+  "token": "ĠmÃ¡quinas",
+  "text": " máquinas",
+  "bpe": [
+   "Ġ",
+   "mÃ¡quin",
+   "as"
+  ]
+ },
+ {
+  "id": 176767,
+  "token": "Ġpropias",
+  "text": " propias",
+  "bpe": [
+   "Ġ",
+   "propi",
+   "as"
+  ]
+ },
+ {
+  "id": 177833,
+  "token": "Ġderniers",
+  "text": " derniers",
+  "bpe": [
+   "Ġ",
+   "dern",
+   "iers"
+  ]
+ },
+ {
+  "id": 178552,
+  "token": "ĠpropriÃ©tÃ©s",
+  "text": " propriétés",
+  "bpe": [
+   "Ġ",
+   "propriÃ©t",
+   "Ã©s"
+  ]
+ },
+ {
+  "id": 178648,
+  "token": "Ġcapacidades",
+  "text": " capacidades",
+  "bpe": [
+   "Ġ",
+   "capacid",
+   "ades"
+  ]
+ },
+ {
+  "id": 179424,
+  "token": "Ġestruturas",
+  "text": " estruturas",
+  "bpe": [
+   "Ġ",
+   "estrut",
+   "uras"
+  ]
+ },
+ {
+  "id": 179561,
+  "token": "Ġscientifiques",
+  "text": " scientifiques",
+  "bpe": [
+   "Ġ",
+   "scientif",
+   "iques"
+  ]
+ },
+ {
+  "id": 180088,
+  "token": "ĠindivÃŃduos",
+  "text": " indivíduos",
+  "bpe": [
+   "Ġ",
+   "indivÃŃ",
+   "duos"
+  ]
+ },
+ {
+  "id": 180190,
+  "token": "Ġcuidados",
+  "text": " cuidados",
+  "bpe": [
+   "Ġ",
+   "cuidad",
+   "os"
+  ]
+ },
+ {
+  "id": 180441,
+  "token": "ĠszÃ¼ks",
+  "text": " szüks",
+  "bpe": [
+   "Ġsz",
+   "Ã¼k",
+   "s"
+  ]
+ },
+ {
+  "id": 181319,
+  "token": "ĠÃºltimas",
+  "text": " últimas",
+  "bpe": [
+   "Ġ",
+   "Ãºlt",
+   "imas"
+  ]
+ },
+ {
+  "id": 181325,
+  "token": "Ġfonksiyon",
+  "text": " fonksiyon",
+  "bpe": [
+   "Ġfonk",
+   "si",
+   "yon"
+  ]
+ },
+ {
+  "id": 181828,
+  "token": "ĠÃ³rgÃ£os",
+  "text": " órgãos",
+  "bpe": [
+   "Ġ",
+   "Ã³rg",
+   "Ã£os"
+  ]
+ },
+ {
+  "id": 182665,
+  "token": "ĠindÃŃgenas",
+  "text": " indígenas",
+  "bpe": [
+   "Ġ",
+   "indÃŃgen",
+   "as"
+  ]
+ },
+ {
+  "id": 183105,
+  "token": "Ġmelhores",
+  "text": " melhores",
+  "bpe": [
+   "Ġmel",
+   "ho",
+   "res"
+  ]
+ },
+ {
+  "id": 183122,
+  "token": "Ġobtidos",
+  "text": " obtidos",
+  "bpe": [
+   "Ġob",
+   "tid",
+   "os"
+  ]
+ },
+ {
+  "id": 184785,
+  "token": "ĠHours",
+  "text": " Hours",
+  "bpe": [
+   "Ġ",
+   "Hour",
+   "s"
+  ]
+ },
+ {
+  "id": 185235,
+  "token": "ĠBCELoss",
+  "text": " BCELoss",
+  "bpe": [
+   "Ġ",
+   "BCE",
+   "Loss"
+  ]
+ },
+ {
+  "id": 185497,
+  "token": "Ġauteurs",
+  "text": " auteurs",
+  "bpe": [
+   "Ġ",
+   "aute",
+   "urs"
+  ]
+ },
+ {
+  "id": 187098,
+  "token": "ĠPressure",
+  "text": " Pressure",
+  "bpe": [
+   "Ġ",
+   "Pres",
+   "sure"
+  ]
+ },
+ {
+  "id": 187276,
+  "token": "Ġcoeficientes",
+  "text": " coeficientes",
+  "bpe": [
+   "Ġco",
+   "efic",
+   "ientes"
+  ]
+ },
+ {
+  "id": 188947,
+  "token": "ĠÃŃndices",
+  "text": " índices",
+  "bpe": [
+   "ĠÃŃn",
+   "dic",
+   "es"
+  ]
+ },
+ {
+  "id": 190379,
+  "token": "ĠApenas",
+  "text": " Apenas",
+  "bpe": [
+   "ĠA",
+   "pen",
+   "as"
+  ]
+ },
+ {
+  "id": 192621,
+  "token": "ĠGraphics",
+  "text": " Graphics",
+  "bpe": [
+   "Ġ",
+   "Graphic",
+   "s"
+  ]
+ },
+ {
+  "id": 192624,
+  "token": "Ġonlangs",
+  "text": " onlangs",
+  "bpe": [
+   "Ġon",
+   "lang",
+   "s"
+  ]
+ },
+ {
+  "id": 193067,
+  "token": "Ġvoices",
+  "text": " voices",
+  "bpe": [
+   "Ġ",
+   "voic",
+   "es"
+  ]
+ },
+ {
+  "id": 193972,
+  "token": "ĠâĹ¦",
+  "text": " ◦",
+  "bpe": [
+   "Ġ",
+   "âĹ",
+   "¦"
+  ]
+ },
+ {
+  "id": 194023,
+  "token": "ĠCollins",
+  "text": " Collins",
+  "bpe": [
+   "Ġ",
+   "Collin",
+   "s"
+  ]
+ },
+ {
+  "id": 194390,
+  "token": "Ġkwargs",
+  "text": " kwargs",
+  "bpe": [
+   "Ġ",
+   "kwar",
+   "g",
+   "s"
+  ]
+ },
+ {
+  "id": 194916,
+  "token": "ĠInhalts",
+  "text": " Inhalts",
+  "bpe": [
+   "ĠIn",
+   "hal",
+   "ts"
+  ]
+ },
+ {
+  "id": 195131,
+  "token": "Ġstones",
+  "text": " stones",
+  "bpe": [
+   "Ġ",
+   "ston",
+   "es"
+  ]
+ },
+ {
+  "id": 195726,
+  "token": "ĠszÃ¼ksÃ©ges",
+  "text": " szükséges",
+  "bpe": [
+   "Ġsz",
+   "Ã¼k",
+   "sÃ©",
+   "ges"
+  ]
+ },
+ {
+  "id": 196502,
+  "token": "ĠDensity",
+  "text": " Density",
+  "bpe": [
+   "Ġ",
+   "Dens",
+   "ity"
+  ]
+ },
+ {
+  "id": 196883,
+  "token": "ĠwiÄĻksz",
+  "text": " większ",
+  "bpe": [
+   "Ġ",
+   "wiÄĻ",
+   "k",
+   "sz"
+  ]
+ },
+ {
+  "id": 197071,
+  "token": "ĠfÃ³lk",
+  "text": " fólk",
+  "bpe": [
+   "Ġf",
+   "Ã³l",
+   "k"
+  ]
+ },
+ {
+  "id": 197138,
+  "token": "Ġsherd",
+  "text": " sherd",
+  "bpe": [
+   "Ġ",
+   "sher",
+   "d"
+  ]
+ },
+ {
+  "id": 197147,
+  "token": "ĠAleksandr",
+  "text": " Aleksandr",
+  "bpe": [
+   "ĠAlek",
+   "s",
+   "andr"
+  ]
+ },
+ {
+  "id": 197166,
+  "token": "Ġvastusek",
+  "text": " vastusek",
+  "bpe": [
+   "Ġvast",
+   "use",
+   "k"
+  ]
+ },
+ {
+  "id": 197176,
+  "token": "ĠDierk",
+  "text": " Dierk",
+  "bpe": [
+   "ĠD",
+   "ier",
+   "k"
+  ]
+ },
+ {
+  "id": 197186,
+  "token": "ĠEsitek",
+  "text": " Esitek",
+  "bpe": [
+   "ĠE",
+   "site",
+   "k"
+  ]
+ },
+ {
+  "id": 197189,
+  "token": "ĠAppendik",
+  "text": " Appendik",
+  "bpe": [
+   "ĠAp",
+   "pendi",
+   "k"
+  ]
+ },
+ {
+  "id": 197202,
+  "token": "Ġteisek",
+  "text": " teisek",
+  "bpe": [
+   "Ġte",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 197210,
+  "token": "Ġortodok",
+  "text": " ortodok",
+  "bpe": [
+   "Ġor",
+   "todo",
+   "k"
+  ]
+ },
+ {
+  "id": 197214,
+  "token": "Ġuuek",
+  "text": " uuek",
+  "bpe": [
+   "Ġu",
+   "ue",
+   "k"
+  ]
+ },
+ {
+  "id": 197222,
+  "token": "Ġappendik",
+  "text": " appendik",
+  "bpe": [
+   "Ġap",
+   "pendi",
+   "k"
+  ]
+ },
+ {
+  "id": 197223,
+  "token": "Ġdoorknob",
+  "text": " doorknob",
+  "bpe": [
+   "Ġdo",
+   "ork",
+   "nob"
+  ]
+ },
+ {
+  "id": 197238,
+  "token": "Ġkoodek",
+  "text": " koodek",
+  "bpe": [
+   "Ġko",
+   "ode",
+   "k"
+  ]
+ },
+ {
+  "id": 197244,
+  "token": "Ġpoolek",
+  "text": " poolek",
+  "bpe": [
+   "Ġ",
+   "poole",
+   "k"
+  ]
+ },
+ {
+  "id": 197247,
+  "token": "ĠBasterd",
+  "text": " Basterd",
+  "bpe": [
+   "ĠB",
+   "aster",
+   "d"
+  ]
+ },
+ {
+  "id": 197248,
+  "token": "Ġwhelk",
+  "text": " whelk",
+  "bpe": [
+   "Ġ",
+   "whel",
+   "k"
+  ]
+ },
+ {
+  "id": 197283,
+  "token": "ĠGramed",
+  "text": " Gramed",
+  "bpe": [
+   "ĠG",
+   "rame",
+   "d"
+  ]
+ },
+ {
+  "id": 197288,
+  "token": "ĠLourd",
+  "text": " Lourd",
+  "bpe": [
+   "ĠL",
+   "our",
+   "d"
+  ]
+ },
+ {
+  "id": 197289,
+  "token": "Ġmottog",
+  "text": " mottog",
+  "bpe": [
+   "Ġ",
+   "motto",
+   "g"
+  ]
+ },
+ {
+  "id": 197308,
+  "token": "ĠGeschenk",
+  "text": " Geschenk",
+  "bpe": [
+   "ĠGes",
+   "chen",
+   "k"
+  ]
+ },
+ {
+  "id": 197311,
+  "token": "Ġtshog",
+  "text": " tshog",
+  "bpe": [
+   "Ġt",
+   "sho",
+   "g"
+  ]
+ },
+ {
+  "id": 197316,
+  "token": "ĠBibliotek",
+  "text": " Bibliotek",
+  "bpe": [
+   "ĠBib",
+   "liote",
+   "k"
+  ]
+ },
+ {
+  "id": 197322,
+  "token": "Ġupptog",
+  "text": " upptog",
+  "bpe": [
+   "Ġup",
+   "pto",
+   "g"
+  ]
+ },
+ {
+  "id": 197327,
+  "token": "ĠtÃ¨k",
+  "text": " tèk",
+  "bpe": [
+   "Ġ",
+   "tÃ¨",
+   "k"
+  ]
+ },
+ {
+  "id": 197338,
+  "token": "Ġstryk",
+  "text": " stryk",
+  "bpe": [
+   "Ġ",
+   "stry",
+   "k"
+  ]
+ },
+ {
+  "id": 197363,
+  "token": "ĠFreivald",
+  "text": " Freivald",
+  "bpe": [
+   "ĠFre",
+   "ival",
+   "d"
+  ]
+ },
+ {
+  "id": 197367,
+  "token": "Ġplicd",
+  "text": " plicd",
+  "bpe": [
+   "Ġ",
+   "plic",
+   "d"
+  ]
+ },
+ {
+  "id": 197387,
+  "token": "ĠZwerg",
+  "text": " Zwerg",
+  "bpe": [
+   "ĠZ",
+   "wer",
+   "g"
+  ]
+ },
+ {
+  "id": 197395,
+  "token": "Ġhalberd",
+  "text": " halberd",
+  "bpe": [
+   "Ġhal",
+   "ber",
+   "d"
+  ]
+ },
+ {
+  "id": 197398,
+  "token": "Ġnormaalsek",
+  "text": " normaalsek",
+  "bpe": [
+   "Ġnorma",
+   "alse",
+   "k"
+  ]
+ },
+ {
+  "id": 197418,
+  "token": "ĠBldg",
+  "text": " Bldg",
+  "bpe": [
+   "ĠB",
+   "ld",
+   "g"
+  ]
+ },
+ {
+  "id": 197424,
+  "token": "ĠNirad",
+  "text": " Nirad",
+  "bpe": [
+   "ĠN",
+   "ira",
+   "d"
+  ]
+ },
+ {
+  "id": 197430,
+  "token": "Ġproplyd",
+  "text": " proplyd",
+  "bpe": [
+   "Ġpro",
+   "ply",
+   "d"
+  ]
+ },
+ {
+  "id": 197433,
+  "token": "Ġwarthog",
+  "text": " warthog",
+  "bpe": [
+   "Ġwar",
+   "tho",
+   "g"
+  ]
+ },
+ {
+  "id": 197462,
+  "token": "Ġfunksjonen",
+  "text": " funksjonen",
+  "bpe": [
+   "Ġfunk",
+   "s",
+   "jonen"
+  ]
+ },
+ {
+  "id": 197464,
+  "token": "Ġideaalsek",
+  "text": " ideaalsek",
+  "bpe": [
+   "Ġidea",
+   "alse",
+   "k"
+  ]
+ },
+ {
+  "id": 197468,
+  "token": "Ġtranspordik",
+  "text": " transpordik",
+  "bpe": [
+   "Ġtran",
+   "sp",
+   "ordi",
+   "k"
+  ]
+ },
+ {
+  "id": 197470,
+  "token": "Ġgliek",
+  "text": " gliek",
+  "bpe": [
+   "Ġ",
+   "glie",
+   "k"
+  ]
+ },
+ {
+  "id": 197475,
+  "token": "Ġalkyd",
+  "text": " alkyd",
+  "bpe": [
+   "Ġal",
+   "ky",
+   "d"
+  ]
+ },
+ {
+  "id": 197486,
+  "token": "Ġdublek",
+  "text": " dublek",
+  "bpe": [
+   "Ġdu",
+   "ble",
+   "k"
+  ]
+ },
+ {
+  "id": 197492,
+  "token": "ĠStilb",
+  "text": " Stilb",
+  "bpe": [
+   "Ġ",
+   "Stil",
+   "b"
+  ]
+ },
+ {
+  "id": 197494,
+  "token": "Ġsinisek",
+  "text": " sinisek",
+  "bpe": [
+   "Ġsin",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 197495,
+  "token": "ĠVartek",
+  "text": " Vartek",
+  "bpe": [
+   "ĠV",
+   "arte",
+   "k"
+  ]
+ },
+ {
+  "id": 197498,
+  "token": "Ġpuhuk",
+  "text": " puhuk",
+  "bpe": [
+   "Ġ",
+   "puhu",
+   "k"
+  ]
+ },
+ {
+  "id": 197503,
+  "token": "Ġivyk",
+  "text": " ivyk",
+  "bpe": [
+   "Ġ",
+   "ivy",
+   "k"
+  ]
+ },
+ {
+  "id": 197508,
+  "token": "ĠBatak",
+  "text": " Batak",
+  "bpe": [
+   "Ġ",
+   "Bata",
+   "k"
+  ]
+ },
+ {
+  "id": 197511,
+  "token": "Ġnethog",
+  "text": " nethog",
+  "bpe": [
+   "Ġne",
+   "tho",
+   "g"
+  ]
+ },
+ {
+  "id": 197512,
+  "token": "ĠMugg",
+  "text": " Mugg",
+  "bpe": [
+   "Ġ",
+   "Mug",
+   "g"
+  ]
+ },
+ {
+  "id": 197547,
+  "token": "Ġufrg",
+  "text": " ufrg",
+  "bpe": [
+   "Ġu",
+   "fr",
+   "g"
+  ]
+ },
+ {
+  "id": 197549,
+  "token": "ĠRienk",
+  "text": " Rienk",
+  "bpe": [
+   "ĠR",
+   "ien",
+   "k"
+  ]
+ },
+ {
+  "id": 197552,
+  "token": "ĠSierk",
+  "text": " Sierk",
+  "bpe": [
+   "Ġ",
+   "Sier",
+   "k"
+  ]
+ },
+ {
+  "id": 197555,
+  "token": "Ġpasisek",
+  "text": " pasisek",
+  "bpe": [
+   "Ġpas",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 197560,
+  "token": "ĠSchwenk",
+  "text": " Schwenk",
+  "bpe": [
+   "ĠSch",
+   "wen",
+   "k"
+  ]
+ },
+ {
+  "id": 197561,
+  "token": "ĠLemberg",
+  "text": " Lemberg",
+  "bpe": [
+   "ĠL",
+   "ember",
+   "g"
+  ]
+ },
+ {
+  "id": 197562,
+  "token": "Ġsamarbejd",
+  "text": " samarbejd",
+  "bpe": [
+   "Ġsamar",
+   "be",
+   "jd"
+  ]
+ },
+ {
+  "id": 197567,
+  "token": "ĠTulek",
+  "text": " Tulek",
+  "bpe": [
+   "ĠT",
+   "ule",
+   "k"
+  ]
+ },
+ {
+  "id": 197577,
+  "token": "ĠKlerk",
+  "text": " Klerk",
+  "bpe": [
+   "ĠK",
+   "ler",
+   "k"
+  ]
+ },
+ {
+  "id": 197578,
+  "token": "ĠLaufrad",
+  "text": " Laufrad",
+  "bpe": [
+   "ĠLau",
+   "fra",
+   "d"
+  ]
+ },
+ {
+  "id": 197597,
+  "token": "ĠbÃ¡lk",
+  "text": " bálk",
+  "bpe": [
+   "Ġb",
+   "Ã¡l",
+   "k"
+  ]
+ },
+ {
+  "id": 197607,
+  "token": "ĠHIdg",
+  "text": " HIdg",
+  "bpe": [
+   "ĠH",
+   "Id",
+   "g"
+  ]
+ },
+ {
+  "id": 197612,
+  "token": "ĠRoberd",
+  "text": " Roberd",
+  "bpe": [
+   "Ġ",
+   "Rober",
+   "d"
+  ]
+ },
+ {
+  "id": 197615,
+  "token": "ĠGourd",
+  "text": " Gourd",
+  "bpe": [
+   "Ġ",
+   "Gour",
+   "d"
+  ]
+ },
+ {
+  "id": 197635,
+  "token": "Ġleiak",
+  "text": " leiak",
+  "bpe": [
+   "Ġ",
+   "leia",
+   "k"
+  ]
+ },
+ {
+  "id": 197637,
+  "token": "ĠfrÃ¥ntog",
+  "text": " fråntog",
+  "bpe": [
+   "ĠfrÃ¥",
+   "nto",
+   "g"
+  ]
+ },
+ {
+  "id": 197647,
+  "token": "Ġgpsd",
+  "text": " gpsd",
+  "bpe": [
+   "Ġ",
+   "gps",
+   "d"
+  ]
+ },
+ {
+  "id": 197650,
+  "token": "Ġsekundik",
+  "text": " sekundik",
+  "bpe": [
+   "Ġsek",
+   "undi",
+   "k"
+  ]
+ },
+ {
+  "id": 197652,
+  "token": "Ġelementidek",
+  "text": " elementidek",
+  "bpe": [
+   "Ġelement",
+   "ide",
+   "k"
+  ]
+ },
+ {
+  "id": 197653,
+  "token": "ĠWormb",
+  "text": " Wormb",
+  "bpe": [
+   "Ġ",
+   "Worm",
+   "b"
+  ]
+ },
+ {
+  "id": 197658,
+  "token": "Ġbestyrk",
+  "text": " bestyrk",
+  "bpe": [
+   "Ġbest",
+   "yr",
+   "k"
+  ]
+ },
+ {
+  "id": 197662,
+  "token": "ĠEilk",
+  "text": " Eilk",
+  "bpe": [
+   "Ġ",
+   "Eil",
+   "k"
+  ]
+ },
+ {
+  "id": 197666,
+  "token": "Ġuutek",
+  "text": " uutek",
+  "bpe": [
+   "Ġu",
+   "ute",
+   "k"
+  ]
+ },
+ {
+  "id": 197667,
+  "token": "Ġtoetak",
+  "text": " toetak",
+  "bpe": [
+   "Ġto",
+   "eta",
+   "k"
+  ]
+ },
+ {
+  "id": 197670,
+  "token": "Ġkodusek",
+  "text": " kodusek",
+  "bpe": [
+   "Ġkod",
+   "use",
+   "k"
+  ]
+ },
+ {
+  "id": 197673,
+  "token": "ĠSaryk",
+  "text": " Saryk",
+  "bpe": [
+   "ĠS",
+   "ary",
+   "k"
+  ]
+ },
+ {
+  "id": 197681,
+  "token": "Ġekspordik",
+  "text": " ekspordik",
+  "bpe": [
+   "Ġ",
+   "eksp",
+   "ordi",
+   "k"
+  ]
+ },
+ {
+  "id": 197693,
+  "token": "Ġyonk",
+  "text": " yonk",
+  "bpe": [
+   "Ġ",
+   "yon",
+   "k"
+  ]
+ },
+ {
+  "id": 197704,
+  "token": "Ġunisek",
+  "text": " unisek",
+  "bpe": [
+   "Ġun",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 197707,
+  "token": "Ġbalourd",
+  "text": " balourd",
+  "bpe": [
+   "Ġbal",
+   "our",
+   "d"
+  ]
+ },
+ {
+  "id": 197717,
+  "token": "Ġfiewd",
+  "text": " fiewd",
+  "bpe": [
+   "Ġf",
+   "iew",
+   "d"
+  ]
+ },
+ {
+  "id": 197725,
+  "token": "Ġmillisek",
+  "text": " millisek",
+  "bpe": [
+   "Ġmill",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 197726,
+  "token": "Ġlasek",
+  "text": " lasek",
+  "bpe": [
+   "Ġ",
+   "lase",
+   "k"
+  ]
+ },
+ {
+  "id": 197727,
+  "token": "Ġpumek",
+  "text": " pumek",
+  "bpe": [
+   "Ġp",
+   "ume",
+   "k"
+  ]
+ },
+ {
+  "id": 197728,
+  "token": "Ġnebelik",
+  "text": " nebelik",
+  "bpe": [
+   "Ġne",
+   "be",
+   "lik"
+  ]
+ },
+ {
+  "id": 197743,
+  "token": "ĠFrenk",
+  "text": " Frenk",
+  "bpe": [
+   "Ġ",
+   "Fren",
+   "k"
+  ]
+ },
+ {
+  "id": 197748,
+  "token": "ĠMasthugg",
+  "text": " Masthugg",
+  "bpe": [
+   "ĠMas",
+   "thug",
+   "g"
+  ]
+ },
+ {
+  "id": 197754,
+  "token": "ĠWhelk",
+  "text": " Whelk",
+  "bpe": [
+   "ĠW",
+   "hel",
+   "k"
+  ]
+ },
+ {
+  "id": 197758,
+  "token": "Ġexphb",
+  "text": " exphb",
+  "bpe": [
+   "Ġex",
+   "ph",
+   "b"
+  ]
+ },
+ {
+  "id": 197762,
+  "token": "ĠDublek",
+  "text": " Dublek",
+  "bpe": [
+   "ĠD",
+   "uble",
+   "k"
+  ]
+ },
+ {
+  "id": 197784,
+  "token": "Ġlarenk",
+  "text": " larenk",
+  "bpe": [
+   "Ġ",
+   "laren",
+   "k"
+  ]
+ },
+ {
+  "id": 197790,
+  "token": "ĠStrawb",
+  "text": " Strawb",
+  "bpe": [
+   "Ġ",
+   "Straw",
+   "b"
+  ]
+ },
+ {
+  "id": 197798,
+  "token": "Ġonyk",
+  "text": " onyk",
+  "bpe": [
+   "Ġ",
+   "ony",
+   "k"
+  ]
+ },
+ {
+  "id": 197813,
+  "token": "ĠRilek",
+  "text": " Rilek",
+  "bpe": [
+   "ĠR",
+   "ile",
+   "k"
+  ]
+ },
+ {
+  "id": 197815,
+  "token": "ĠKarasek",
+  "text": " Karasek",
+  "bpe": [
+   "ĠKar",
+   "ase",
+   "k"
+  ]
+ },
+ {
+  "id": 197818,
+  "token": "ĠCansd",
+  "text": " Cansd",
+  "bpe": [
+   "ĠC",
+   "ans",
+   "d"
+  ]
+ },
+ {
+  "id": 197819,
+  "token": "Ġbstg",
+  "text": " bstg",
+  "bpe": [
+   "Ġ",
+   "bst",
+   "g"
+  ]
+ },
+ {
+  "id": 197823,
+  "token": "Ġsgrog",
+  "text": " sgrog",
+  "bpe": [
+   "Ġs",
+   "gro",
+   "g"
+  ]
+ },
+ {
+  "id": 197827,
+  "token": "ĠWarthog",
+  "text": " Warthog",
+  "bpe": [
+   "ĠWar",
+   "tho",
+   "g"
+  ]
+ },
+ {
+  "id": 197835,
+  "token": "Ġseirek",
+  "text": " seirek",
+  "bpe": [
+   "Ġse",
+   "ire",
+   "k"
+  ]
+ },
+ {
+  "id": 197845,
+  "token": "ĠFoulk",
+  "text": " Foulk",
+  "bpe": [
+   "Ġ",
+   "Foul",
+   "k"
+  ]
+ },
+ {
+  "id": 197846,
+  "token": "Ġcorresond",
+  "text": " corresond",
+  "bpe": [
+   "Ġcor",
+   "reson",
+   "d"
+  ]
+ },
+ {
+  "id": 197860,
+  "token": "ĠKuelb",
+  "text": " Kuelb",
+  "bpe": [
+   "ĠK",
+   "uel",
+   "b"
+  ]
+ },
+ {
+  "id": 197872,
+  "token": "Ġonnek",
+  "text": " onnek",
+  "bpe": [
+   "Ġ",
+   "onne",
+   "k"
+  ]
+ },
+ {
+  "id": 197874,
+  "token": "ĠUnimog",
+  "text": " Unimog",
+  "bpe": [
+   "ĠUn",
+   "imo",
+   "g"
+  ]
+ },
+ {
+  "id": 197890,
+  "token": "ĠBownd",
+  "text": " Bownd",
+  "bpe": [
+   "ĠB",
+   "own",
+   "d"
+  ]
+ },
+ {
+  "id": 197893,
+  "token": "Ġdeinceb",
+  "text": " deinceb",
+  "bpe": [
+   "Ġde",
+   "ince",
+   "b"
+  ]
+ },
+ {
+  "id": 197899,
+  "token": "Ġhunderd",
+  "text": " hunderd",
+  "bpe": [
+   "Ġh",
+   "under",
+   "d"
+  ]
+ },
+ {
+  "id": 197908,
+  "token": "ĠLynk",
+  "text": " Lynk",
+  "bpe": [
+   "Ġ",
+   "Lyn",
+   "k"
+  ]
+ },
+ {
+  "id": 197918,
+  "token": "Ġdesitek",
+  "text": " desitek",
+  "bpe": [
+   "Ġde",
+   "site",
+   "k"
+  ]
+ },
+ {
+  "id": 197922,
+  "token": "ĠAlkyd",
+  "text": " Alkyd",
+  "bpe": [
+   "ĠAl",
+   "ky",
+   "d"
+  ]
+ },
+ {
+  "id": 197927,
+  "token": "ĠHinderk",
+  "text": " Hinderk",
+  "bpe": [
+   "Ġ",
+   "Hinder",
+   "k"
+  ]
+ },
+ {
+  "id": 197930,
+  "token": "ĠGourg",
+  "text": " Gourg",
+  "bpe": [
+   "Ġ",
+   "Gour",
+   "g"
+  ]
+ },
+ {
+  "id": 197934,
+  "token": "ĠNutek",
+  "text": " Nutek",
+  "bpe": [
+   "ĠN",
+   "ute",
+   "k"
+  ]
+ },
+ {
+  "id": 197938,
+  "token": "Ġdqd",
+  "text": " dqd",
+  "bpe": [
+   "Ġ",
+   "dq",
+   "d"
+  ]
+ },
+ {
+  "id": 197940,
+  "token": "Ġheadek",
+  "text": " headek",
+  "bpe": [
+   "Ġhe",
+   "ade",
+   "k"
+  ]
+ },
+ {
+  "id": 197944,
+  "token": "Ġpakenk",
+  "text": " pakenk",
+  "bpe": [
+   "Ġpa",
+   "ken",
+   "k"
+  ]
+ },
+ {
+  "id": 197946,
+  "token": "Ġnylk",
+  "text": " nylk",
+  "bpe": [
+   "Ġn",
+   "yl",
+   "k"
+  ]
+ },
+ {
+  "id": 197961,
+  "token": "Ġskolek",
+  "text": " skolek",
+  "bpe": [
+   "Ġ",
+   "skole",
+   "k"
+  ]
+ },
+ {
+  "id": 197962,
+  "token": "ĠDoorknob",
+  "text": " Doorknob",
+  "bpe": [
+   "ĠDo",
+   "ork",
+   "nob"
+  ]
+ },
+ {
+  "id": 197966,
+  "token": "Ġcgd",
+  "text": " cgd",
+  "bpe": [
+   "Ġ",
+   "cg",
+   "d"
+  ]
+ },
+ {
+  "id": 197967,
+  "token": "Ġmateriaalsek",
+  "text": " materiaalsek",
+  "bpe": [
+   "Ġmateria",
+   "alse",
+   "k"
+  ]
+ },
+ {
+  "id": 197970,
+  "token": "Ġrecrod",
+  "text": " recrod",
+  "bpe": [
+   "Ġre",
+   "cro",
+   "d"
+  ]
+ },
+ {
+  "id": 197972,
+  "token": "ĠDAkk",
+  "text": " DAkk",
+  "bpe": [
+   "ĠD",
+   "Ak",
+   "k"
+  ]
+ },
+ {
+  "id": 197975,
+  "token": "ĠJefferd",
+  "text": " Jefferd",
+  "bpe": [
+   "Ġ",
+   "Jeffer",
+   "d"
+  ]
+ },
+ {
+  "id": 197979,
+  "token": "Ġvastasek",
+  "text": " vastasek",
+  "bpe": [
+   "Ġvast",
+   "ase",
+   "k"
+  ]
+ },
+ {
+  "id": 197982,
+  "token": "ĠFowk",
+  "text": " Fowk",
+  "bpe": [
+   "ĠF",
+   "ow",
+   "k"
+  ]
+ },
+ {
+  "id": 197987,
+  "token": "ĠszÃ¼ksege",
+  "text": " szüksege",
+  "bpe": [
+   "Ġsz",
+   "Ã¼k",
+   "se",
+   "ge"
+  ]
+ },
+ {
+  "id": 197988,
+  "token": "Ġbawd",
+  "text": " bawd",
+  "bpe": [
+   "Ġ",
+   "baw",
+   "d"
+  ]
+ },
+ {
+  "id": 197989,
+  "token": "Ġdramatek",
+  "text": " dramatek",
+  "bpe": [
+   "Ġdra",
+   "mate",
+   "k"
+  ]
+ },
+ {
+  "id": 198003,
+  "token": "ĠLarenk",
+  "text": " Larenk",
+  "bpe": [
+   "Ġ",
+   "Laren",
+   "k"
+  ]
+ },
+ {
+  "id": 198014,
+  "token": "ĠWonk",
+  "text": " Wonk",
+  "bpe": [
+   "Ġ",
+   "Won",
+   "k"
+  ]
+ },
+ {
+  "id": 198019,
+  "token": "Ġfarenk",
+  "text": " farenk",
+  "bpe": [
+   "Ġf",
+   "aren",
+   "k"
+  ]
+ },
+ {
+  "id": 198022,
+  "token": "ĠkÃ¼ljek",
+  "text": " küljek",
+  "bpe": [
+   "ĠkÃ¼",
+   "lje",
+   "k"
+  ]
+ },
+ {
+  "id": 198027,
+  "token": "ĠQutb",
+  "text": " Qutb",
+  "bpe": [
+   "ĠQ",
+   "ut",
+   "b"
+  ]
+ },
+ {
+  "id": 198028,
+  "token": "ĠFierg",
+  "text": " Fierg",
+  "bpe": [
+   "Ġ",
+   "Fier",
+   "g"
+  ]
+ },
+ {
+  "id": 198037,
+  "token": "ĠSasek",
+  "text": " Sasek",
+  "bpe": [
+   "ĠS",
+   "ase",
+   "k"
+  ]
+ },
+ {
+  "id": 198038,
+  "token": "ĠEulek",
+  "text": " Eulek",
+  "bpe": [
+   "ĠE",
+   "ule",
+   "k"
+  ]
+ },
+ {
+  "id": 198039,
+  "token": "ĠNovotek",
+  "text": " Novotek",
+  "bpe": [
+   "ĠNo",
+   "vote",
+   "k"
+  ]
+ },
+ {
+  "id": 198054,
+  "token": "ĠRibb",
+  "text": " Ribb",
+  "bpe": [
+   "Ġ",
+   "Rib",
+   "b"
+  ]
+ },
+ {
+  "id": 198064,
+  "token": "Ġtasasek",
+  "text": " tasasek",
+  "bpe": [
+   "Ġtas",
+   "ase",
+   "k"
+  ]
+ },
+ {
+  "id": 198072,
+  "token": "Ġtahnk",
+  "text": " tahnk",
+  "bpe": [
+   "Ġta",
+   "hn",
+   "k"
+  ]
+ },
+ {
+  "id": 198087,
+  "token": "Ġanthropod",
+  "text": " anthropod",
+  "bpe": [
+   "Ġan",
+   "thro",
+   "pod"
+  ]
+ },
+ {
+  "id": 198093,
+  "token": "ĠBartok",
+  "text": " Bartok",
+  "bpe": [
+   "Ġ",
+   "Barto",
+   "k"
+  ]
+ },
+ {
+  "id": 198101,
+  "token": "ĠEvald",
+  "text": " Evald",
+  "bpe": [
+   "Ġ",
+   "Eval",
+   "d"
+  ]
+ },
+ {
+  "id": 198103,
+  "token": "ĠRushd",
+  "text": " Rushd",
+  "bpe": [
+   "Ġ",
+   "Rush",
+   "d"
+  ]
+ },
+ {
+  "id": 198108,
+  "token": "Ġkangek",
+  "text": " kangek",
+  "bpe": [
+   "Ġk",
+   "ange",
+   "k"
+  ]
+ },
+ {
+  "id": 198112,
+  "token": "Ġdemagog",
+  "text": " demagog",
+  "bpe": [
+   "Ġ",
+   "dema",
+   "gog"
+  ]
+ },
+ {
+  "id": 198114,
+  "token": "Ġultralyd",
+  "text": " ultralyd",
+  "bpe": [
+   "Ġultr",
+   "aly",
+   "d"
+  ]
+ },
+ {
+  "id": 198115,
+  "token": "ĠGrimb",
+  "text": " Grimb",
+  "bpe": [
+   "Ġ",
+   "Grim",
+   "b"
+  ]
+ },
+ {
+  "id": 198120,
+  "token": "ĠLaugk",
+  "text": " Laugk",
+  "bpe": [
+   "ĠLa",
+   "ug",
+   "k"
+  ]
+ },
+ {
+  "id": 198127,
+  "token": "Ġsfenk",
+  "text": " sfenk",
+  "bpe": [
+   "Ġs",
+   "fen",
+   "k"
+  ]
+ },
+ {
+  "id": 198135,
+  "token": "ĠLownd",
+  "text": " Lownd",
+  "bpe": [
+   "ĠL",
+   "own",
+   "d"
+  ]
+ },
+ {
+  "id": 198140,
+  "token": "Ġmssg",
+  "text": " mssg",
+  "bpe": [
+   "Ġ",
+   "mss",
+   "g"
+  ]
+ },
+ {
+  "id": 198147,
+  "token": "Ġhldg",
+  "text": " hldg",
+  "bpe": [
+   "Ġh",
+   "ld",
+   "g"
+  ]
+ },
+ {
+  "id": 198151,
+  "token": "ĠLilek",
+  "text": " Lilek",
+  "bpe": [
+   "ĠL",
+   "ile",
+   "k"
+  ]
+ },
+ {
+  "id": 198152,
+  "token": "Ġoutrd",
+  "text": " outrd",
+  "bpe": [
+   "Ġ",
+   "outr",
+   "d"
+  ]
+ },
+ {
+  "id": 198154,
+  "token": "Ġaladek",
+  "text": " aladek",
+  "bpe": [
+   "Ġal",
+   "ade",
+   "k"
+  ]
+ },
+ {
+  "id": 198155,
+  "token": "Ġkuulek",
+  "text": " kuulek",
+  "bpe": [
+   "Ġ",
+   "kuule",
+   "k"
+  ]
+ },
+ {
+  "id": 198167,
+  "token": "ĠAntog",
+  "text": " Antog",
+  "bpe": [
+   "Ġ",
+   "Anto",
+   "g"
+  ]
+ },
+ {
+  "id": 198183,
+  "token": "ĠIrek",
+  "text": " Irek",
+  "bpe": [
+   "Ġ",
+   "Ire",
+   "k"
+  ]
+ },
+ {
+  "id": 198190,
+  "token": "Ġwengd",
+  "text": " wengd",
+  "bpe": [
+   "Ġw",
+   "eng",
+   "d"
+  ]
+ },
+ {
+  "id": 198191,
+  "token": "ĠYeerk",
+  "text": " Yeerk",
+  "bpe": [
+   "ĠY",
+   "eer",
+   "k"
+  ]
+ },
+ {
+  "id": 198194,
+  "token": "ĠReidg",
+  "text": " Reidg",
+  "bpe": [
+   "ĠRe",
+   "id",
+   "g"
+  ]
+ },
+ {
+  "id": 198195,
+  "token": "Ġtulisek",
+  "text": " tulisek",
+  "bpe": [
+   "Ġtul",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 198198,
+  "token": "Ġreliond",
+  "text": " reliond",
+  "bpe": [
+   "Ġrel",
+   "ion",
+   "d"
+  ]
+ },
+ {
+  "id": 198207,
+  "token": "ĠFartyg",
+  "text": " Fartyg",
+  "bpe": [
+   "ĠF",
+   "arty",
+   "g"
+  ]
+ },
+ {
+  "id": 198211,
+  "token": "ĠVerderb",
+  "text": " Verderb",
+  "bpe": [
+   "ĠVer",
+   "der",
+   "b"
+  ]
+ },
+ {
+  "id": 198220,
+  "token": "ĠNethog",
+  "text": " Nethog",
+  "bpe": [
+   "ĠNe",
+   "tho",
+   "g"
+  ]
+ },
+ {
+  "id": 198223,
+  "token": "ĠSmog",
+  "text": " Smog",
+  "bpe": [
+   "Ġ",
+   "Smo",
+   "g"
+  ]
+ },
+ {
+  "id": 198227,
+  "token": "Ġopetuk",
+  "text": " opetuk",
+  "bpe": [
+   "Ġo",
+   "petu",
+   "k"
+  ]
+ },
+ {
+  "id": 198233,
+  "token": "Ġfritg",
+  "text": " fritg",
+  "bpe": [
+   "Ġ",
+   "frit",
+   "g"
+  ]
+ },
+ {
+  "id": 198236,
+  "token": "ĠMillisek",
+  "text": " Millisek",
+  "bpe": [
+   "ĠMill",
+   "ise",
+   "k"
+  ]
+ },
+ {
+  "id": 198238,
+  "token": "ĠChalyb",
+  "text": " Chalyb",
+  "bpe": [
+   "ĠCh",
+   "aly",
+   "b"
+  ]
+ },
+ {
+  "id": 198244,
+  "token": "ĠGeduld",
+  "text": " Geduld",
+  "bpe": [
+   "ĠG",
+   "edul",
+   "d"
+  ]
+ },
+ {
+  "id": 198250,
+  "token": "Ġtrutg",
+  "text": " trutg",
+  "bpe": [
+   "Ġtr",
+   "ut",
+   "g"
+  ]
+ }
+]

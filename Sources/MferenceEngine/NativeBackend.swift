@@ -54,10 +54,16 @@ public struct NativeBackend: EngineBackend {
     }
 
     /// `multi-prefix` needs a runner that snapshots its prefix state; any
-    /// other runner is served exactly as `single-prefix`.
+    /// other runner is served exactly as `single-prefix`. Inkling 2 is served
+    /// as `single-prefix` too unless `inkling2MultiPrefix`
+    /// (`Inkling2PrefixSnapshots`), while its default is measured. `family`
+    /// has no default, so a caller cannot drop it and lift that rule.
     public static func effectivePromptCacheMode(_ requested: EnginePromptCacheMode,
-                                                runnerSnapshotsPrefixes: Bool) -> EnginePromptCacheMode {
-        requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
+                                                runnerSnapshotsPrefixes: Bool,
+                                                family: ModelFamily?,
+                                                inkling2MultiPrefix: Bool = false) -> EnginePromptCacheMode {
+        if requested == .multiPrefix, family == .inkling2Loop, !inkling2MultiPrefix { return .singlePrefix }
+        return requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
     }
 }
 
@@ -65,7 +71,8 @@ extension EnginePromptCacheBytes {
     static let gibibyte = 1 << 30
 
     /// `auto` is min(4 GiB, physical / 8) on hosts with at least 24 GiB,
-    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below.
+    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below;
+    /// for Inkling 2, at most `Inkling2PrefixSnapshots.autoBudgetCeiling`.
     public func resolved(family: ModelFamily? = nil,
                          physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
         switch self {
@@ -81,7 +88,7 @@ extension EnginePromptCacheBytes {
             } else {
                 general = 0
             }
-            return general
+            return family == .inkling2Loop ? min(general, Inkling2PrefixSnapshots.autoBudgetCeiling) : general
         }
     }
 }
@@ -92,7 +99,8 @@ extension EngineRequest {
         PromptPrefixCacheTurn(messages: messages,
                               tools: tools,
                               reasoningEffort: reasoningEffort,
-                              preserveThinking: preserveThinking)
+                              preserveThinking: preserveThinking,
+                              inkling2Effort: inkling2Effort)
     }
 }
 
@@ -117,7 +125,8 @@ public actor NativeEngineModel: EngineModel {
     /// the weights' Metal buffers, the expert cache, and the KV with it.
     private struct Loaded {
         let context: MetalContext
-        let model: Model
+        /// Nil only for `forTesting`, which has no weights.
+        let model: Model?
         let tokenizer: MFTokenizer
         let runner: any ContinuableLogitProducer
         let scratch: RawCompletionScratch
@@ -140,12 +149,24 @@ public actor NativeEngineModel: EngineModel {
     private var promptCache = PromptPrefixCache()
     private let onNotice: @Sendable (NativeBackendNotice) -> Void
 
+    /// The context a load runs with: the descriptor's resolution (the
+    /// request, or the native context for `max`, lowered to its host cap),
+    /// lowered again by the family's cap for this Mac's memory, so a
+    /// descriptor not built by discovery is capped too. For every family
+    /// without a host cap this is `options.nativeMaxContext ??
+    /// family.maximumContext`, as before.
+    static func loadContext(descriptor: EngineModelDescriptor, options: EngineLoadOptions, family: ModelFamily,
+                            physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let resolved = descriptor.resolvedContext(options: options)
+        return family.memoryContextCap(physicalMemory: physicalMemory).map { min(resolved, $0) } ?? resolved
+    }
+
     static func load(descriptor: EngineModelDescriptor,
                      options: EngineLoadOptions,
                      onNotice: @escaping @Sendable (NativeBackendNotice) -> Void) async throws -> NativeEngineModel {
         let modelDirectory = descriptor.location
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
-        let maxContext = options.nativeMaxContext ?? family.maximumContext
+        let maxContext = loadContext(descriptor: descriptor, options: options, family: family)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw MFTokenizerError.missingTokenizerSidecar(
@@ -230,7 +251,7 @@ public actor NativeEngineModel: EngineModel {
 
     private init(descriptor: EngineModelDescriptor,
                  context: MetalContext,
-                 model: Model,
+                 model: Model?,
                  tokenizer: MFTokenizer,
                  runner: any ContinuableLogitProducer,
                  scratch: RawCompletionScratch,
@@ -254,7 +275,8 @@ public actor NativeEngineModel: EngineModel {
             $0.supportsPrefixStateSnapshots ? $0 : nil
         }
         let promptCacheMode = NativeBackend.effectivePromptCacheMode(
-            requestedPromptCacheMode, runnerSnapshotsPrefixes: snapshots != nil)
+            requestedPromptCacheMode, runnerSnapshotsPrefixes: snapshots != nil,
+            family: model?.config.family, inkling2MultiPrefix: Inkling2PrefixSnapshots.multiPrefixEnabled())
         let snapshotRunner: (any PrefixStateSnapshotting)?
         let memoryGovernor: PrefixCacheMemoryGovernor?
         let prefixStates: PrefixStateCache?
@@ -280,6 +302,34 @@ public actor NativeEngineModel: EngineModel {
                              prefixStates: prefixStates,
                              snapshotRunner: snapshotRunner,
                              memoryGovernor: memoryGovernor)
+    }
+
+    /// A model over `runner` and `tokenizer` with no weights, for model-free
+    /// tests of the whole request path (render, generation loop, decoder,
+    /// events, usage) with a scripted runner. Prefill runs one token at a
+    /// time (a scripted runner has no chunked prefill); prompt-prefix reuse
+    /// is off unless a test asks for single-prefix. Not used in production.
+    static func forTesting(descriptor: EngineModelDescriptor,
+                           context: MetalContext,
+                           tokenizer: MFTokenizer,
+                           runner: any ContinuableLogitProducer,
+                           maxContext: Int,
+                           promptCacheMode: EnginePromptCacheMode = .off) throws -> NativeEngineModel {
+        NativeEngineModel(descriptor: descriptor,
+                          context: context,
+                          model: nil,
+                          tokenizer: tokenizer,
+                          runner: runner,
+                          scratch: try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize),
+                          prefillConfig: .off,
+                          maxContext: maxContext,
+                          promptCacheMode: promptCacheMode,
+                          promptCacheBytes: 0,
+                          promptCacheDomain: PromptPrefixCacheDomain(
+                              modelID: descriptor.id, sourceSnapshotHash: "test", runtimeProfileHash: "test",
+                              maximumContext: maxContext, kvStorage: "test", fp16RingEnabled: false,
+                              templateSHA256: "test"),
+                          onNotice: { _ in })
     }
 
     /// Points the governor's pressure events at an idle safe point on this
@@ -319,7 +369,8 @@ public actor NativeEngineModel: EngineModel {
         do {
             promptIDs = try tokenizer.encodeChat(messages: request.messages, tools: request.tools,
                                                 reasoningEffort: request.reasoningEffort,
-                                                preserveThinking: request.preserveThinking)
+                                                preserveThinking: request.preserveThinking,
+                                                inkling2Effort: request.inkling2Effort)
         } catch {
             throw EngineError.invalidRequest(message: String(describing: error),
                                              param: "messages", code: "invalid_chat_template")
@@ -430,6 +481,7 @@ public actor NativeEngineModel: EngineModel {
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
             || tokenizer.dialect == .minicpm
+            || tokenizer.dialect == .inkling2
         let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
@@ -437,10 +489,17 @@ public actor NativeEngineModel: EngineModel {
                 startsInThought: startsInThinking,
                 toolDefinitions: request.tools)
             : nil
+        // Inkling 2 only: a tool call the parser rejects, or one still open
+        // at the end, reaches the client as the model's text with
+        // `finish_reason: stop`, not as a failed request.
+        decoder?.inkling2MalformedToolCallsAsText = tokenizer.dialect == .inkling2
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
-        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort) {
+        // Inkling 2 always frames its thinking in blocks the template renders
+        // back, so its reasoning is reported like the source templates'.
+        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort)
+            || tokenizer.dialect == .inkling2 {
             decoder?.onReasoning = { text in
                 reasoning += text
                 onEvent(.reasoning(text))
@@ -547,7 +606,14 @@ public actor NativeEngineModel: EngineModel {
             reason = .stop
         }
         try Task.checkCancellation()
-        if let prefixStates, let snapshotRunner {
+        if (decoder?.convertedInkling2MalformedToolCalls ?? 0) > 0 {
+            // A malformed Inkling 2 tool call sent as text: the KV holds the
+            // call's framing, a re-render of the reply does not, so this
+            // turn is not kept for prefix reuse (as when such a turn failed).
+            promptCache.invalidate()
+            runner.reset()
+            prefixStates?.didFail()
+        } else if let prefixStates, let snapshotRunner {
             prefixStates.didFinish(
                 entry: PromptPrefixCache.makeEntry(
                     domain: promptCacheDomain,
@@ -583,11 +649,13 @@ public actor NativeEngineModel: EngineModel {
                                visibleTokens: payload.flatMap { stopMatcher.isStopped ? nil : $0.visible }),
             timings: EngineTimings(prefillSeconds: result.prefillSeconds,
                                    decodeSeconds: result.decodeSeconds),
-            diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
-                result: result,
-                memory: .capture(model: model, producer: runner, scratch: scratch),
-                prefixCache: prefixStates.map {
-                    PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
-                }) : nil)
+            diagnostics: RuntimeDiagnostics.enabled ? model.map { model in
+                RuntimeDiagnostics(
+                    result: result,
+                    memory: .capture(model: model, producer: runner, scratch: scratch),
+                    prefixCache: prefixStates.map {
+                        PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
+                    })
+            } : nil)
     }
 }

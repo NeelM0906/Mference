@@ -311,6 +311,9 @@ public enum ServerRequestError: Error, Equatable, Sendable {
 public struct ValidatedChatRequest: Sendable {
     public var reasoningEffort: QwenReasoningEffort? = nil
     public var preserveThinking: Bool = false
+    /// Inkling 2's own effort names beyond the four shared ones (`minimal`,
+    /// `high`, `max`); set for that dialect only.
+    public var inkling2Effort: MFTokenizer.Inkling2Effort? = nil
     public let messages: [MFTokenizer.Message]
     public let tools: [MFTokenizer.FunctionDefinition]
     public let stream: Bool
@@ -341,13 +344,21 @@ public enum OpenAIRequestValidator {
             }
         }
         let explicitEffort = request.reasoningEffort.flatMap(QwenReasoningEffort.init(rawValue:))
-        guard request.reasoningEffort == nil || explicitEffort != nil else {
-            throw invalid("reasoning_effort must be xhigh, medium, low, or none",
+        // Inkling 2 also takes its template's other names: minimal (0.1),
+        // high (0.9) and max (0.99). Every other dialect keeps the four.
+        let inkling2Effort: MFTokenizer.Inkling2Effort? = dialect == .inkling2 && explicitEffort == nil
+            ? request.reasoningEffort.flatMap(MFTokenizer.Inkling2Effort.knownName)
+            : nil
+        guard request.reasoningEffort == nil || explicitEffort != nil || inkling2Effort != nil else {
+            throw invalid(dialect == .inkling2
+                              ? "reasoning_effort must be none, minimal, low, medium, high, xhigh, or max"
+                              : "reasoning_effort must be xhigh, medium, low, or none",
                           "reasoning_effort", "unsupported_value")
         }
-        // `enable_thinking: true` is the source template's default effort.
+        // `enable_thinking: true` is the source template's default effort. An
+        // explicit effort, Inkling 2's own names included, takes precedence.
         let effort = explicitEffort
-            ?? thinkingSwitch.map { $0 ? QwenReasoningEffort.xhigh : .off }
+            ?? (inkling2Effort == nil ? thinkingSwitch.map { $0 ? QwenReasoningEffort.xhigh : .off } : nil)
         if supportsQwenEffort && effort != nil,
            request.messages.contains(where: { $0.role == "developer" }) {
             throw invalid("Qwen 3.8 source-template requests require leading system guidance; developer messages are not supported",
@@ -415,7 +426,9 @@ public enum OpenAIRequestValidator {
         }
         // A requested thought needs room: the Qwen model card recommends a
         // 32,768-token output budget in thinking mode.
-        let thinkingRequested = effort != nil && effort != .off
+        // Inkling 2's own names (minimal, high, max) all think, like the
+        // shared names other than none.
+        let thinkingRequested = (effort != nil && effort != .off) || inkling2Effort != nil
         let maximum = request.maxCompletionTokens ?? request.maxTokens
             ?? (thinkingRequested ? 32_768 : 4096)
         guard maximum > 0 else {
@@ -456,6 +469,7 @@ public enum OpenAIRequestValidator {
         let preserveThinking = request.chatTemplateKwargs?.preserveThinking ?? false
         return ValidatedChatRequest(reasoningEffort: effort,
                                     preserveThinking: preserveThinking,
+                                    inkling2Effort: inkling2Effort,
                                     messages: messages,
                                     tools: tools,
                                     stream: request.stream ?? false,
@@ -567,8 +581,13 @@ public enum OpenAIRequestValidator {
                         "invalid_tool_arguments")
                 }
                 knownCalls[call.id] = (call.function.name, false)
+                // Inkling 2 renders the arguments from their text
+                // (`HistoricalToolCall.argumentsText`), kept in compact form;
+                // every other dialect from the parsed value, as before.
                 return MFTokenizer.HistoricalToolCall(
-                    id: call.id, name: call.function.name, arguments: arguments)
+                    id: call.id, name: call.function.name, arguments: arguments,
+                    argumentsText: dialect == .inkling2
+                        ? Inkling2ToolArguments.normalizedText(call.function.arguments) : nil)
             }
             if role == .tool {
                 guard let id = message.toolCallID,

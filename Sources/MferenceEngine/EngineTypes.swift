@@ -36,6 +36,10 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     case minicpm5
     /// Native Maple Preview install.
     case maple
+    /// Native Inkling 2 Mini install: `unsloth/Inkling-2-Mini-GGUF`,
+    /// `Inkling-2-Mini-UD-Q4_K_XL`, copied byte for byte by `MferenceRepack
+    /// --model inkling2mini`. Offered on Macs with 32 GB or more.
+    case inkling2Mini
 
     public var modelID: String {
         switch self {
@@ -44,6 +48,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
         case .maple: "maple-preview-2bit-mlx"
+        case .inkling2Mini: "inkling-2-mini-ud-q4_k_xl"
         }
     }
 
@@ -54,14 +59,51 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .qwen36: "Qwen 3.6 35B-A3B"
         case .minicpm5: "MiniCPM5 2B"
         case .maple: "Maple Preview"
+        case .inkling2Mini: "Inkling 2 Mini"
         }
     }
 
     public var engine: EngineKind {
         switch self {
         case .quick, .deep: .llamaCpp
-        case .qwen36, .minicpm5, .maple: .mference
+        case .qwen36, .minicpm5, .maple, .inkling2Mini: .mference
         }
+    }
+
+    /// The least physical memory a Mac needs for the product to offer this
+    /// model, or nil for no floor of the engine's own. Discovery skips the
+    /// slot's install below it, with `memoryFloorReason`. (Deep's rule, more
+    /// than 16 GB, is the app's: it is still offered there with approval.)
+    public var minimumPhysicalMemory: UInt64? {
+        switch self {
+        case .inkling2Mini: 32 << 30
+        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        }
+    }
+
+    /// The context the product's memory estimates assume (32K tokens).
+    public static let estimateContextTokens = 32_768
+
+    /// The bytes this model keeps resident with `installBytes` on disk on a
+    /// Mac with `physicalMemory`, at `contextTokens`, when the runtime can
+    /// say before loading it; nil for the models it cannot (the app then uses
+    /// its own profile). Inkling 2 Mini: `Inkling2MemoryFootprint`, which
+    /// follows the runtime's expert residency plan.
+    public func estimatedResidentBytes(installBytes: UInt64, physicalMemory: UInt64,
+                                       contextTokens: Int = EngineProductSlot.estimateContextTokens) -> UInt64? {
+        switch self {
+        case .inkling2Mini:
+            Inkling2MemoryFootprint.estimate(installBytes: installBytes, physicalMemory: physicalMemory)?
+                .bytes(contextTokens: contextTokens)
+        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        }
+    }
+
+    /// Why this model is not offered on a Mac with `physicalMemory` bytes, or
+    /// nil when it is.
+    public func memoryFloorReason(physicalMemory: UInt64) -> String? {
+        guard let floor = minimumPhysicalMemory, physicalMemory < floor else { return nil }
+        return "Needs a Mac with \(floor >> 30) GB of memory or more."
     }
 
     public init?(modelID: String) {
@@ -125,6 +167,10 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
     /// The product slot this model fills, or nil for a model listed only by
     /// the developer scope `EngineCatalogScope.all`.
     public let product: EngineProductSlot?
+    /// The most context this Mac's memory allows the model, below its native
+    /// context, or nil for none (`ModelFamily.memoryContextCap`: Inkling 2 on
+    /// hosts under 48 GB). Any request, `max` included, is lowered to it.
+    public let hostContextCap: Int?
 
     /// The context a GGUF model runs with when none is requested (spec
     /// section 3); a backend may still lower it where memory requires.
@@ -134,11 +180,12 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
     /// `/v1/models` before anything is loaded. Nil asks for the default: the
     /// native maximum of a `.gturbo` install (the server's `--max-context
     /// max`), `defaultGGUFContext` for a GGUF. A GGUF never runs past its
-    /// native context.
+    /// native context; a `.gturbo` model never past its `hostContextCap`.
     public func resolvedContext(requested: Int?) -> Int {
         switch format {
         case .gturbo:
-            return requested ?? contextLength
+            let context = requested ?? contextLength
+            return hostContextCap.map { min(context, $0) } ?? context
         case .gguf:
             return min(requested ?? Self.defaultGGUFContext, contextLength)
         }
@@ -160,7 +207,8 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
                 location: URL,
                 sizeBytes: UInt64,
                 contextLength: Int,
-                product: EngineProductSlot?) {
+                product: EngineProductSlot?,
+                hostContextCap: Int? = nil) {
         self.id = id
         self.displayName = displayName
         self.engine = engine
@@ -169,6 +217,7 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
         self.sizeBytes = sizeBytes
         self.contextLength = contextLength
         self.product = product
+        self.hostContextCap = hostContextCap
     }
 }
 
@@ -286,19 +335,24 @@ public struct EngineRequest: Sendable {
     public var maximumCompletionTokens: Int
     public var reasoningEffort: QwenReasoningEffort?
     public var preserveThinking: Bool
+    /// Inkling 2's own effort names beyond the four `reasoningEffort` has
+    /// (`minimal`, `high`, `max`); used by that dialect only.
+    public var inkling2Effort: MFTokenizer.Inkling2Effort?
 
     public init(messages: [MFTokenizer.Message],
                 tools: [MFTokenizer.FunctionDefinition] = [],
                 generationConfig: GenerationConfig = .defaults,
                 maximumCompletionTokens: Int,
                 reasoningEffort: QwenReasoningEffort? = nil,
-                preserveThinking: Bool = false) {
+                preserveThinking: Bool = false,
+                inkling2Effort: MFTokenizer.Inkling2Effort? = nil) {
         self.messages = messages
         self.tools = tools
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.reasoningEffort = reasoningEffort
         self.preserveThinking = preserveThinking
+        self.inkling2Effort = inkling2Effort
     }
 
     /// Whether the prompt needs the tool-aware template and decoder: tools are

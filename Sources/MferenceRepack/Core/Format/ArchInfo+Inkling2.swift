@@ -1,0 +1,76 @@
+import Foundation
+
+extension ArchInfo {
+    /// The pinned Inkling 2 Mini shape: the repacker's twin of the runtime's
+    /// `ArchConfig.inkling2Mini`. An arch read from an Inkling 2 GGUF must
+    /// equal this before anything is planned from it, so an install can only
+    /// ever carry the shape the runner is built for.
+    ///
+    /// The `Double` axes are the GGUF's f32 values widened exactly.
+    static let inkling2Mini = ArchInfo(
+        hiddenSize: 2304,
+        intermediateSize: 1152,
+        moeIntermediateSize: 1152,
+        numHeads: 24,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 201_024,
+        slidingWindow: 1024,
+        finalLogitSoftcap: 30.0,
+        ropeTheta: 0.0,
+        fullRopeTheta: 0.0,
+        partialRotaryFactor: 0.0,
+        numLayers: 24,
+        numExperts: 128,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: (0..<24).map { ($0 + 1) % 6 == 0 ? 1 : 0 },
+        hiddenActivation: "situ",
+        family: .inkling2Loop,
+        attnOutputGate: false,
+        attentionScale: 0.08838834764831845,
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        linearNumKHeads: 0,
+        linearNumVHeads: 0,
+        linearKeyHeadDim: 0,
+        linearValueHeadDim: 0,
+        linearConvKernelSize: 0,
+        routerScoringFunc: "sigmoid",
+        routedScalingFactor: 8.0,
+        swigluLimit: 0.0,
+        numSharedExperts: 0,
+        numDenseLayers: 0,
+        denseIntermediateSize: 0,
+        routerNormAfterTopK: true,
+        qkNorm: false,
+        inkling2: Inkling2Axes(
+            relDRel: 16,
+            relExtent: 1024,
+            relProjDim: 384,
+            relLogScalingFloor: 8192,
+            relLogScalingAlpha: Double(Float(0.1)),
+            sconvKernelSize: 4,
+            embedNormEnabled: true,
+            routerGateBias: true,
+            unpaddedVocabSize: 200_058,
+            attentionSinks: true,
+            loopCoreStart: 6,
+            loopCoreEnd: 18,
+            loopNumPasses: 3,
+            loopGateRank: 64,
+            attnResBlockSize: 6,
+            qkClipThreshold: Double(Float(22.627416997969522)),
+            relClipThreshold: 8.0,
+            attentionSinkProjected: true,
+            expertGateSoftcap: 4.0,
+            expertUpSoftcap: 25.0,
+            routedExpertFormats: [String](repeating: "NVFP4", count: 20)
+                + [String](repeating: "Q8_0", count: 4)))
+}
