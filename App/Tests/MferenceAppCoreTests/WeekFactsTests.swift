@@ -53,6 +53,37 @@ import Testing
         #expect(!EventKitService.isUserCalendar(type: .calDAV, allowsContentModifications: false))
     }
 
+    @Test func cancelledAndDeclinedEventsAreLeftOutOfCalendarReads() {
+        #expect(EventKitService.takesPart(status: .confirmed, ownStatus: nil))
+        #expect(EventKitService.takesPart(status: .tentative, ownStatus: .accepted))
+        #expect(EventKitService.takesPart(status: .none, ownStatus: .tentative))
+        #expect(!EventKitService.takesPart(status: .canceled, ownStatus: nil))
+        #expect(!EventKitService.takesPart(status: .confirmed, ownStatus: .declined))
+    }
+
+    @Test func eventsShownAsFreeTakeNoTimeAndNoDay() {
+        var events = CalendarFixtures.events.filter { $0.title != "Offsite" }
+        events.append(CalendarEvent(id: "wfh", title: "WFH", start: CalendarFixtures.date(17, 0),
+                                    end: CalendarFixtures.date(18, 0), isAllDay: true, isFree: true))
+        events.append(CalendarEvent(id: "hold", title: "Hold", start: CalendarFixtures.date(15, 13),
+                                    end: CalendarFixtures.date(15, 17), isFree: true))
+        let week = Self.week(events: events)
+        #expect(!week.isBlocked(CalendarFixtures.date(17, 0)))
+        #expect(!week.timedEvents.contains { $0.id == "hold" })
+        #expect(Self.ranges(WeekFacts.openBlocks(on: CalendarFixtures.date(15, 0), in: week))
+            == ["9 to 9:30 AM", "10 AM to 12 PM", "1 to 5 PM"])
+        #expect(WeekFacts.loads(in: week)[1].bookedMinutes == 90)
+    }
+
+    @Test func gapsTakeAnyWindowAndNoneOnADayThatIsOver() {
+        let week = Self.week()
+        #expect(Self.ranges(WeekFacts.gaps(on: CalendarFixtures.date(15, 0), in: week, window: 17 * 60..<24 * 60))
+            == ["5 PM to 12 AM"])
+        #expect(Self.ranges(WeekFacts.gaps(on: CalendarFixtures.date(15, 0), in: week, window: 9 * 60..<12 * 60))
+            == ["9 to 9:30 AM", "10 AM to 12 PM"])
+        #expect(WeekFacts.gaps(on: CalendarFixtures.date(14, 0), in: week, window: 0..<24 * 60).isEmpty)
+    }
+
     @Test func openBlocksStartAtTheNextQuarterHourAndSkipShortGaps() {
         let week = Self.week(now: CalendarFixtures.date(15, 10, 17))
         #expect(Self.ranges(WeekFacts.openBlocks(on: CalendarFixtures.date(15, 0), in: week))

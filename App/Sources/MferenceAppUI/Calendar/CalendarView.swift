@@ -68,9 +68,18 @@ struct CalendarContent: View {
                 switch model.access {
                 case .granted:
                     period
+                        // Month: the answer card floats over the grid, so the
+                        // grid keeps its size.
+                        .overlay(alignment: .bottomLeading) {
+                            if model.mode == .month, !showsTodos, let weekAsk, !weekAsk.isIdle {
+                                WeekAskCard(ask: weekAsk, continueInChat: continueInChat)
+                                    .frame(maxWidth: WeekAskMetrics.monthWidth, alignment: .leading)
+                                    .padding(MFSpacing.m)
+                            }
+                        }
                     if model.mode == .month, !showsTodos, let weekAsk {
                         WeekAskPanel(ask: weekAsk, calendar: model, compact: true, continueInChat: continueInChat)
-                            .frame(maxWidth: 560, alignment: .leading)
+                            .frame(maxWidth: WeekAskMetrics.monthWidth, alignment: .leading)
                     }
                     if model.mode == .day || model.mode == .week, let proposal = model.proposalsThisWeek.first {
                         ProposalCard(proposal: proposal, model: model)

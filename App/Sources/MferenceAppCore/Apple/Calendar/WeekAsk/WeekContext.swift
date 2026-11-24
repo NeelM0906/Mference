@@ -1,86 +1,139 @@
 import Foundation
 
-/// How the schedule is written for the model (internal testing):
-/// `defaults write ai.mference.app WeekAskFormat lines|json`; lines when
-/// unset.
-public enum WeekScheduleFormat: String, Sendable, CaseIterable {
-    /// One line per day, with an ID on every event, open block and to-do.
-    case lines
-    /// The same week as JSON fields, without IDs.
-    case json
+/// A clock range ("9:30 to 10 AM") as minutes after midnight, for mode B's
+/// check of the ranges an answer names. An end at midnight is 0.
+public struct ClockRange: Sendable, Hashable {
+    public var start: Int
+    public var end: Int
 
-    public static let defaultsKey = "WeekAskFormat"
-
-    /// The app sends JSON unless `WeekAskFormat` is set to `lines`: on the
-    /// 20-question check JSON answered more of the questions correctly.
-    public static func current(_ defaults: UserDefaults = .standard) -> WeekScheduleFormat {
-        defaults.string(forKey: defaultsKey).flatMap(WeekScheduleFormat.init(rawValue:)) ?? .json
+    public init(start: Int, end: Int) {
+        self.start = start % (24 * 60)
+        self.end = end % (24 * 60)
     }
 }
 
-/// The schedule a model answers from: the week from today on (earlier days
-/// are over and left out), day by day, with the arithmetic already done
-/// (open time, booked time, the busiest day left, overlaps, to-dos). The
-/// person's own all-day events take a whole day; a subscribed holiday does
-/// not. Written both as lines with an ID on every event, open block and
-/// to-do the answer can cite, and as JSON. Built from one snapshot, so every
-/// question of a thread reads the same schedule.
+/// The schedule a model answers from, as one JSON object (spec "The
+/// schedule sent to the model"): the week from today on (`days`, with open
+/// time and booked time worked out), the earlier days of the week
+/// (`past_days`, events and booked time only), the busiest day left,
+/// overlaps and to-dos. Events and to-dos carry IDs the answer can cite;
+/// open time carries none, so highlights and Block only ever come from
+/// Swift. Lengths come pre-formatted next to their minutes. The person's own
+/// all-day events take a whole day; a subscribed holiday, or an event shown
+/// as Free, does not. Built from one snapshot, so every question of a thread
+/// reads the same schedule.
 public struct WeekContext: Sendable, Hashable {
+    /// One day of the schedule.
+    public struct Day: Sendable, Hashable {
+        /// One event on the day, clipped to it.
+        public struct Entry: Sendable, Hashable {
+            public var fact: WeekFact
+            public var start: Date
+            public var end: Date
+
+            public var event: CalendarEvent? {
+                if case .event(let event) = fact.kind { event } else { nil }
+            }
+        }
+
+        public var date: Date
+        public var load: WeekDayLoad
+        public var entries: [Entry]
+        /// Open blocks inside work hours, from now on, 30 minutes or more
+        /// (none on a day that is over or taken).
+        public var open: [DateInterval]
+
+        public var events: [WeekFact] { entries.map(\.fact) }
+        public var openMinutes: Int { open.reduce(0) { $0 + WeekFacts.minutes($1) } }
+    }
+
+    /// Two events at the same time.
+    public struct Overlap: Sendable, Hashable {
+        public var first: WeekFact
+        public var second: WeekFact
+        /// Clipped to the first listed day.
+        public var interval: DateInterval
+    }
+
+    /// The busiest days left: the person's all-day ones first, else the most
+    /// booked time.
+    public struct Busiest: Sendable, Hashable {
+        public var days: [Day]
+        public var allDay: Bool
+    }
+
     public let week: WeekSnapshot
     /// The day the person is looking at (Day view), if any.
     public let focus: Date?
-    /// The days the schedule lists: today on, or the whole week when all of
-    /// it is over.
-    public let days: [Date]
-    /// The schedule as lines, with IDs.
-    public let text: String
-    /// The same schedule as JSON, without IDs.
+    /// Today on (empty once the whole week is over).
+    public let days: [Day]
+    /// The earlier days of the week.
+    public let pastDays: [Day]
+    public let overlaps: [Overlap]
+    public let busiest: Busiest?
+    /// To-dos due from the first listed day to the week's end, then overdue
+    /// ones.
+    public let todos: [WeekFact]
+    public let undatedTodos: Int
+    /// The schedule the model reads.
     public let json: String
-    /// Everything with an ID, in the order the schedule lists it.
+    /// Everything with an ID, in the order the schedule lists it: events
+    /// (E1, E2...), then to-dos (T1, T2...).
     public let facts: [WeekFact]
     /// Every time the schedule names, as minutes after midnight (mode B
     /// notes any other time an answer names).
     public let clockTimes: Set<Int>
+    /// Every range the schedule names: events, open blocks, overlaps, work
+    /// hours.
+    public let clockRanges: Set<ClockRange>
 
     public init(week: WeekSnapshot, focus: Date?) {
         let builder = Builder(week: week, focus: focus.map(week.calendar.startOfDay))
         self.week = week
         self.focus = focus.map(week.calendar.startOfDay)
-        self.days = builder.listed.map(\.date)
-        self.text = builder.lines()
+        self.days = builder.listed
+        self.pastDays = builder.past
+        self.overlaps = builder.overlaps
+        self.busiest = builder.busiest()
+        self.todos = builder.todos.map(\.fact)
+        self.undatedTodos = builder.undatedTodos
         self.json = builder.jsonText()
         self.facts = builder.facts
         self.clockTimes = builder.clockTimes
-    }
-
-    /// The schedule in `format`.
-    public func schedule(_ format: WeekScheduleFormat) -> String {
-        switch format {
-        case .lines: text
-        case .json: json
-        }
+        self.clockRanges = builder.clockRanges
     }
 
     public func fact(_ id: String) -> WeekFact? { facts.first { $0.id == id } }
 
+    /// This schedule's ID for the same event or to-do as `other` (a thread
+    /// that moved to a fresh schedule cites by the new IDs).
+    public func fact(matching other: WeekFact) -> WeekFact? {
+        switch other.kind {
+        case .event(let event): facts.first { if case .event(let mine) = $0.kind { mine.id == event.id } else { false } }
+        case .todo(let todo): facts.first { if case .todo(let mine) = $0.kind { mine.id == todo.id } else { false } }
+        case .openTime: nil
+        }
+    }
+
+    /// The listed or past day holding `date`.
+    public func day(_ date: Date) -> Day? {
+        (days + pastDays).first { week.calendar.isDate($0.date, inSameDayAs: date) }
+    }
+
     /// Whether `other` says the same thing apart from the minutes on the
-    /// clock: the same day, the same events and to-dos, and the same listed
-    /// days and open time. A thread keeps its schedule only while this holds,
-    /// so a later "today" or an hour that has passed gets a new one.
+    /// clock: the same day, the same events and to-dos, the same listed days
+    /// and open time. A thread keeps its schedule only while this holds, so
+    /// a later "today" or an hour that has passed gets a new one.
     public func readsTheSame(as other: WeekContext) -> Bool {
         week.calendar.isDate(week.now, inSameDayAs: other.week.now) && focus == other.focus
             && week.events == other.week.events && week.todos == other.week.todos
-            && days == other.days && facts == other.facts
+            && days.map(\.date) == other.days.map(\.date) && days.map(\.open) == other.days.map(\.open)
+            && facts == other.facts
     }
 
     /// The listed events, in schedule order.
     public var events: [WeekFact] {
         facts.filter { if case .event = $0.kind { true } else { false } }
-    }
-
-    /// The schedule without fact IDs, for a chat that does not cite them.
-    public var plainText: String {
-        text.replacingOccurrences(of: #"\s?\[[EFT]\d+\]"#, with: "", options: .regularExpression)
     }
 
     /// "2026-09-15" in `calendar`'s time zone.
@@ -89,51 +142,39 @@ public struct WeekContext: Sendable, Hashable {
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
+    private static let fence = WeekText.regex(#"<\s*/?\s*(untrusted|user\s*week|user\s*query)\s*>"#,
+                                              options: [.caseInsensitive])
+    private static let spaces = WeekText.regex(#"\s{2,}"#)
+
     /// Text with nothing that could open or close one of the prompt's
-    /// blocks (`<untrusted>`, `<USER WEEK>`, `<USER QUERY>`).
+    /// blocks (`<USER WEEK>`, `<USER QUERY>`), removed until nothing
+    /// changes: "<USER <USER QUERY>QUERY>" does not survive a pass.
     static func unfenced(_ text: String) -> String {
-        text.replacingOccurrences(of: #"(?i)<\s*/?\s*(untrusted|user\s*week|user\s*query)\s*>"#, with: "",
-                                  options: .regularExpression)
+        var current = text
+        while true {
+            let next = fence.stringByReplacingMatches(in: current, range: NSRange(current.startIndex..., in: current),
+                                                      withTemplate: "")
+            if next == current { return current }
+            current = next
+        }
     }
 
-    /// An event or to-do title on one line, with nothing that could close
-    /// one of the prompt's blocks.
-    static func clean(_ title: String) -> String {
-        let cleaned = unfenced(title.components(separatedBy: .newlines).joined(separator: " "))
-            .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+    /// An event or to-do title (or a question) on one line, with nothing
+    /// that could close one of the prompt's blocks.
+    static func clean(_ title: String, limit: Int = 120) -> String {
+        let flat = unfenced(title.components(separatedBy: .newlines).joined(separator: " "))
+        let cleaned = spaces.stringByReplacingMatches(in: flat, range: NSRange(flat.startIndex..., in: flat),
+                                                      withTemplate: " ")
             .trimmingCharacters(in: .whitespaces)
-        return String(cleaned.prefix(120))
+        return String(cleaned.prefix(limit))
     }
 
-    /// Works the schedule out once and writes it both ways.
+    /// Works the schedule out once and writes it.
     private struct Builder {
-        struct Event {
-            var event: CalendarEvent
-            var id: String
-            /// Clipped to the day.
-            var start: Date
-            var end: Date
-            var title: String
-        }
-
-        struct Day {
-            var date: Date
-            var load: WeekDayLoad
-            var events: [Event]
-            var open: [(interval: DateInterval, id: String)]
-        }
-
-        struct Overlap {
-            var first: String
-            var second: String
-            var start: Date
-            var end: Date
-        }
-
         struct Todo {
+            var fact: WeekFact
             var title: String
             var due: Date
-            var id: String
             var isOverdue: Bool
         }
 
@@ -142,32 +183,28 @@ public struct WeekContext: Sendable, Hashable {
         let focus: Date?
         let isoFormatter: DateFormatter
         private(set) var listed: [Day] = []
-        /// Earlier days of the week were left out.
-        private(set) var droppedPast = false
+        private(set) var past: [Day] = []
         private(set) var overlaps: [Overlap] = []
         private(set) var todos: [Todo] = []
         private(set) var undatedTodos = 0
         private(set) var facts: [WeekFact] = []
         private(set) var clockTimes: Set<Int> = []
-        private var eventIDs: [String: String] = [:]
+        private(set) var clockRanges: Set<ClockRange> = []
+        private var eventFacts: [String: WeekFact] = [:]
 
         init(week: WeekSnapshot, focus: Date?) {
             self.week = week
             self.text = week.text
             self.focus = focus
-            let formatter = DateFormatter()
-            formatter.calendar = Calendar(identifier: .gregorian)
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = week.calendar.timeZone
-            formatter.dateFormat = "yyyy-MM-dd"
-            self.isoFormatter = formatter
-            clockTimes.insert(minutes(week.now))
-            clockTimes.formUnion([minutes(opens), minutes(closes)])
+            self.isoFormatter = FreeQuery.isoFormatter(week.calendar)
+            let hours = week.workdayHours
+            clockTimes.formUnion([minutes(week.now), 0, hours.lowerBound * 60, hours.upperBound * 60 % 1440])
+            clockRanges.insert(ClockRange(start: hours.lowerBound * 60, end: hours.upperBound * 60))
             let loads = WeekFacts.loads(in: week)
             let upcoming = week.days.indices.filter { week.days[$0] >= week.today }
-            droppedPast = !upcoming.isEmpty && upcoming.count < week.days.count
-            for index in upcoming.isEmpty ? Array(week.days.indices) : upcoming {
-                listed.append(day(week.days[index], load: loads[index]))
+            for index in upcoming { listed.append(day(week.days[index], load: loads[index])) }
+            for index in week.days.indices where week.days[index] < week.today {
+                past.append(day(week.days[index], load: loads[index]))
             }
             findOverlaps()
             findTodos()
@@ -180,58 +217,54 @@ public struct WeekContext: Sendable, Hashable {
             week.calendar.component(.hour, from: date) * 60 + week.calendar.component(.minute, from: date)
         }
 
+        mutating func noteRange(_ start: Date, _ end: Date) {
+            clockTimes.formUnion([minutes(start), minutes(end)])
+            clockRanges.insert(ClockRange(start: minutes(start), end: minutes(end)))
+        }
+
         /// "Tuesday Sep 15".
         func dayName(_ date: Date) -> String { "\(text.weekday(date)) \(text.monthDay(date))" }
 
         /// "Tuesday 2026-09-15".
         func isoDay(_ date: Date) -> String { "\(text.weekday(date)) \(isoFormatter.string(from: date))" }
 
-        /// "today", "tomorrow", "past" or nil.
+        /// "today", "tomorrow", "yesterday" or nil.
         func relative(_ date: Date) -> String? {
             let word = text.dayWord(date)
             if word == "today" || word == "tomorrow" { return word }
-            return week.calendar.startOfDay(for: date) < week.today ? "past" : nil
-        }
-
-        /// "Tuesday Sep 15 (today)".
-        func labeled(_ date: Date) -> String {
-            relative(date).map { "\(dayName(date)) (\($0))" } ?? dayName(date)
+            if let yesterday = week.calendar.date(byAdding: .day, value: -1, to: week.today),
+               week.calendar.isDate(date, inSameDayAs: yesterday) { return "yesterday" }
+            return nil
         }
 
         // MARK: Working it out
 
-        mutating func eventID(_ event: CalendarEvent) -> String {
-            if let id = eventIDs[event.id] { return id }
-            let id = "E\(eventIDs.count + 1)"
-            eventIDs[event.id] = id
+        mutating func eventFact(_ event: CalendarEvent) -> WeekFact {
+            if let fact = eventFacts[event.id] { return fact }
+            let id = "E\(eventFacts.count + 1)"
             let when = event.isAllDay ? "all day" : text.range(event.start, event.end)
-            facts.append(WeekFact(id: id, kind: .event(event),
-                                  line: "\(WeekContext.clean(event.title)), \(dayName(event.start)), \(when)"))
-            if !event.isAllDay { clockTimes.formUnion([minutes(event.start), minutes(event.end)]) }
-            return id
+            let fact = WeekFact(id: id, kind: .event(event),
+                                line: "\(WeekContext.clean(event.title)), \(dayName(event.start)), \(when)")
+            eventFacts[event.id] = fact
+            facts.append(fact)
+            if !event.isAllDay { noteRange(event.start, event.end) }
+            return fact
         }
 
         mutating func day(_ date: Date, load: WeekDayLoad) -> Day {
             let end = week.time(24, on: date)
             let touching = week.events.filter { $0.end > date && $0.start < end }
                 .sorted { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) }
-            var events: [Event] = []
+            var entries: [Day.Entry] = []
             for event in touching {
-                events.append(Event(event: event, id: eventID(event), start: max(event.start, date),
-                                    end: min(event.end, end), title: WeekContext.clean(event.title)))
+                let entry = Day.Entry(fact: eventFact(event), start: max(event.start, date), end: min(event.end, end))
+                // An event clipped at midnight names 12 AM.
+                if !event.isAllDay { noteRange(entry.start, entry.end) }
+                entries.append(entry)
             }
-            var open: [(interval: DateInterval, id: String)] = []
-            if !load.isPast {
-                for block in WeekFacts.openBlocks(on: date, in: week) {
-                    let id = "F\(facts.filter { if case .openTime = $0.kind { true } else { false } }.count + 1)"
-                    facts.append(WeekFact(id: id, kind: .openTime(block),
-                                          line: "\(dayName(block.start)), \(text.range(block.start, block.end)), "
-                                              + text.duration(minutes: WeekFacts.minutes(block))))
-                    clockTimes.formUnion([minutes(block.start), minutes(block.end)])
-                    open.append((block, id))
-                }
-            }
-            return Day(date: date, load: load, events: events, open: open)
+            let open = load.isPast ? [] : WeekFacts.openBlocks(on: date, in: week)
+            for block in open { noteRange(block.start, block.end) }
+            return Day(date: date, load: load, entries: entries, open: open)
         }
 
         mutating func findOverlaps() {
@@ -239,11 +272,10 @@ public struct WeekContext: Sendable, Hashable {
             let events = week.timedEvents
             for (index, one) in events.enumerated() {
                 for other in events[(index + 1)...] where other.start < one.end && one.start < other.end {
-                    let start = max(one.start, other.start), end = min(one.end, other.end)
-                    guard end > first else { continue }
-                    clockTimes.formUnion([minutes(start), minutes(end)])
-                    overlaps.append(Overlap(first: WeekContext.clean(one.title), second: WeekContext.clean(other.title),
-                                            start: start, end: end))
+                    let start = max(one.start, other.start, first), end = min(one.end, other.end)
+                    guard end > start, let a = eventFacts[one.id], let b = eventFacts[other.id] else { continue }
+                    noteRange(start, end)
+                    overlaps.append(Overlap(first: a, second: b, interval: DateInterval(start: start, end: end)))
                 }
             }
         }
@@ -259,77 +291,19 @@ public struct WeekContext: Sendable, Hashable {
             undatedTodos = open.filter { $0.due == nil }.count
             for (todo, isOverdue) in due.map({ ($0, false) }) + overdue.map({ ($0, true) }) {
                 guard let date = todo.due else { continue }
-                let id = "T\(todos.count + 1)"
                 let title = WeekContext.clean(todo.title)
-                facts.append(WeekFact(id: id, kind: .todo(todo), line: "\(title), due \(dayName(date))"))
-                todos.append(Todo(title: title, due: date, id: id, isOverdue: isOverdue))
+                let fact = WeekFact(id: "T\(todos.count + 1)", kind: .todo(todo), line: "\(title), due \(dayName(date))")
+                facts.append(fact)
+                todos.append(Todo(fact: fact, title: title, due: date, isOverdue: isOverdue))
             }
         }
 
-        /// The days left that are busiest: the person's all-day ones first,
-        /// else the most booked time. Nil when nothing is booked.
-        func busiest() -> (days: [Day], allDay: Bool)? {
-            let ahead = listed.filter { !$0.load.isPast }
-            let blocked = ahead.filter(\.load.isBlocked)
-            if !blocked.isEmpty { return (blocked, true) }
-            let most = ahead.map(\.load.bookedMinutes).max() ?? 0
+        func busiest() -> Busiest? {
+            let blocked = listed.filter(\.load.isBlocked)
+            if !blocked.isEmpty { return Busiest(days: blocked, allDay: true) }
+            let most = listed.map(\.load.bookedMinutes).max() ?? 0
             guard most > 0 else { return nil }
-            return (ahead.filter { $0.load.bookedMinutes == most }, false)
-        }
-
-        // MARK: Lines
-
-        func lines() -> String {
-            var lines: [String] = []
-            let first = week.days.first ?? week.interval.start
-            let last = week.days.last ?? first
-            lines.append("Now: \(dayName(week.now)), \(text.time(week.now)).")
-            lines.append("Week: \(dayName(first)) to \(dayName(last)), \(week.calendar.component(.year, from: last)).")
-            if droppedPast, let from = listed.first?.date, let to = listed.last?.date {
-                lines.append("Listed: \(dayName(from)) to \(dayName(to)); earlier days are over.")
-            }
-            if let focus { lines.append("Looking at: \(labeled(focus)).") }
-            lines.append("Open time counts \(text.time(opens)) to \(text.time(closes)), from now on.")
-            lines += listed.map(dayLine)
-            lines.append(busiestLine())
-            lines.append("Overlapping events: " + (overlaps.isEmpty ? "none." : overlaps.map {
-                "\($0.first) and \($0.second), \(dayName($0.start)), \(text.range($0.start, $0.end))"
-            }.joined(separator: "; ") + "."))
-            let due = todos.filter { !$0.isOverdue }.map { "\($0.title), \(dayName($0.due)) [\($0.id)]" }
-            let overdue = todos.filter(\.isOverdue).map { "\($0.title), due \(dayName($0.due)) [\($0.id)]" }
-            lines.append("To-dos due this week: " + (due.isEmpty ? "none." : due.joined(separator: "; ") + "."))
-            lines.append("Overdue to-dos: " + (overdue.isEmpty ? "none." : overdue.joined(separator: "; ") + "."))
-            lines.append("To-dos with no date: \(undatedTodos).")
-            return lines.joined(separator: "\n")
-        }
-
-        func dayLine(_ day: Day) -> String {
-            var line = "\(labeled(day.date)): "
-            if day.events.isEmpty {
-                line += "nothing booked."
-            } else {
-                line += day.events.map { event in
-                    "\(event.title), \(event.event.isAllDay ? "all day" : text.range(event.start, event.end)) [\(event.id)]"
-                }.joined(separator: "; ") + "."
-                if day.load.bookedMinutes > 0 { line += " \(text.duration(minutes: day.load.bookedMinutes)) booked." }
-            }
-            if !day.load.isPast {
-                if day.load.isBlocked { line += " Busy all day." }
-                if !day.open.isEmpty {
-                    line += " Open: " + day.open.map { "\(text.range($0.interval.start, $0.interval.end)) [\($0.id)]" }
-                        .joined(separator: ", ") + "."
-                }
-            }
-            return line
-        }
-
-        func busiestLine() -> String {
-            guard let busiest = busiest() else { return "Busiest day left: nothing booked." }
-            let names = busiest.days.map { dayName($0.date) }
-            let how = busiest.allDay ? "busy all day"
-                : "\(text.duration(minutes: busiest.days[0].load.bookedMinutes)) booked"
-            return names.count == 1 ? "Busiest day left: \(names[0]), \(how)."
-                : "Busiest days left: \(WeekText.list(names)), \(how)\(busiest.allDay ? "" : " each")."
+            return Busiest(days: listed.filter { $0.load.bookedMinutes == most }, allDay: false)
         }
 
         // MARK: JSON
@@ -349,22 +323,40 @@ public struct WeekContext: Sendable, Hashable {
 
         func array(_ values: [String]) -> String { "[" + values.joined(separator: ", ") + "]" }
 
-        func dayObject(_ day: Day) -> String {
+        func eventObject(_ entry: Day.Entry) -> String {
+            guard let event = entry.event else { return "{}" }
+            var fields: [(String, String)] = [("id", quoted(entry.fact.id)),
+                                              ("title", quoted(WeekContext.clean(event.title)))]
+            if event.isAllDay {
+                fields.append(("all_day", "true"))
+            } else {
+                fields += [("from", quoted(text.time(entry.start))), ("to", quoted(text.time(entry.end))),
+                           ("length", quoted(text.duration(minutes: WeekFacts.minutes(DateInterval(
+                               start: entry.start, end: entry.end)))))]
+            }
+            if event.isFree { fields.append(("shows_as", quoted("free"))) }
+            return object(fields)
+        }
+
+        func dayObject(_ day: Day, past: Bool) -> String {
             var fields: [(String, String)] = [("date", quoted(isoFormatter.string(from: day.date))),
                                               ("weekday", quoted(text.weekday(day.date)))]
             if let relative = relative(day.date) { fields.append(("relative", quoted(relative))) }
-            fields.append(("events", array(day.events.map { event in
-                event.event.isAllDay
-                    ? object([("title", quoted(event.title)), ("all_day", "true")])
-                    : object([("title", quoted(event.title)), ("from", quoted(text.time(event.start))),
-                              ("to", quoted(text.time(event.end)))])
-            })))
-            fields.append(("free", array(day.open.map { open in
-                object([("from", quoted(text.time(open.interval.start))), ("to", quoted(text.time(open.interval.end))),
-                        ("minutes", String(WeekFacts.minutes(open.interval)))])
-            })))
+            fields.append(("events", array(day.entries.map(eventObject))))
+            if !past {
+                fields.append(("free", array(day.open.map { open in
+                    let minutes = WeekFacts.minutes(open)
+                    return object([("from", quoted(text.time(open.start))), ("to", quoted(text.time(open.end))),
+                                   ("minutes", String(minutes)), ("length", quoted(text.duration(minutes: minutes)))])
+                })))
+            }
             fields.append(("booked_minutes", String(day.load.bookedMinutes)))
-            if day.load.isBlocked, !day.load.isPast { fields.append(("busy_all_day", "true")) }
+            fields.append(("booked", quoted(text.duration(minutes: day.load.bookedMinutes))))
+            if !past {
+                fields.append(("open_minutes", String(day.openMinutes)))
+                fields.append(("open", quoted(text.duration(minutes: day.openMinutes))))
+                if day.load.isBlocked { fields.append(("busy_all_day", "true")) }
+            }
             return object(fields)
         }
 
@@ -372,7 +364,8 @@ public struct WeekContext: Sendable, Hashable {
             guard let busiest = busiest() else { return "null" }
             let values = busiest.days.map { day in
                 object([("date", quoted(isoFormatter.string(from: day.date))), ("weekday", quoted(text.weekday(day.date))),
-                        busiest.allDay ? ("busy_all_day", "true") : ("booked_minutes", String(day.load.bookedMinutes))])
+                        busiest.allDay ? ("busy_all_day", "true")
+                            : ("booked", quoted(text.duration(minutes: day.load.bookedMinutes)))])
             }
             return values.count == 1 ? values[0] : array(values)
         }
@@ -384,21 +377,23 @@ public struct WeekContext: Sendable, Hashable {
                 ("now", quoted("\(isoDay(week.now)), \(text.time(week.now))")),
                 ("week", quoted("\(isoDay(first)) to \(isoDay(last))")),
             ]
-            if let from = listed.first?.date, let to = listed.last?.date {
-                top.append(("days_listed", quoted("\(isoDay(from)) to \(isoDay(to))"
-                    + (droppedPast ? " (earlier days are over)" : ""))))
-            }
             if let focus { top.append(("looking_at", quoted(isoDay(focus)))) }
             top.append(("work_hours", quoted("\(text.time(opens)) to \(text.time(closes))")))
-            top.append(("days", "[\n" + listed.map { "    " + dayObject($0) }.joined(separator: ",\n") + "\n  ]"))
+            func list(_ days: [Day], past: Bool) -> String {
+                days.isEmpty ? "[]" : "[\n" + days.map { "    " + dayObject($0, past: past) }.joined(separator: ",\n") + "\n  ]"
+            }
+            top.append(("days", list(listed, past: false)))
+            top.append(("past_days", list(past, past: true)))
             top.append(("busiest_day_left", busiestValue()))
             top.append(("overlaps", array(overlaps.map { overlap in
-                object([("events", array([quoted(overlap.first), quoted(overlap.second)])),
-                        ("date", quoted(isoFormatter.string(from: overlap.start))),
-                        ("from", quoted(text.time(overlap.start))), ("to", quoted(text.time(overlap.end)))])
+                object([("ids", array([quoted(overlap.first.id), quoted(overlap.second.id)])),
+                        ("date", quoted(isoFormatter.string(from: overlap.interval.start))),
+                        ("from", quoted(text.time(overlap.interval.start))),
+                        ("to", quoted(text.time(overlap.interval.end)))])
             })))
             top.append(("todos", array(todos.map { todo in
-                object([("title", quoted(todo.title)), ("due", quoted(isoFormatter.string(from: todo.due))),
+                object([("id", quoted(todo.fact.id)), ("title", quoted(todo.title)),
+                        ("due", quoted(isoFormatter.string(from: todo.due))),
                         ("status", quoted(todo.isOverdue ? "overdue" : "due"))])
             })))
             top.append(("todos_without_date", String(undatedTodos)))

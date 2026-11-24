@@ -18,13 +18,20 @@ public struct WeekText: Sendable {
         (DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: calendar.locale) ?? "").contains("a")
     }
 
+    /// One formatter per template, locale, time zone and calendar, made once:
+    /// answers write many days and times, and a `DateFormatter` is costly to
+    /// make.
     private func formatter(_ template: String) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = calendar.locale
-        formatter.timeZone = calendar.timeZone
-        formatter.setLocalizedDateFormatFromTemplate(template)
-        return formatter
+        let key = "\(template)|\(calendar.identifier)|\(calendar.locale?.identifier ?? "")|"
+            + "\(calendar.timeZone.identifier)|\(calendar.firstWeekday)"
+        return FormatterCache.shared.formatter(key) {
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.locale = calendar.locale
+            formatter.timeZone = calendar.timeZone
+            formatter.setLocalizedDateFormatFromTemplate(template)
+            return formatter
+        }
     }
 
     /// "Tuesday".
@@ -92,32 +99,12 @@ public struct WeekText: Sendable {
         return "\(monthDay(interval.start)) to \(monthDay(last))"
     }
 
-    /// The length a question asks for, in minutes ("2 hours", "1 hour 30
-    /// minutes", "2h 15m", "an hour and a half", "half an hour"), or nil.
-    /// Block uses it for the event it adds.
-    public static func requestedMinutes(in question: String) -> Int? {
-        let text = " " + question.lowercased() + " "
-        func has(_ pattern: String) -> Bool { text.range(of: pattern, options: .regularExpression) != nil }
-        if has(#"\bhalf an? hour\b"#) { return 30 }
-        // Digits may touch the unit ("2h"); words need a space ("am" is not
-        // "a minute"). Every part counts.
-        guard let regex = try? NSRegularExpression(
-            pattern: #"\b(?:(\d+(?:\.\d+)?)\s*|(an?|one|two|three|four|five|six)\s+)(hours?|hrs?|h|minutes?|mins?|m)\b"#)
-        else { return nil }
-        let words: [String: Double] = ["a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6]
-        var total = 0.0
-        var sawHours = false
-        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            let group = { (index: Int) -> String? in Range(match.range(at: index), in: text).map { String(text[$0]) } }
-            guard let unit = group(3), let amount = group(1).flatMap(Double.init) ?? group(2).flatMap({ words[$0] })
-            else { continue }
-            // A bare "m" only after digits ("15m"), never "a m".
-            if unit == "m", group(1) == nil { continue }
-            if unit.hasPrefix("h") { sawHours = true }
-            total += unit.hasPrefix("h") ? amount * 60 : amount
+    /// A regular expression Ask about your week compiles once (a bad pattern
+    /// is a programming error, caught by the tests).
+    static func regex(_ pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression {
+        do { return try NSRegularExpression(pattern: pattern, options: options) } catch {
+            preconditionFailure("bad pattern \(pattern): \(error)")
         }
-        if sawHours, has(#"\band a half\b"#) { total += 30 }
-        return total > 0 ? Int(total.rounded()) : nil
     }
 
     /// "A, B and C".
@@ -132,5 +119,22 @@ public struct WeekText: Sendable {
     /// "1 event", "2 events".
     public static func count(_ value: Int, _ singular: String, _ plural: String? = nil) -> String {
         "\(value) \(value == 1 ? singular : plural ?? singular + "s")"
+    }
+}
+
+/// Formatters made once and shared. `DateFormatter` is safe to use from
+/// several threads once set up; the lock guards only the dictionary.
+final class FormatterCache: @unchecked Sendable {
+    static let shared = FormatterCache()
+    private let lock = NSLock()
+    private var formatters: [String: DateFormatter] = [:]
+
+    func formatter(_ key: String, make: () -> DateFormatter) -> DateFormatter {
+        lock.lock()
+        defer { lock.unlock() }
+        if let formatter = formatters[key] { return formatter }
+        let formatter = make()
+        formatters[key] = formatter
+        return formatter
     }
 }

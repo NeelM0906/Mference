@@ -12,9 +12,7 @@ public struct WeekAskLogEntry: Codable, Sendable, Hashable {
     public var question: String
     /// Earlier questions in the thread.
     public var historyCount: Int
-    /// "lines" or "json": how the schedule was written (nil in older lines).
-    public var format: String?
-    /// The schedule the model read.
+    /// The JSON schedule the model read.
     public var schedule: String
     /// The model's reply, exactly as it came back.
     public var reply: String
@@ -22,30 +20,39 @@ public struct WeekAskLogEntry: Codable, Sendable, Hashable {
     public var shown: String
     public var cited: [String]
     public var warnings: [String]
-    /// "model", "noModel", "modelFailed".
+    /// "model", or "failed" when nothing was shown (no model, an empty
+    /// reply, an error).
     public var source: String
+    /// "free_query", "answer" or "prose": the shape of the reply.
+    public var route: String?
+    /// The reply parsed as one of the two JSON shapes.
+    public var jsonParsed: Bool?
+    /// The free-time query Swift ran, as replayed JSON.
+    public var freeQuery: String?
     public var wasCut: Bool
     public var latencyMilliseconds: Int
     public var promptTokens: Int?
     public var completionTokens: Int?
     public var error: String?
 
-    public init(time: String, review: String, model: String, question: String, historyCount: Int,
-                format: String? = nil, schedule: String,
-                reply: String, shown: String, cited: [String], warnings: [String], source: String, wasCut: Bool,
+    public init(time: String, review: String, model: String, question: String, historyCount: Int, schedule: String,
+                reply: String, shown: String, cited: [String], warnings: [String], source: String,
+                route: String? = nil, jsonParsed: Bool? = nil, freeQuery: String? = nil, wasCut: Bool,
                 latencyMilliseconds: Int, promptTokens: Int?, completionTokens: Int?, error: String?) {
         self.time = time
         self.review = review
         self.model = model
         self.question = question
         self.historyCount = historyCount
-        self.format = format
         self.schedule = schedule
         self.reply = reply
         self.shown = shown
         self.cited = cited
         self.warnings = warnings
         self.source = source
+        self.route = route
+        self.jsonParsed = jsonParsed
+        self.freeQuery = freeQuery
         self.wasCut = wasCut
         self.latencyMilliseconds = latencyMilliseconds
         self.promptTokens = promptTokens

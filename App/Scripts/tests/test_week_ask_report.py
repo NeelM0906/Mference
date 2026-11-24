@@ -22,12 +22,14 @@ def entry(**fields: object) -> str:
         "model": "Quick 4B",
         "question": "what do i have this week?",
         "historyCount": 0,
-        "schedule": "Now: Sunday Nov 22, 9 PM.",
-        "reply": "Thanksgiving is Thursday. [E1]",
+        "schedule": "{\"now\": \"Sunday 2026-11-22, 9 PM\"}",
+        "reply": "{\"answer\": \"Thanksgiving is Thursday.\", \"refs\": [\"E1\"]}",
         "shown": "Thanksgiving is Thursday.",
         "cited": ["E1"],
         "warnings": [],
         "source": "model",
+        "route": "answer",
+        "jsonParsed": True,
         "wasCut": False,
         "latencyMilliseconds": 900,
         "promptTokens": 700,
@@ -64,6 +66,20 @@ class WeekAskReportTests(unittest.TestCase):
         self.assertIn("Model answers with a time warning: 1/2 (50%)", text)
         self.assertIn("Errors: 1", text)
         self.assertIn("Latency ms: median 2000, p95 3000, max 3000", text)
+
+    def test_summary_counts_routes_json_parsing_and_latency_per_route(self) -> None:
+        entries = [json.loads(entry(route="free_query", latencyMilliseconds=400)),
+                   json.loads(entry(route="free_query", latencyMilliseconds=600)),
+                   json.loads(entry(route="answer", latencyMilliseconds=2000)),
+                   json.loads(entry(route="prose", jsonParsed=False, latencyMilliseconds=3000)),
+                   json.loads(entry(source="failed", route=None, jsonParsed=None, error="emptyReply"))]
+        text = "\n".join(week_ask_report.summary(entries))
+        self.assertIn("Routes: free_query 2, answer 1, prose 1, None 1", text)
+        self.assertIn("Replies parsed as JSON: 3/4 (75%)", text)
+        self.assertIn("Latency ms, free_query: median 500 (2 replies)", text)
+        self.assertIn("Latency ms, prose: median 3000 (1 replies)", text)
+        listed = "\n".join(week_ask_report.recent(entries[:1], 1))
+        self.assertIn("[warn, free_query]", listed)
 
     def test_since_filters_and_recent_lists_warnings(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

@@ -1,43 +1,37 @@
+import AppKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
 
+/// Named sizes for Ask about your week.
+enum WeekAskMetrics {
+    /// Month's card and bar.
+    static let monthWidth: CGFloat = 560
+    /// The answer card's height before it scrolls inside, so "Show all"
+    /// never pushes the to-dos or the box off screen.
+    static let cardMaxHeight: CGFloat = 340
+    static let dayColumnWidth: CGFloat = 30
+}
+
 /// Ask about your week: the suggestion chips, the answer card and the box.
-/// Under the to-dos in Day and Week; a bar under the grid in Month.
+/// Under the to-dos in Day and Week; in Month, a slim bar under the grid
+/// with the card floating over the grid.
 struct WeekAskPanel: View {
     @Bindable var ask: WeekAskModel
     var calendar: CalendarWeekModel
-    /// Month's slim bar: the card floats over the grid above it.
+    /// Month's slim bar: the card floats over the grid instead.
     var compact = false
     /// Opens a Private chat with these answers; nil hides the button.
     var continueInChat: (() -> Void)?
     @FocusState private var focused: Bool
 
-    /// The chips while nothing is asked: about the selected day in Day view,
-    /// about the week otherwise.
-    private var suggestions: [String] {
-        guard calendar.mode == .day else {
-            return ["When am I free for 2 hours?", "What's my busiest day?", "What's due this week?",
-                    "Anything overlapping?"]
-        }
-        let word = ask.text.dayWord(calendar.selectedDate)
-        if word == "today" {
-            return ["What's on today?", "Am I free today?", "What's tomorrow like?", "What's due this week?"]
-        }
-        // "tomorrow" reads without "on"; a weekday needs it.
-        let when = word == "tomorrow" ? word : "on \(word)"
-        return ["What's on \(word)?", "Am I free \(when)?", "What's due this week?", "What's my busiest day?"]
-    }
-
-    private var isIdle: Bool { ask.answers.isEmpty && ask.pending == nil }
-
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s) {
             if !compact { header }
-            if isIdle && !compact {
+            if ask.isIdle && !compact {
                 FlowLayout(spacing: MFSpacing.xs) {
-                    ForEach(suggestions, id: \.self) { suggestion in
-                        Button(suggestion) { Task { await ask.ask(suggestion) } }
+                    ForEach(ask.chips, id: \.self) { chip in
+                        Button(chip.title(ask.text)) { Task { await ask.ask(chip) } }
                             .buttonStyle(ChipButtonStyle())
                     }
                 }
@@ -46,13 +40,27 @@ struct WeekAskPanel: View {
                     .foregroundStyle(MFColor.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if !isIdle { card }
+            if !ask.isIdle && !compact { WeekAskCard(ask: ask, continueInChat: continueInChat) }
             if let notice = ask.notice { noticeBar(notice) }
             composer
         }
         .onChange(of: calendar.askWeek) { ask.scopeChanged() }
         // The week may have changed while no panel was shown (Year view).
         .onAppear { ask.scopeChanged() }
+        // Free-time answers follow the clock while Calendar is on screen:
+        // passed openings drop off at the next quarter hour or the next
+        // opening's start. No background timer.
+        .task(id: ask.refreshKey) {
+            while !Task.isCancelled, let next = ask.nextRefresh {
+                let wait = max(next.timeIntervalSince(calendar.currentTime), 1)
+                try? await Task.sleep(for: .seconds(wait))
+                guard !Task.isCancelled else { return }
+                ask.refreshFreeTime()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            ask.refreshFreeTime()
+        }
     }
 
     private var header: some View {
@@ -70,94 +78,6 @@ struct WeekAskPanel: View {
             .padding(.vertical, MFSpacing.xxs)
             .background(Capsule().fill(MFColor.fill))
             .accessibilityLabel("About the week of \(ask.scopeLabel)")
-    }
-
-    // MARK: Card
-
-    private var card: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(threadLabel)
-                    .font(MFFont.caption)
-                    .foregroundStyle(MFColor.tertiary)
-                Spacer(minLength: 0)
-                Button { ask.clear() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.appleQuiet)
-                    .accessibilityLabel("Clear these answers")
-            }
-            .padding(.leading, MFSpacing.m)
-            .padding(.trailing, MFSpacing.xs)
-            .padding(.top, MFSpacing.xs)
-            // Bounded already (three answers, three rows each until "Show
-            // all"), so the card sizes to its content and the to-do list
-            // above gives way instead.
-            VStack(alignment: .leading, spacing: MFSpacing.m) {
-                ForEach(earlier) { answer in
-                    VStack(alignment: .leading, spacing: MFSpacing.xxs) {
-                        Text(answer.question).font(MFFont.caption).foregroundStyle(MFColor.tertiary)
-                        Text(answer.sentence).font(MFFont.callout).foregroundStyle(MFColor.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if let pending = ask.pending {
-                    pendingView(pending)
-                } else if let latest = ask.answers.last {
-                    WeekAnswerView(answer: latest, ask: ask, isStale: ask.isStale)
-                    if let continueInChat {
-                        HStack {
-                            Spacer(minLength: 0)
-                            Button("Continue in Chat", action: continueInChat)
-                                .buttonStyle(.appleSecondary)
-                                .accessibilityHint("Opens a new Private chat with these questions and answers")
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, MFSpacing.m)
-            .padding(.bottom, MFSpacing.m)
-            HStack(alignment: .firstTextBaseline, spacing: MFSpacing.xs) {
-                Image(systemName: "lock")
-                Text("Not saved · clears when you leave this week")
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .font(MFFont.caption)
-            .foregroundStyle(MFColor.tertiary)
-            .padding(.horizontal, MFSpacing.m)
-            .padding(.vertical, MFSpacing.s)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(MFColor.fillSubtle)
-        }
-        .background(RoundedRectangle(cornerRadius: MFRadius.m).fill(MFColor.surface))
-        .clipShape(RoundedRectangle(cornerRadius: MFRadius.m))
-        .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairline))
-    }
-
-    /// The earlier answers, one line each (the latest is shown in full).
-    private var earlier: [WeekAnswer] {
-        ask.pending == nil ? Array(ask.answers.dropLast()) : ask.answers
-    }
-
-    private var threadLabel: String {
-        let count = ask.answers.count + (ask.pending == nil ? 0 : 1)
-        return count == 1 ? "This week · 1 question"
-            : "This week · \(count) of \(WeekAskModel.maximumQuestions) questions"
-    }
-
-    private func pendingView(_ pending: WeekAskPending) -> some View {
-        VStack(alignment: .leading, spacing: MFSpacing.xs) {
-            Text(pending.question)
-                .font(MFFont.bodyEmphasis)
-                .foregroundStyle(MFColor.ink)
-            HStack(spacing: MFSpacing.s) {
-                ProgressView().controlSize(.small)
-                Text(pending.step.label + "…")
-                    .font(MFFont.callout)
-                    .foregroundStyle(MFColor.secondary)
-            }
-            .accessibilityElement(children: .combine)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Notice and box
@@ -229,6 +149,106 @@ struct WeekAskPanel: View {
         if compact { return "Ask about this week" }
         guard ask.answers.isEmpty else { return "Ask a follow-up" }
         return calendar.mode == .day ? "Ask about this day or week" : "When am I free for 2 hours?"
+    }
+}
+
+/// The thread: earlier answers in one line each, the latest in full (or
+/// the question being answered), Continue in Chat. Its height is capped;
+/// past the cap it scrolls inside.
+struct WeekAskCard: View {
+    var ask: WeekAskModel
+    var continueInChat: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(threadLabel)
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.tertiary)
+                Spacer(minLength: 0)
+                Button { ask.clear() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.appleQuiet)
+                    .accessibilityLabel("Clear these answers")
+            }
+            .padding(.leading, MFSpacing.m)
+            .padding(.trailing, MFSpacing.xs)
+            .padding(.top, MFSpacing.xs)
+            // Sized to its content up to the cap, then it scrolls inside.
+            ViewThatFits(in: .vertical) {
+                thread
+                MFScroll { thread }
+            }
+            .frame(maxHeight: WeekAskMetrics.cardMaxHeight)
+            HStack(alignment: .firstTextBaseline, spacing: MFSpacing.xs) {
+                Image(systemName: "lock")
+                Text("Not saved · clears when you leave this week")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(MFFont.caption)
+            .foregroundStyle(MFColor.tertiary)
+            .padding(.horizontal, MFSpacing.m)
+            .padding(.vertical, MFSpacing.s)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(MFColor.fillSubtle)
+        }
+        .background(RoundedRectangle(cornerRadius: MFRadius.m).fill(MFColor.surface))
+        .clipShape(RoundedRectangle(cornerRadius: MFRadius.m))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairline))
+    }
+
+    private var thread: some View {
+        VStack(alignment: .leading, spacing: MFSpacing.m) {
+            ForEach(earlier) { answer in
+                VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+                    Text(answer.question).font(MFFont.caption).foregroundStyle(MFColor.tertiary)
+                    Text(answer.sentence).font(MFFont.callout).foregroundStyle(MFColor.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let pending = ask.pending {
+                pendingView(pending)
+            } else if let latest = ask.answers.last {
+                WeekAnswerView(answer: latest, ask: ask, isStale: ask.isStale)
+                if let continueInChat {
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button("Continue in Chat", action: continueInChat)
+                            .buttonStyle(.appleSecondary)
+                            .accessibilityHint("Opens a new Private chat with these questions and answers")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, MFSpacing.m)
+        .padding(.bottom, MFSpacing.m)
+    }
+
+    /// The earlier answers, one line each (the latest is shown in full).
+    private var earlier: [WeekAnswer] {
+        ask.pending == nil ? Array(ask.answers.dropLast()) : ask.answers
+    }
+
+    private var threadLabel: String {
+        let count = ask.answers.count + (ask.pending == nil ? 0 : 1)
+        return count == 1 ? "This week · 1 question"
+            : "This week · \(count) of \(WeekAskModel.maximumQuestions) questions"
+    }
+
+    private func pendingView(_ pending: WeekAskPending) -> some View {
+        VStack(alignment: .leading, spacing: MFSpacing.xs) {
+            Text(pending.question)
+                .font(MFFont.bodyEmphasis)
+                .foregroundStyle(MFColor.ink)
+            HStack(spacing: MFSpacing.s) {
+                ProgressView().controlSize(.small)
+                Text(pending.step.label + "…")
+                    .font(MFFont.callout)
+                    .foregroundStyle(MFColor.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -315,20 +335,20 @@ struct WeekAnswerView: View {
     private var caption: String { answer.source.caption }
 
     private var howLines: [String] {
-        var lines = ["The question was sent with your week's schedule: every event, open time and to-do, "
-            + "with open and booked time already worked out by Mference."]
         switch answer.source {
+        case .calendar(nil):
+            return ["Mference worked this out from your calendar in the app. No model was used."]
+        case .calendar(let label?):
+            return ["\(label) read your question and the week's schedule, and asked Mference for open time.",
+                    "Mference worked the open times out from your calendar, so they are exact."]
         case .model(let label):
-            lines.append("\(label) wrote the answer from that schedule.")
+            var lines = ["The question was sent with your week's schedule: its events and to-dos, with open and "
+                + "booked time already worked out by Mference.", "\(label) wrote the answer from that schedule."]
             if !answer.warnings.isEmpty {
                 lines.append("A note above means the answer names a time your calendar doesn't hold.")
             }
-        case .fixed(.noModel):
-            lines.append("No model could run, so Mference lists the week instead.")
-        case .fixed(.modelFailed(let label)):
-            lines.append("\(label) couldn't answer, so Mference lists the week instead.")
+            return lines
         }
-        return lines
     }
 }
 
@@ -344,14 +364,14 @@ struct WeekFactRow: View {
         case .openTime(let interval):
             HStack(spacing: MFSpacing.s) {
                 Text(text.shortWeekday(interval.start)).font(MFFont.caption.weight(.semibold))
-                    .frame(width: 30, alignment: .leading)
+                    .frame(width: WeekAskMetrics.dayColumnWidth, alignment: .leading)
                 Text(text.range(interval.start, interval.end)).font(MFFont.caption).lineLimit(1)
                 Text(text.duration(minutes: Int(interval.duration / 60))).font(MFFont.caption)
                     .foregroundStyle(MFColor.success).lineLimit(1)
                 Spacer(minLength: 0)
                 if ask.blocked[interval] != nil {
                     Text("Added").font(MFFont.caption.weight(.semibold)).foregroundStyle(MFColor.success)
-                } else if !ask.isStale {
+                } else if !ask.isStale, !ask.hasStarted(interval) {
                     let block = ask.blockInterval(for: interval)
                     Button("Block") { Task { await ask.block(interval) } }
                         .buttonStyle(.plain)

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import IOKit.ps
 import MferenceAppCore
+import MferenceWeekAskFixtures
 
 // End-to-end smoke for one model through the app's own engine path
 // (`EngineService.live()`, in-process, as the app runs it). One request,
@@ -17,11 +18,16 @@ import MferenceAppCore
 // App/Resources/SearXNG/runtime provides); it passes when the model searched
 // and the answer cites sources. The result's `web` field has the details.
 //
-// Ask about your week: add `--week-ask`. 20 questions over two fixed weeks
-// (`WeekAskCheckpoint`) through the app's prompt and engine path; each reply
-// is recorded as mode A shows it and with mode B's time warnings, and with
-// `--out` also as a week-ask JSONL log (read it with
-// App/Scripts/week_ask_report.py). Passes when every question got an answer.
+// Ask about your week: add `--week-ask`. About 60 typed questions over
+// three fixed weeks (`WeekAskCheckpoint`, with its answer key) through the
+// app's own answerer: the JSON schedule, the two reply shapes, Swift's
+// free-time answers, mode B. Each result grades the reply shape, the
+// `FreeQuery` fields and the past-day gate against the key; lookups are
+// graded by hand. With `--out`, also a week-ask JSONL log (read it with
+// App/Scripts/week_ask_report.py) and the key as `week-ask-key.jsonl`.
+// `--model apple --week-ask` asks Apple's on-device model in-process
+// through `AssistantWeekLanguageModel` instead (no engine model loads).
+// Passes when every typed question got an answer.
 //
 // Warm decode: add `--warmup` to send a short request on the loaded model
 // first, so the main request's decode is warm; `--temperature 0` is greedy,
@@ -69,6 +75,8 @@ struct SmokeResult: Codable {
     var web: WebCheckpointOutcome?
     /// `--week-ask` runs: one result per question.
     var weekAsk: [WeekAskCheckpoint.Result]?
+    /// `--week-ask` runs: the totals against the v1 bars.
+    var weekAskSummary: WeekAskCheckpoint.Summary?
     /// `--warmup`: the short request sent first on the loaded model.
     var warmupCompletionTokens: Int?
     var warmupPrefillSeconds: Double?
@@ -127,8 +135,11 @@ while let argument = arguments.popFirst() {
     default: fail("unknown argument \(argument)", code: 2)
     }
 }
-guard let modelName, let model = AppModel(rawValue: modelName), model.isEngineModel else {
-    fail("--model must be one of \(AppModel.engineModels.map(\.rawValue).joined(separator: ", "))", code: 2)
+let appleMode = modelName == "apple"
+if appleMode, !weekAskMode { fail("--model apple runs only with --week-ask", code: 2) }
+guard appleMode || modelName.flatMap(AppModel.init(rawValue:))?.isEngineModel == true else {
+    fail("--model must be one of \(AppModel.engineModels.map(\.rawValue).joined(separator: ", ")), or apple with --week-ask",
+         code: 2)
 }
 if webMode, !promptGiven { prompt = WebCheckpoint.defaultQuestion }
 
@@ -139,6 +150,74 @@ let started = ContinuousClock.now
 let startedUTC = ISO8601DateFormatter().string(from: Date())
 let stamp = startedUTC.replacingOccurrences(of: ":", with: "")
 guard let swapBefore = swapUsedBytes() else { fail("cannot read vm.swapusage", code: 8) }
+/// Asks the checkpoint's questions with `model` and records them in
+/// `result`.
+@MainActor func runWeekAsk(_ model: any WeekLanguageModel, name: String, into start: SmokeResult) async -> SmokeResult {
+    var result = start
+    let log = outDirectory.map {
+        WeekAskLog(url: $0.appending(path: "week-ask-\(name)-\(stamp).jsonl"), isEnabled: { true })
+    }
+    if let outDirectory {
+        try? FileManager.default.createDirectory(at: outDirectory, withIntermediateDirectories: true)
+        let key = WeekAskCheckpoint.keyLines().joined(separator: "\n") + "\n"
+        try? Data(key.utf8).write(to: outDirectory.appending(path: "week-ask-key.jsonl"))
+    }
+    let results = await WeekAskCheckpoint.run(model: model, log: log) { one in
+        FileHandle.standardError.write(Data("\(one.id) \(one.route ?? "error") \(one.latencyMilliseconds) ms\n".utf8))
+    }
+    result.weekAsk = results
+    result.weekAskSummary = WeekAskCheckpoint.summary(results)
+    result.prompt = "week-ask: \(results.count) questions"
+    result.answer = results.map { "\($0.id). \($0.question) -> \($0.shown)" }.joined(separator: "\n")
+    let failed = results.filter { $0.error != nil }
+    result.passed = !results.isEmpty && failed.isEmpty
+    if !failed.isEmpty { result.error = "\(failed.count) of \(results.count) questions failed" }
+    return result
+}
+
+/// Writes the result, checks swap and power, and exits.
+@MainActor func finish(_ result: inout SmokeResult, stem: String) -> Never {
+    let wall = started.duration(to: .now)
+    result.wallSeconds = Double(wall.components.seconds) + Double(wall.components.attoseconds) / 1e18
+    let swapAfter = swapUsedBytes()
+    result.swapUsedAfterBytes = swapAfter ?? 0
+    result.swapGrewBytes = swapAfter.map { Int64($0) - Int64(swapBefore) } ?? 0
+    let powerAtEnd = powerSource()
+    result.powerSourceAtEnd = powerAtEnd
+    if swapAfter == nil { result.passed = false; result.error = "cannot read vm.swapusage at the end" }
+    if powerAtEnd != kIOPMACPowerKey { result.passed = false; result.error = "power source changed to '\(powerAtEnd)'" }
+
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let json = (try? encoder.encode(result)) ?? Data()
+    print(String(decoding: json, as: UTF8.self))
+    if let outDirectory {
+        try? FileManager.default.createDirectory(at: outDirectory, withIntermediateDirectories: true)
+        try? json.write(to: outDirectory.appending(path: "\(stem)-\(stamp).json"))
+    }
+
+    if swapAfter == nil { fail("cannot read vm.swapusage at the end", code: 8) }
+    if powerAtEnd != kIOPMACPowerKey { fail("power source changed to '\(powerAtEnd)' during the run", code: 5) }
+    if result.swapGrewBytes > 0 {
+        fail("swap grew by \(result.swapGrewBytes) bytes during the run: stop all model runs and report", code: 4)
+    }
+    exit(result.passed ? 0 : 1)
+}
+
+if appleMode {
+    var result = SmokeResult(commit: commit, model: "Apple on-device", modelID: "apple", engine: "FoundationModels",
+                             location: nil, sizeBytes: 0, startedUTC: startedUTC, prompt: "",
+                             swapUsedBeforeBytes: swapBefore)
+    result.temperature = 0
+    let apple = FoundationTextModel()
+    switch await apple.availability() {
+    case .available: result = await runWeekAsk(AssistantWeekLanguageModel(model: apple), name: "apple", into: result)
+    case .unavailable(let reason): result.error = "Apple's on-device model is not available: \(reason)"
+    }
+    finish(&result, stem: "apple-week-ask")
+}
+
+guard let model = modelName.flatMap(AppModel.init(rawValue:)) else { fail("unreachable", code: 2) }
 let idle = IdleUnloadControl(delay: nil)
 let engine = EngineService.live(idleUnload: idle)
 let option = await engine.models().first { $0.model == model }
@@ -157,16 +236,8 @@ do {
     let loadTime = loadStarted.duration(to: .now)
     result.loadSeconds = Double(loadTime.components.seconds) + Double(loadTime.components.attoseconds) / 1e18
     if weekAskMode {
-        let log = outDirectory.map {
-            WeekAskLog(url: $0.appending(path: "week-ask-\(model.rawValue)-\(stamp).jsonl"), isEnabled: { true })
-        }
-        let results = await WeekAskCheckpoint.run(model: EngineWeekLanguageModel(engine: engine, model: model), log: log)
-        result.weekAsk = results
-        result.prompt = "week-ask: \(results.count) questions"
-        result.answer = results.map { "\($0.index). \($0.question) -> \($0.shown)" }.joined(separator: "\n")
-        let failed = results.filter { $0.error != nil }
-        result.passed = !results.isEmpty && failed.isEmpty
-        if !failed.isEmpty { result.error = "\(failed.count) of \(results.count) questions failed" }
+        result = await runWeekAsk(EngineWeekLanguageModel(engine: engine, model: model), name: model.rawValue,
+                                  into: result)
     } else if webMode {
         // In-memory settings: the run turns web search on (and offline mode
         // off) without touching the person's own settings.
@@ -228,30 +299,4 @@ do {
     result.error = (error as? EngineServiceError)?.userMessage ?? String(describing: error)
 }
 await engine.shutdown()
-
-let wall = started.duration(to: .now)
-result.wallSeconds = Double(wall.components.seconds) + Double(wall.components.attoseconds) / 1e18
-let swapAfter = swapUsedBytes()
-result.swapUsedAfterBytes = swapAfter ?? 0
-result.swapGrewBytes = swapAfter.map { Int64($0) - Int64(swapBefore) } ?? 0
-let powerAtEnd = powerSource()
-result.powerSourceAtEnd = powerAtEnd
-if swapAfter == nil { result.passed = false; result.error = "cannot read vm.swapusage at the end" }
-if powerAtEnd != kIOPMACPowerKey { result.passed = false; result.error = "power source changed to '\(powerAtEnd)'" }
-
-let encoder = JSONEncoder()
-encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-let json = (try? encoder.encode(result)) ?? Data()
-print(String(decoding: json, as: UTF8.self))
-if let outDirectory {
-    try? FileManager.default.createDirectory(at: outDirectory, withIntermediateDirectories: true)
-    let kind = webMode ? "-web" : weekAskMode ? "-week-ask" : ""
-    try? json.write(to: outDirectory.appending(path: "\(model.rawValue)\(kind)-\(stamp).json"))
-}
-
-if swapAfter == nil { fail("cannot read vm.swapusage at the end", code: 8) }
-if powerAtEnd != kIOPMACPowerKey { fail("power source changed to '\(powerAtEnd)' during the run", code: 5) }
-if result.swapGrewBytes > 0 {
-    fail("swap grew by \(result.swapGrewBytes) bytes during the run: stop all model runs and report", code: 4)
-}
-exit(result.passed ? 0 : 1)
+finish(&result, stem: "\(model.rawValue)\(webMode ? "-web" : weekAskMode ? "-week-ask" : "")")

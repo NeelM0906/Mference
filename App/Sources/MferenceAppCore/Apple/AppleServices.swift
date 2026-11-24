@@ -16,7 +16,8 @@ public final class AppleServices {
     public let mail: MailInboxModel
     public let connections: AppleConnections
 
-    /// `weekAsk` defaults to one that answers without a model.
+    /// `weekAsk` defaults to one with no model: chips answer, typed
+    /// questions say no model can.
     public init(assistant: AppleModelService, scan: ScanSession, calendar: CalendarWeekModel, mail: MailInboxModel,
                 connections: AppleConnections, weekAsk: WeekAskModel? = nil) {
         self.assistant = assistant
@@ -50,8 +51,7 @@ public final class AppleServices {
                              weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
                                  picker: WeekModelPicker(engine: engine, appleModel: FoundationTextModel(),
                                                          useAppleModel: useAppleModel),
-                                 review: { WeekAnswerReview.current() }, format: { WeekScheduleFormat.current() },
-                                 log: .live())))
+                                 review: { WeekAnswerReview.current() }, log: .live())))
     }
 
     /// Previews, snapshots and tests: in-memory calendar, mail and planner, a

@@ -53,10 +53,10 @@ import Testing
         let model = CalendarWeekModel(service: service, store: store, defaults: defaults, now: { fixedNow },
                                       syncsAutomatically: false)
         await model.load()
+        // What ships: chips answered in Swift, typed questions as one JSON
+        // reply over the JSON schedule.
         let engine = ScriptedEngineService(status: EngineServiceStatus(phase: .ready, residentModel: .quick), replies: [
-            .init(content: "Here are the open times for the rest of the week. [F1, F2, F3]"),
-            .init(content: "Your busiest day left is the one with the most booked time below."),
-            .init(content: "Here is what is due this week. [T1]"),
+            .init(content: #"{"answer": "Your busiest day left is the one with the most booked time.", "refs": []}"#),
         ])
         let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: WeekModelPicker(
             engine: engine, appleModel: nil, useAppleModel: { false })))
@@ -65,14 +65,15 @@ import Testing
                 .environment(model).environment(ask), name: name, colorScheme: scheme)
         }
         try render("04-calendar-ask-idle")
-        await ask.ask("When am I free for 2 hours?")
+        await ask.ask(.freeFor(minutes: 120))
         #expect(!ask.highlightedOpenTimes.isEmpty)
         for scheme in [ColorScheme.light, .dark] { try render("04-calendar-ask-free", scheme) }
-        await ask.ask("What's my busiest day?")
+        await ask.ask("Which day is busiest?")
+        #expect(ask.answers.count == 2)
         try render("04-calendar-ask-busiest")
         ask.clear()
         await model.show(.month)
-        await ask.ask("What's due this week?")
+        await ask.ask(.due)
         try render("04-calendar-ask-month")
         await model.show(.week)
         _ = try await service.add(ProposedEvent(title: "Dentist", start: fixedNow.addingTimeInterval(26 * 3_600),

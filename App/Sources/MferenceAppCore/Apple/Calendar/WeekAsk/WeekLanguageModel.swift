@@ -23,9 +23,21 @@ public struct WeekModelReply: Sendable, Hashable {
 public protocol WeekLanguageModel: Sendable {
     /// Shown under the answer ("Quick 4B", "Deep 27B", "Apple on-device").
     var label: String { get }
+    /// Another answer (Chat's) runs first: the step reads "Waiting for
+    /// Chat" until `started`.
+    var isBusyElsewhere: Bool { get async }
     /// `turns` is the system turn, then the thread (user, assistant, ...,
-    /// user).
-    func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply
+    /// user). `started` is called once the model begins on this request.
+    func respond(turns: [ChatTurn], maximumTokens: Int,
+                 started: @escaping @Sendable () async -> Void) async throws -> WeekModelReply
+}
+
+extension WeekLanguageModel {
+    public var isBusyElsewhere: Bool { get async { false } }
+
+    public func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply {
+        try await respond(turns: turns, maximumTokens: maximumTokens, started: {})
+    }
 }
 
 /// An engine model, used only once it is resident (or about to be), so Ask
@@ -41,10 +53,22 @@ public struct EngineWeekLanguageModel: WeekLanguageModel {
 
     public var label: String { model.shortName }
 
-    public func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply {
+    /// The engine runs one answer at a time: one running or queued now goes
+    /// first.
+    public var isBusyElsewhere: Bool {
+        get async { engine.status.isGenerating || engine.status.queuedRequests > 0 }
+    }
+
+    public func respond(turns: [ChatTurn], maximumTokens: Int,
+                        started: @escaping @Sendable () async -> Void) async throws -> WeekModelReply {
         let options = GenerationOptions(thinking: false, maximumCompletionTokens: maximumTokens, temperature: 0)
         var content = ""
+        var began = false
         for try await update in engine.generate(model: model, turns: turns, options: options) {
+            if !began, update.beginsThisRequest {
+                began = true
+                await started()
+            }
             switch update {
             case .content(let text): content += text
             case .completed(let summary):
@@ -60,8 +84,21 @@ public struct EngineWeekLanguageModel: WeekLanguageModel {
     }
 }
 
+extension GenerationUpdate {
+    /// The engine has taken this request up (its prompt is read, or text
+    /// is coming).
+    var beginsThisRequest: Bool {
+        switch self {
+        case .prepared, .content, .reasoning, .completed: true
+        case .toolCall: false
+        }
+    }
+}
+
 /// Apple's on-device model, which takes instructions and one prompt: the
-/// thread is written out in order, earlier questions marked as such.
+/// thread is written out in order, each question labeled "Earlier
+/// question" or "Current question" just before its `<USER QUERY>` block,
+/// and each earlier reply as the JSON it was.
 public struct AssistantWeekLanguageModel: WeekLanguageModel {
     public let model: any AssistantTextModel
 
@@ -71,22 +108,36 @@ public struct AssistantWeekLanguageModel: WeekLanguageModel {
 
     public var label: String { model.kind.label }
 
-    public func respond(turns: [ChatTurn], maximumTokens: Int) async throws -> WeekModelReply {
+    /// The one prompt Apple's model reads for `turns`.
+    static func prompt(_ turns: [ChatTurn]) -> (instructions: String, prompt: String) {
         let instructions = turns.filter { $0.role == .system }.compactMap(\.content).joined(separator: "\n\n")
         let thread = turns.filter { $0.role != .system }
+        let lastUser = thread.lastIndex { $0.role == .user }
         var parts: [String] = []
         for (index, turn) in thread.enumerated() {
             let content = turn.content ?? ""
             switch turn.role {
-            case .assistant: parts.append("Your answer: " + content)
-            case .user where index < thread.count - 1:
-                parts.append(content.replacingOccurrences(of: WeekAnswerer.questionLabel,
-                                                          with: "Earlier question: "))
+            case .assistant: parts.append("Your earlier reply: " + content)
+            case .user:
+                let label = index == lastUser ? "Current question:" : "Earlier question:"
+                // Titles and questions cannot hold the tag (unfenced), so the
+                // first one is the question's own block.
+                if let range = content.range(of: "<USER QUERY>") {
+                    parts.append(content.replacingCharacters(in: range, with: label + "\n<USER QUERY>"))
+                } else {
+                    parts.append(label + "\n" + content)
+                }
             default: parts.append(content)
             }
         }
-        let text = try await model.complete(AssistantRequest(instructions: instructions,
-                                                             prompt: parts.joined(separator: "\n"),
+        return (instructions, parts.joined(separator: "\n\n"))
+    }
+
+    public func respond(turns: [ChatTurn], maximumTokens: Int,
+                        started: @escaping @Sendable () async -> Void) async throws -> WeekModelReply {
+        let (instructions, prompt) = Self.prompt(turns)
+        await started()
+        let text = try await model.complete(AssistantRequest(instructions: instructions, prompt: prompt,
                                                              maximumTokens: maximumTokens, temperature: 0))
         return WeekModelReply(content: text)
     }
@@ -95,11 +146,12 @@ public struct AssistantWeekLanguageModel: WeekLanguageModel {
 /// Which model answers (canvas board 4): the one already in memory,
 /// whatever it is; with none, Apple's on-device model when it is switched
 /// on and ready, then Quick (L12). Never a swap. Nil when no model can run:
-/// the common questions still get their fixed answers.
+/// the chips still answer, in Swift.
 public struct WeekModelPicker: Sendable {
     private let engine: (any EngineServicing)?
     private let appleModel: (any AssistantTextModel)?
     private let useAppleModel: @Sendable () async -> Bool
+    private var fixed: (any WeekLanguageModel)?
 
     public init(engine: (any EngineServicing)?, appleModel: (any AssistantTextModel)?,
                 useAppleModel: @escaping @Sendable () async -> Bool) {
@@ -108,10 +160,18 @@ public struct WeekModelPicker: Sendable {
         self.useAppleModel = useAppleModel
     }
 
+    /// Always `model` (the checkpoint, tests).
+    public static func fixed(_ model: any WeekLanguageModel) -> WeekModelPicker {
+        var picker = WeekModelPicker(engine: nil, appleModel: nil, useAppleModel: { false })
+        picker.fixed = model
+        return picker
+    }
+
     /// No model at all (previews, and Macs with nothing installed).
     public static let none = WeekModelPicker(engine: nil, appleModel: nil, useAppleModel: { false })
 
     public func pick() async -> (any WeekLanguageModel)? {
+        if let fixed { return fixed }
         if let engine {
             let status = engine.status
             // Resident, or being loaded already: using it costs no swap.

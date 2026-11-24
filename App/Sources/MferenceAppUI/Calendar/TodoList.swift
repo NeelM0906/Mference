@@ -92,7 +92,7 @@ struct TodoList: View {
 
     private var asking: Bool {
         guard let weekAsk else { return false }
-        return !weekAsk.answers.isEmpty || weekAsk.pending != nil
+        return !weekAsk.isIdle
     }
 
     private var looksLikeQuestion: Bool {

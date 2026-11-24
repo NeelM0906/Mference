@@ -10,9 +10,10 @@ The app writes one JSON line per question to
 Usage:
     App/Scripts/week_ask_report.py [LOG] [--last N] [--since ISO8601]
 
-Prints totals by model, source and review mode, how often answers carried a
-time warning or were cut off, latency and token figures, then the last N
-questions with what was shown. Standard library only.
+Prints totals by model, source, review mode and reply route (free_query,
+answer, prose), how often a reply parsed as JSON, how often answers carried
+a time warning or were cut off, latency per route and token figures, then
+the last N questions with what was shown. Standard library only.
 """
 
 from __future__ import annotations
@@ -36,13 +37,15 @@ class Entry(TypedDict, total=False):
     model: str
     question: str
     historyCount: int
-    format: str
     schedule: str
     reply: str
     shown: str
     cited: list[str]
     warnings: list[str]
     source: str
+    route: str | None
+    jsonParsed: bool | None
+    freeQuery: str | None
     wasCut: bool
     latencyMilliseconds: int
     promptTokens: int | None
@@ -88,7 +91,7 @@ def summary(entries: list[Entry]) -> list[str]:
     lines = [f"Questions: {total}"]
     if total == 0:
         return lines
-    for label, key in (("Models", "model"), ("Sources", "source"), ("Review modes", "review"), ("Formats", "format")):
+    for label, key in (("Models", "model"), ("Sources", "source"), ("Review modes", "review"), ("Routes", "route")):
         counts = Counter(str(entry.get(key, "?")) for entry in entries)
         lines.append(f"{label}: " + ", ".join(f"{name} {count}" for name, count in counts.most_common()))
     answered = [entry for entry in entries if entry.get("source") == "model"]
@@ -99,12 +102,21 @@ def summary(entries: list[Entry]) -> list[str]:
         lines.append(f"Model answers with a time warning: {warned}/{len(answered)} ({100 * warned / len(answered):.0f}%)")
         lines.append(f"Model answers cut off: {cut}/{len(answered)}")
     lines.append(f"Errors: {errors}")
+    parsed = [entry for entry in answered if entry.get("jsonParsed") is not None]
+    if parsed:
+        good = sum(1 for entry in parsed if entry.get("jsonParsed"))
+        lines.append(f"Replies parsed as JSON: {good}/{len(parsed)} ({100 * good / len(parsed):.0f}%)")
     latencies = [int(entry["latencyMilliseconds"]) for entry in answered if "latencyMilliseconds" in entry]
     if latencies:
         lines.append(
             f"Latency ms: median {int(statistics.median(latencies))}, p95 {percentile(latencies, 0.95)}, "
             f"max {max(latencies)}"
         )
+    for route in sorted({str(entry["route"]) for entry in answered if entry.get("route")}):
+        values = [int(entry["latencyMilliseconds"]) for entry in answered
+                  if entry.get("route") == route and "latencyMilliseconds" in entry]
+        if values:
+            lines.append(f"Latency ms, {route}: median {int(statistics.median(values))} ({len(values)} replies)")
     completions = [int(entry["completionTokens"]) for entry in answered if entry.get("completionTokens") is not None]
     prompts = [int(entry["promptTokens"]) for entry in answered if entry.get("promptTokens") is not None]
     if prompts:
@@ -123,7 +135,7 @@ def recent(entries: list[Entry], count: int) -> list[str]:
             shown = shown[:197] + "..."
         thread = f" (follow-up {entry.get('historyCount')})" if entry.get("historyCount") else ""
         lines.append(
-            f"- {entry.get('time', '?')} {entry.get('model', '?')} [{entry.get('review', '?')}, {entry.get('format', 'lines')}] "
+            f"- {entry.get('time', '?')} {entry.get('model', '?')} [{entry.get('review', '?')}, {entry.get('route') or '-'}] "
             f"{entry.get('latencyMilliseconds', '?')} ms{thread}"
         )
         lines.append(f"  Q: {entry.get('question', '')}")

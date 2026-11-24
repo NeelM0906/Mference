@@ -42,26 +42,39 @@ public struct WeekSnapshot: Sendable, Hashable {
         return days
     }
 
-    /// Events with a start and an end time (all-day ones mark a day, they do
-    /// not fill hours).
-    public var timedEvents: [CalendarEvent] { events.filter { !$0.isAllDay && $0.end > $0.start } }
+    /// Events that take time: a start and an end (all-day ones mark a day,
+    /// they do not fill hours), and not shown as Free.
+    public var timedEvents: [CalendarEvent] { events.filter { !$0.isAllDay && !$0.isFree && $0.end > $0.start } }
 
     public var today: Date { calendar.startOfDay(for: now) }
 
     /// Whether one of the person's own all-day events takes `day` (a
-    /// subscribed holiday does not).
+    /// subscribed holiday does not, nor one shown as Free).
     public func isBlocked(_ day: Date) -> Bool {
         let start = calendar.startOfDay(for: day), end = time(24, on: start)
-        return events.contains { $0.isAllDay && $0.isUserCalendar && $0.start < end && $0.end > start }
+        return events.contains { $0.isAllDay && $0.isUserCalendar && !$0.isFree && $0.start < end && $0.end > start }
     }
 
     /// Whether `date` falls inside the week.
     public func contains(_ date: Date) -> Bool { interval.contains(date) && date < interval.end }
 
     /// `hour` o'clock on `day`, right across daylight-saving changes.
-    func time(_ hour: Int, on day: Date) -> Date {
-        if hour >= 24 { return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: day)) ?? day }
-        return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+    func time(_ hour: Int, on day: Date) -> Date { clock(hour * 60, on: day) }
+
+    /// `minutes` after midnight on `day` (1440 is the next midnight), right
+    /// across daylight-saving changes.
+    func clock(_ minutes: Int, on day: Date) -> Date {
+        let start = calendar.startOfDay(for: day)
+        if minutes >= 24 * 60 { return calendar.date(byAdding: .day, value: 1, to: start) ?? day }
+        return calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: start) ?? day
+    }
+
+    /// The same week read at another moment (answers refresh as time
+    /// passes).
+    public func at(_ now: Date) -> WeekSnapshot {
+        var copy = self
+        copy.now = now
+        return copy
     }
 }
 
@@ -101,9 +114,19 @@ public enum WeekFacts {
     /// all-day event takes.
     public static func openBlocks(on day: Date, in week: WeekSnapshot,
                                   minimumMinutes: Int = shortestOpenMinutes) -> [DateInterval] {
-        guard !week.isBlocked(day) else { return [] }
-        let lower = max(week.time(week.workdayHours.lowerBound, on: day), roundedUp(week.now))
-        let upper = week.time(week.workdayHours.upperBound, on: day)
+        gaps(on: day, in: week, window: week.workdayHours.lowerBound * 60..<week.workdayHours.upperBound * 60)
+            .filter { $0.duration >= TimeInterval(minimumMinutes * 60) }
+    }
+
+    /// Every gap between busy times on `day` inside `window` (minutes after
+    /// midnight), each clipped to the window, from the next quarter hour on;
+    /// none on a day that is over or that the person's own all-day event
+    /// takes.
+    public static func gaps(on day: Date, in week: WeekSnapshot, window: Range<Int>) -> [DateInterval] {
+        let day = week.calendar.startOfDay(for: day)
+        guard day >= week.today, !week.isBlocked(day) else { return [] }
+        let lower = max(week.clock(window.lowerBound, on: day), roundedUp(week.now))
+        let upper = week.clock(window.upperBound, on: day)
         guard upper > lower else { return [] }
         var blocks: [DateInterval] = []
         var cursor = lower
@@ -112,7 +135,7 @@ public enum WeekFacts {
             cursor = max(cursor, busy.end)
         }
         if upper > cursor { blocks.append(DateInterval(start: cursor, end: upper)) }
-        return blocks.filter { $0.duration >= TimeInterval(minimumMinutes * 60) }
+        return blocks
     }
 
     /// Now, up to the next quarter hour: "10:30", not "10:17".
