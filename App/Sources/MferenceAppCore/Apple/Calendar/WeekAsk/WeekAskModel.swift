@@ -347,6 +347,10 @@ public final class WeekAskModel {
             hasher.combine(event.start)
             hasher.combine(event.end)
             hasher.combine(event.isAllDay)
+            // Free/Busy and whose calendar it is decide open time and
+            // whether an all-day event takes the day.
+            hasher.combine(event.isFree)
+            hasher.combine(event.isUserCalendar)
         }
         // Only to-dos an answer can mention: due before the week ends, or undated.
         let relevant = week.todos.filter { $0.due.map { $0 < week.interval.end } ?? true }
@@ -368,7 +372,8 @@ public final class WeekAskModel {
     static func isUnchanged(_ event: CalendarEvent, _ own: [String: CalendarEvent]) -> Bool {
         guard let added = own[event.id] else { return false }
         return added.title == event.title && added.start == event.start && added.end == event.end
-            && added.isAllDay == event.isAllDay
+            && added.isAllDay == event.isAllDay && added.isFree == event.isFree
+            && added.isUserCalendar == event.isUserCalendar
     }
 
     // MARK: Block
@@ -443,14 +448,22 @@ public final class WeekAskModel {
     }
 
     /// Reruns the latest answer's free-time search at the current time, on
-    /// the schedule it read: passed openings drop off, and when none is left
+    /// the schedule it read and the Focus blocks added since: passed
+    /// openings drop off, and when none is left
     /// the headline says so. Only while Calendar is on screen (the panel's
     /// task), never in the background.
     public func refreshFreeTime() {
         guard pending == nil, !isStale, let index = answers.indices.last, let query = answers[index].freeQuery,
               !answers[index].openTimes.isEmpty, let threadContext else { return }
         let before = answers[index]
-        let context = WeekContext(week: threadContext.week.at(calendar.currentTime), focus: threadContext.focus)
+        // The thread's schedule plus the Focus blocks added since: an
+        // opening Block took stays taken as its start moves on.
+        let read = threadContext.week
+        let known = Set(read.events.map(\.id))
+        let week = WeekSnapshot(interval: read.interval, now: calendar.currentTime, calendar: read.calendar,
+                                events: read.events + ownEvents.values.filter { !known.contains($0.id) },
+                                todos: read.todos, workdayHours: read.workdayHours)
+        let context = WeekContext(week: week, focus: threadContext.focus)
         var refreshed = WeekAnswerer.freeTime(query, question: before.question, context: context,
                                               askedBy: { if case .calendar(let label) = before.source { label } else { nil } }())
         guard refreshed.rows.map(\.kind) != before.rows.map(\.kind) || refreshed.sentence != before.sentence else { return }

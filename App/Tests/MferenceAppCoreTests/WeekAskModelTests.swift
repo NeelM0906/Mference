@@ -518,6 +518,43 @@ import Testing
         #expect(ask.answers.count == 1)
     }
 
+    @Test @MainActor func aRefreshKeepsAnOpeningBlockTookTaken() async throws {
+        let clock = Clock()
+        let ask = await Self.setUp(engine: Self.engine(#"{"free_query": {"days": ["today"]}}"#), clock: clock)
+        await ask.ask("Am I free today?")
+        let afternoon = DateInterval(start: CalendarFixtures.date(15, 13), end: CalendarFixtures.date(15, 17))
+        #expect(ask.highlightedOpenTimes.contains(afternoon))
+        await ask.block(afternoon)
+        #expect(ask.blocked[afternoon] != nil)
+        // Past the Focus block's start: the opening now starts after it,
+        // not at the next quarter hour inside it.
+        clock.set(CalendarFixtures.date(15, 13, 10))
+        ask.refreshFreeTime()
+        #expect(ask.highlightedOpenTimes == [DateInterval(start: CalendarFixtures.date(15, 14),
+                                                          end: CalendarFixtures.date(15, 17))])
+    }
+
+    @Test @MainActor func availabilityChangesTheFingerprint() {
+        let week = DateInterval(start: CalendarFixtures.date(14, 0), end: CalendarFixtures.date(21, 0))
+        func print(_ events: [CalendarEvent]) -> Int {
+            WeekAskModel.fingerprint(WeekSnapshot(interval: week, now: CalendarFixtures.now,
+                                                  calendar: CalendarFixtures.calendar, events: events, todos: []),
+                                     ignoring: [:])
+        }
+        let free = CalendarEvent(id: "hold", title: "Hold", start: CalendarFixtures.date(16, 9),
+                                 end: CalendarFixtures.date(16, 17), isFree: true)
+        var busy = free
+        busy.isFree = false
+        #expect(print([free]) != print([busy]))
+        let subscribed = CalendarEvent(id: "trip", title: "Trip", start: CalendarFixtures.date(16, 0),
+                                       end: CalendarFixtures.date(17, 0), isAllDay: true, isUserCalendar: false)
+        var own = subscribed
+        own.isUserCalendar = true
+        #expect(print([subscribed]) != print([own]))
+        // A Focus block Block added, now shown as Free, is a change too.
+        #expect(!WeekAskModel.isUnchanged(free, ["hold": busy]))
+    }
+
     @Test @MainActor func lookupAnswersDoNotRefresh() async {
         let clock = Clock()
         let ask = await Self.setUp(engine: Self.engine(#"{"answer": "Lunch is at noon.", "refs": ["E2"]}"#), clock: clock)
