@@ -199,17 +199,31 @@ struct LlamaVisionTests {
         #expect(layout.remaining(afterReusing: 5) == nil)
     }
 
+    /// Records a layout's prefill in the cache the way `LlamaModel` does:
+    /// text tokens, and each image's keys with its full hash.
+    static func record(_ layout: LlamaMediaLayout, in cache: inout LlamaPromptCache) {
+        for segment in layout.segments {
+            switch segment {
+            case .text(let tokens): cache.append(tokens)
+            case .media(_, let positions, let hash):
+                cache.appendMedia(LlamaMediaLayout.mediaKeys(hash: hash, positions: positions), hash: hash)
+            }
+        }
+    }
+
     /// The prompt cache, keyed by position, reuses a conversation that keeps
     /// its image and stops reusing at an image that changed.
     @Test func thePromptCacheReusesTheSameImageAndNotAnother() {
         let first = Self.layout()
         var cache = LlamaPromptCache()
-        #expect(cache.begin(prompt: first.cacheKeys, trim: { _ in true }, clear: {}) == 0)
-        cache.append(first.cacheKeys + [20, 21])  // the prompt, then the answer
+        #expect(cache.begin(prompt: first.cacheKeys, media: first.mediaStarts, trim: { _ in true }, clear: {}) == 0)
+        Self.record(first, in: &cache)
+        cache.append([20, 21])  // the answer
         cache.commit()
+        #expect(cache.mediaHashes == first.mediaStarts)
 
         let followUp = LlamaMediaLayout(segments: first.segments + [.text([20, 21, 30, 31])])
-        let reused = cache.begin(prompt: followUp.cacheKeys,
+        let reused = cache.begin(prompt: followUp.cacheKeys, media: followUp.mediaStarts,
                                  trim: { _ in Issue.record("an extension needs no trim"); return false },
                                  clear: { Issue.record("an extension needs no clear") })
         #expect(reused == first.totalPositions + 2)
@@ -221,10 +235,51 @@ struct LlamaVisionTests {
 
         let swapped = Self.layout(hash: "0badf00d" + String(repeating: "0", count: 56))
         var trimmedAt: Int?
-        let again = cache.begin(prompt: swapped.cacheKeys, trim: { trimmedAt = $0; return true }, clear: {})
+        let again = cache.begin(prompt: swapped.cacheKeys, media: swapped.mediaStarts,
+                                trim: { trimmedAt = $0; return true }, clear: {})
         #expect(again == 3)
         #expect(trimmedAt == 3)
+        #expect(cache.mediaHashes.isEmpty)
         #expect(swapped.remaining(afterReusing: again)?.pieces.first == .media(segment: 1, position: 3))
+    }
+
+    /// Two images whose hashes differ only in the top bit of their first 32
+    /// get the same keys at every position; the full hash still tells them
+    /// apart, so the second never reuses the first's KV.
+    @Test func imagesWithCollidingKeysAreToldApartByTheirFullHash() {
+        let rest = String(repeating: "7", count: 56)
+        let one = Self.layout(hash: "95abfcd1" + rest)
+        let other = Self.layout(hash: "15abfcd1" + rest)
+        #expect(one.cacheKeys == other.cacheKeys)
+
+        var cache = LlamaPromptCache()
+        _ = cache.begin(prompt: one.cacheKeys, media: one.mediaStarts, trim: { _ in true }, clear: {})
+        Self.record(one, in: &cache)
+        cache.commit()
+        var trimmedAt: Int?
+        let reused = cache.begin(prompt: other.cacheKeys, media: other.mediaStarts,
+                                 trim: { trimmedAt = $0; return true }, clear: {})
+        #expect(reused == 3)
+        #expect(trimmedAt == 3)
+        #expect(other.remaining(afterReusing: reused)?.pieces.first == .media(segment: 1, position: 3))
+
+        // A memory that cannot roll back starts over instead.
+        var recurrent = LlamaPromptCache()
+        _ = recurrent.begin(prompt: one.cacheKeys, media: one.mediaStarts, trim: { _ in true }, clear: {})
+        Self.record(one, in: &recurrent)
+        recurrent.commit()
+        var cleared = false
+        #expect(recurrent.begin(prompt: other.cacheKeys, media: other.mediaStarts,
+                                trim: { _ in false }, clear: { cleared = true }) == 0)
+        #expect(cleared)
+    }
+
+    @Test func aLayoutListsWhereEachImageStarts() {
+        let hash = "a1b2c3d4" + String(repeating: "0", count: 56)
+        #expect(Self.layout(hash: hash).mediaStarts == [3: hash])
+        let two = LlamaMediaLayout(segments: [.media(tokens: 4, positions: 2, hash: "a"), .text([1]),
+                                              .media(tokens: 9, positions: 3, hash: "b")])
+        #expect(two.mediaStarts == [0: "a", 3: "b"])
     }
 
     // MARK: Projector headers and discovery

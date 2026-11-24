@@ -416,6 +416,7 @@ actor LlamaModel: EngineModel {
         let keys = layout.cacheKeys
         let reusedPositions = promptCache.begin(
             prompt: keys,
+            media: layout.mediaStarts,
             trim: { llama_memory_seq_rm(memory, 0, llama_pos($0), -1) },
             clear: { llama_memory_clear(memory, true) })
         var plan = layout.remaining(afterReusing: reusedPositions)
@@ -456,7 +457,7 @@ actor LlamaModel: EngineModel {
                     offset = end
                 }
             case .media(let segment, let start):
-                guard case .media(let count, let positions, _) = layout.segments[segment],
+                guard case .media(let count, let positions, let hash) = layout.segments[segment],
                       let chunk = prompt.chunk(segment) else { continue }
                 guard mtmd_encode_chunk(media, chunk) == 0, let rows = mtmd_get_output_embd(media) else {
                     if abortFlag.isSet { throw CancellationError() }
@@ -488,7 +489,7 @@ actor LlamaModel: EngineModel {
                     try process(batch, context: context)
                     offset = end
                 }
-                promptCache.append(Array(keys[start..<(start + positions)]))
+                promptCache.appendMedia(Array(keys[start..<(start + positions)]), hash: hash)
             }
         }
         llama_batch_ext_clear(batch)
@@ -521,34 +522,54 @@ actor LlamaModel: EngineModel {
 /// finish; a request that fails or is cancelled never commits, so the next one
 /// starts from an empty memory. At least one prompt token is always left to
 /// decode, for its logits.
+///
+/// An image's entries are short keys derived from its hash, so the record
+/// also keeps each image's full SHA-256 by the position it starts at, and an
+/// image is reused only when the memory holds that very image there.
 struct LlamaPromptCache {
     private(set) var tokens: [Int32] = []
     private(set) var isTrusted = true
+    /// The full hash of each image the memory holds, by its first position.
+    private(set) var mediaHashes: [Int: String] = [:]
 
-    /// Returns how many leading prompt tokens are reused. `trim(n)` drops
-    /// everything from position `n` on and reports whether the memory could
-    /// (a recurrent state cannot roll back); `clear()` empties it.
-    mutating func begin(prompt: [Int32], trim: (Int) -> Bool, clear: () -> Void) -> Int {
+    /// Returns how many leading prompt tokens are reused. `media` gives the
+    /// prompt's images (first position to full hash); reuse stops at the
+    /// first one the memory does not hold. `trim(n)` drops everything from
+    /// position `n` on and reports whether the memory could (a recurrent state
+    /// cannot roll back); `clear()` empties it.
+    mutating func begin(prompt: [Int32], media: [Int: String] = [:],
+                        trim: (Int) -> Bool, clear: () -> Void) -> Int {
         defer { isTrusted = false }
         var common = 0
         if isTrusted {
-            let limit = min(tokens.count, prompt.count - 1)
+            var limit = min(tokens.count, prompt.count - 1)
+            for (start, hash) in media where start < limit && mediaHashes[start] != hash {
+                limit = start
+            }
             while common < limit, tokens[common] == prompt[common] { common += 1 }
             if common == tokens.count {
                 return common
             }
             if common > 0, trim(common) {
                 tokens.removeLast(tokens.count - common)
+                mediaHashes = mediaHashes.filter { $0.key < common }
                 return common
             }
         }
         clear()
         tokens = []
+        mediaHashes = [:]
         return 0
     }
 
     mutating func append(_ decoded: [Int32]) {
         tokens += decoded
+    }
+
+    /// Records an image decoded at the next position: its keys and full hash.
+    mutating func appendMedia(_ keys: [Int32], hash: String) {
+        mediaHashes[tokens.count] = hash
+        tokens += keys
     }
 
     mutating func commit() {
@@ -559,6 +580,7 @@ struct LlamaPromptCache {
     mutating func invalidate() {
         isTrusted = false
         tokens = []
+        mediaHashes = [:]
     }
 }
 
