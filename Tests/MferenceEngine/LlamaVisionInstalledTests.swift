@@ -15,8 +15,8 @@ import Testing
 /// machine lock, alone. It checks, at greedy decoding with thinking off:
 /// that a text-only request gives the same tokens with and without the
 /// projector; that the model reads a number and names colours from rendered
-/// pictures; and that a follow-up turn with the same picture reuses the
-/// prompt through it. `MFERENCE_VISION_OUT`, if set, gets a JSON summary.
+/// pictures; and that a follow-up turn with the picture reuses as much of the
+/// prompt as a text-only follow-up does. `MFERENCE_VISION_OUT`, if set, gets a JSON summary.
 @Suite("Llama vision on an installed model", .serialized)
 struct LlamaVisionInstalledTests {
     static let environment = ProcessInfo.processInfo.environment
@@ -144,8 +144,19 @@ struct LlamaVisionInstalledTests {
         let (parity, _) = try await Self.ask(model, followUp, media: [0: [number]])
         summary["follow_up_answer"] = parity.content
         summary["follow_up_cached_tokens"] = parity.usage.cachedPromptTokens ?? -1
-        #expect((parity.usage.cachedPromptTokens ?? 0) > readPrompt.promptTokens.count / 2,
-                "cached \(parity.usage.cachedPromptTokens ?? -1) of \(parity.usage.promptTokens)")
+        // Qwen3.5 is hybrid recurrent: its memory extends but never rolls
+        // back, and the template rewrites the earlier answer, so a follow-up
+        // reuses nothing whether or not it carries a picture. Recorded beside
+        // a text-only control rather than asserted; the key layout itself is
+        // covered by `LlamaVisionTests`.
+        let textQuestion = MFTokenizer.Message(role: .user, content: "What is 740 plus 2? Reply with the number only.")
+        let (sum, _) = try await Self.ask(model, [textQuestion])
+        let (textFollowUp, _) = try await Self.ask(model, [
+            textQuestion, MFTokenizer.Message(role: .assistant, content: sum.content),
+            MFTokenizer.Message(role: .user, content: "Is that number even or odd? One word.")])
+        summary["text_follow_up_cached_tokens"] = textFollowUp.usage.cachedPromptTokens ?? -1
+        #expect((parity.usage.cachedPromptTokens ?? 0) == (textFollowUp.usage.cachedPromptTokens ?? 0),
+                "image \(parity.usage.cachedPromptTokens ?? -1), text \(textFollowUp.usage.cachedPromptTokens ?? -1)")
         #expect(parity.content.lowercased().contains("even"), "answer: \(parity.content)")
 
         // Colours.
