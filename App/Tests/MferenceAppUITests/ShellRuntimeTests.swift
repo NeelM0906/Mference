@@ -11,7 +11,9 @@ import Testing
         let services = AppServices.preview()
         let runtime = AppRuntime(services: services, web: WebAnswers(settings: services.settings, runtime: nil, legacyStore: InMemorySettingsStore()))
         #expect(runtime.services === services)
-        #expect((runtime.chat.service as AnyObject) === (services.engine as AnyObject))
+        // `ObjectIdentifier`s, not `===` on two `AnyObject`s: Swift 6.3's
+        // SILGen crashes on the reabstraction thunk `#expect` builds for that.
+        #expect(ObjectIdentifier(runtime.chat.service as AnyObject) == ObjectIdentifier(services.engine as AnyObject))
         #expect(runtime.screenModels.library != nil && runtime.screenModels.memory != nil
                 && runtime.screenModels.settings != nil)
     }
