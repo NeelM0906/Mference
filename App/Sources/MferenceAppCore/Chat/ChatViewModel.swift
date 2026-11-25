@@ -108,6 +108,8 @@ public final class ChatViewModel {
     @ObservationIgnored private let attachmentReader: ChatAttachmentReader
     /// Where pictures pasted as data are kept until they are read.
     @ObservationIgnored private var pastedDirectory: URL?
+    /// Files this model wrote for pasted pictures, deleted once read.
+    @ObservationIgnored private var pastedFiles: Set<URL> = []
     /// Offers Quick's or Deep's image understanding on the first picture;
     /// nil where it cannot be downloaded (tests, previews).
     @ObservationIgnored private let imageUnderstanding: (any ImageUnderstandingOffering)?
@@ -484,8 +486,13 @@ public final class ChatViewModel {
             pendingAttachments.append(pending)
             if kind == .image { offerImageUnderstandingIfNeeded() }
             let reader = attachmentReader
+            // A picture pasted as data is only needed until it is read (the
+            // attachment keeps its text and a scaled copy): delete it then,
+            // read or not, removed or not. Other files are never touched.
+            let pasted = pastedFiles.remove(url.standardizedFileURL) != nil
             Task { [weak self] in
                 let result = await reader.read(url)
+                if pasted { try? FileManager.default.removeItem(at: url) }
                 guard let self, let index = self.pendingAttachments.firstIndex(where: { $0.id == pending.id })
                 else { return }
                 switch result {
@@ -520,6 +527,7 @@ public final class ChatViewModel {
         pastedDirectory = directory
         let url = directory.appending(path: "Pasted image \(UUID().uuidString.prefix(8)).\(fileExtension)")
         try data.write(to: url, options: .atomic)
+        pastedFiles.insert(url.standardizedFileURL)
         return url
     }
 

@@ -80,4 +80,25 @@ import Testing
         #expect(chat.pendingAttachments.map(\.filename) == ["notes.txt"])
         #expect(chat.pendingAttachments.first?.attachment?.text == "Rent is due on the first.")
     }
+
+    /// A pasted picture's bytes live only until it is read; the attachment
+    /// keeps its own scaled copy. A file attached from disk is left alone.
+    @Test func aPastedPictureIsDeletedOnceRead() async throws {
+        let folder = try FindTempFolder()
+        let sign = try FindSpeedTests.textImage(folder.url.appending(path: "sign.png"), lines: ["EXIT"])
+        let (chat, _) = try ChatAttachmentFlowTests.viewModel(ScriptedEngineService())
+        chat.paste(.image(try Data(contentsOf: sign), fileExtension: "png"))
+        chat.attach([sign])
+        await chat.waitForAttachments()
+
+        let pasted = try #require(chat.pendingAttachments.first?.attachment)
+        #expect(pasted.filename.hasPrefix("Pasted image "))
+        #expect(pasted.imageData != nil)
+        let leftovers = try FileManager.default.contentsOfDirectory(
+            at: URL.temporaryDirectory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("mference-pasted-") }
+            .flatMap { (try? FileManager.default.contentsOfDirectory(atPath: $0.path)) ?? [] }
+        #expect(!leftovers.contains(pasted.filename))
+        #expect(FileManager.default.fileExists(atPath: sign.path))
+    }
 }
