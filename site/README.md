@@ -1,14 +1,21 @@
 # Mference site
 
-A single-page site for Mference: pick the memory of a Mac and see which models
-that were bigger than it now run on it. No build step and no dependencies.
+The product site for Mference: a personal AI that runs on your Mac. Five static
+pages with no build step and no third-party requests (the Geist font is served
+from `assets/fonts`).
 
 | File | Role |
 | --- | --- |
-| `index.html` | The page, with its styles and behavior |
-| `data.js` | Model sizes, memory and measured decode speeds, all taken from the [README](../README.md) |
-| `flux.js` | The experts grid drawn in the hero |
-| `assets/icon.png` | The app icon, scaled to 256 px |
+| `index.html` | Home: hero, product tour, features, privacy, models, FAQ |
+| `features.html` | Chat, Find, Mail, Calendar, Notes and Scan in detail |
+| `privacy.html` | What stays on the Mac, how the app uses the network, and what Offline mode stops |
+| `models.html` | Supported models, the memory picker, and how to get a model |
+| `developers.html` | Build from source, install models, engine, server and CLI |
+| `assets/css/site.css` | All styles. Colors follow the app's `MFColor` tokens, light and dark |
+| `assets/js/site.js` | The tour, Find demo, Offline switch, memory picker and copy buttons |
+| `data.js` | Model sizes from the [README](../README.md), and the memory each needs by the app's `MemoryFit` rule |
+| `assets/shots/` | The app's design renders, copied from `docs/assets/readme/` |
+| `assets/fonts/` | Geist (OFL, see `OFL.txt`), copied from `App/Resources/Fonts/` |
 
 Preview it locally:
 
@@ -16,8 +23,10 @@ Preview it locally:
 python3 -m http.server 8080 --bind 127.0.0.1 --directory site
 ```
 
-When a number in the README changes, change the same number in `data.js`.
-A speed is shown only where the README reports it for that Mac.
+When a size in the README changes, change it in `data.js` and recompute that
+model's `need` (install x resident share + headroom, as in
+`App/Sources/MferenceAppCore/Models/MemoryFit.swift`). When a render
+in `docs/assets/readme/` changes, copy it into `assets/shots/`.
 
 ## Publishing
 

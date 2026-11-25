@@ -110,6 +110,22 @@ jobs:
           python3 Scripts/tests/test_source_release.py
           python3 Scripts/tests/test_engine_validate.py
 
+  # The Mac app is its own package (App/), so the root test job never builds
+  # it. Its release build treats warnings as errors, so the runner toolchain's
+  # diagnostics fail the job; its tests are model-free (fake engine).
+  app:
+    needs: changes
+    if: needs.changes.outputs.scope == 't0' || needs.changes.outputs.scope == 'full'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Report toolchain
+        run: swift --version
+      - name: Build the app (release, warnings are errors)
+        run: swift build -c release --package-path App --force-resolved-versions
+      - name: Run the app's model-free tests
+        run: swift test --package-path App --force-resolved-versions
+
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Ruby and Python only; on Linux it no longer waits for a macOS runner, and

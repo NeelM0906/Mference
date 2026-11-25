@@ -213,6 +213,44 @@ Swift Open License 1.0. See the
 [pinned upstream repository](https://huggingface.co/ukisai/Swift-Qwen3.8-27b/tree/1b30aaaf753fe5c1cb51ada2ea0367a53445359c)
 for attribution and terms. Model weights are not bundled with Mference.
 
+## The Mac app
+
+The app in `App/` is its own Swift package with its own
+[`Package.resolved`](App/Package.resolved). Beyond the engine graph below, it
+adds one package:
+
+| Package | Version | License in locked checkout |
+| --- | --- | --- |
+| [FluidAudio](https://github.com/FluidInference/FluidAudio) | 0.18.4 (traits `Diarizer`) | Apache-2.0 |
+
+FluidAudio's manifest also declares the prebuilt `NemoTextProcessing`
+xcframework (from `FluidInference/text-processing-rs`). With the traits above
+the app does not link it, but SwiftPM downloads it during resolution.
+
+The app bundles two third-party components, each pinned by SHA-256:
+
+- [SearXNG](https://github.com/searxng/searxng), AGPL-3.0-or-later, run
+  unmodified as a separate local process, with CPython from
+  python-build-standalone (PSF licence) and its wheels. The exact source and
+  licence texts ship inside the app; see
+  [`App/Resources/SearXNG/SOURCES.md`](App/Resources/SearXNG/SOURCES.md).
+- [Geist](https://github.com/vercel/geist-font) v1.9.2, SIL Open Font
+  License 1.1, with `OFL.txt` alongside; see
+  [`App/Resources/Fonts/SOURCES.md`](App/Resources/Fonts/SOURCES.md).
+
+Notes downloads its speech models only on request; none is bundled. The pins
+and full attribution are in
+[`App/Resources/Speech/SOURCES.md`](App/Resources/Speech/SOURCES.md):
+
+- Fluid Speech Pro (Core ML), `FluidVoice-Labs/fluid-speech-pro-coreml`,
+  CC BY 4.0. Required credit: **"Fluid Speech Pro by FluidVoice"**, built on
+  NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra (both CC BY 4.0).
+- Silero VAD (Core ML), `FluidInference/silero-vad-coreml`, MIT.
+- Speaker labels (optional): the pyannote Community-1 diarization set,
+  `FluidInference/speaker-diarization-coreml`, CC BY 4.0 (pyannote,
+  WeSpeaker, BUT Speech@FIT and Fluid Inference; modified Core ML
+  conversions), and LS-EEND, `FluidInference/ls-eend-coreml`, MIT.
+
 ## Swift package graph
 
 The following table covers the complete graph reported by

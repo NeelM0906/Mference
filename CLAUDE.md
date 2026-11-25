@@ -27,7 +27,7 @@ python3 Scripts/check_source_archive.py          # what `git archive HEAD` would
   Extra arguments pass straight through to `swift test`.
 - Production-shape cases marked `.fullTier` (`Tests/Mference/Core/Validation/TestTier.swift`)
   run only with `MFERENCE_TEST_TIER=full`: in the nightly workflow, in release
-  validation, and in the full-suite run on each merged `mference-app` tip. Pull
+  validation, and in the full-suite run on each merged `main` tip. Pull
   request CI leaves them out; nothing they assert changes.
 - Every test uses Swift Testing (`@Suite` / `@Test`), not XCTest. `--filter` is
   a regex over `Suite/test`; `bringup-check.sh` holds the per-family suite

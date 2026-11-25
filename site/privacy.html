@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy · Mference</title>
+<meta name="description" content="How Mference touches the network, and what Offline mode turns off. The model, your index and your memory are files on your Mac.">
+<meta property="og:title" content="What stays on your Mac? All of it.">
+<meta property="og:image" content="assets/shots/chat.jpg">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <nav class="wrap" aria-label="Main">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="28" height="28">Mference</a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="links" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <div class="links" id="links">
+      <a href="features.html">Features</a>
+      <a href="privacy.html" aria-current="page">Privacy</a>
+      <a href="models.html">Models</a>
+      <a href="developers.html">Developers</a>
+      <a href="https://github.com/NeelM0906/Mference">GitHub</a>
+    </div>
+    <a class="btn btn-ink nav-cta" href="developers.html#get-started">Get Mference</a>
+  </nav>
+</header>
+
+<main id="main">
+<section class="page-hero wrap">
+  <p class="kicker" style="color:var(--ok)">Privacy</p>
+  <h1 class="display">What stays on your Mac? All of it.</h1>
+  <p class="lede">There is no Mference account and no Mference server. The model, your index and your memory are files on your disk. Here is how the app touches the network, and what Offline mode turns off.</p>
+</section>
+
+<section class="wrap" style="padding-top:64px">
+  <div class="map reveal" data-offline>
+    <div class="map-head">
+      <h2 class="h3">Where your data goes</h2>
+      <div class="switch-row" style="gap:12px">
+        <span id="off-l2" style="font-size:15px;font-weight:600;color:var(--ink)">Offline mode</span>
+        <button class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="off-l2"></button>
+      </div>
+    </div>
+    <p class="small" style="margin-top:8px" data-offline-sub data-on="Offline mode is on: web search and chat and speech model downloads stop, and everything on this Mac keeps working. Apple Mail and Calendar keep syncing your accounts on their own." data-off="Offline mode is off: each outbound item runs only when you use that feature."></p>
+    <div class="map-cols">
+      <div class="zone mac">
+        <h3>On this Mac, always</h3>
+        <ul>
+          <li>The model and every answer it writes</li>
+          <li>Chats and memory</li>
+          <li>The Find index and its search model</li>
+          <li>Notes, recordings and transcripts</li>
+          <li>Scanned receipts and documents</li>
+        </ul>
+      </div>
+      <div class="zone out">
+        <h3>Leaves only when you ask</h3>
+        <ul>
+          <li data-flow="out" data-on-label="When asked"><span>Web search<small>The bundled search engine sends your query to public search engines; the pages it reads come straight from their sites</small></span><span class="tag ask">When asked</span></li>
+          <li data-flow="system"><span>Mail and calendar sync<small>Your own providers, through Apple Mail and Calendar; Offline mode does not pause it</small></span><span class="tag ask">Apple's sync</span></li>
+          <li data-flow="out" data-on-label="When asked"><span>Model downloads<small>Pinned files from Hugging Face, checked by SHA-256</small></span><span class="tag ask">When asked</span></li>
+          <li data-flow="out" data-on-label="Once"><span>Speech models<small>Downloaded when you set Notes up</small></span><span class="tag ask">Once</span></li>
+          <li data-flow="once"><span>Find's search model<small>Downloaded from Hugging Face when you turn Find on, with a media encoder when you include photos, video or audio; Offline mode does not stop it</small></span><span class="tag ask">Once</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="sec-head reveal"><p class="kicker">In practice</p><h2 class="h2">Concrete, not promised.</h2></div>
+  <div class="grid3">
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4z"/></svg></div><h3>Nothing sent without you</h3><p>Drafted replies and proposed events wait for you. A reply is not sent until you press Send; an event is not added until you add it.</p></div>
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m5 5 14 14"/></svg></div><h3>Trackers removed</h3><p>Mail is read as text with tracking pixels removed, and the message tells you how many it found.</p></div>
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg></div><h3>Memory you can read</h3><p>Everything the assistant remembers is listed in one place. Review it, and remove what you don't want kept.</p></div>
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div><h3>Private chats</h3><p>Mark a conversation private and it is never used for memory.</p></div>
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 8.5 8 10 4.5-1.5 8-5 8-10V6z"/></svg></div><h3>Asked at first use</h3><p>Calendar, Reminders, Mail, Full Disk Access, the microphone, call audio, the camera and Photos are each requested when you first open the feature that needs them, never at install.</p></div>
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg></div><h3>Open to inspection</h3><p>MIT licensed. Every line that reads your data is on GitHub, and the bundled search engine ships with its source.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2 class="h2 reveal" style="text-align:center;font-size:clamp(32px,3.8vw,48px)">Privacy questions</h2>
+  <div class="faq reveal">
+    <details open><summary>Does Mference send my chats anywhere?</summary><p>No. The model runs on your Mac and there is no Mference server to send them to. With web search on, the search query goes out through the bundled search engine to public search engines; the conversation itself does not.</p></details>
+    <details><summary>Can I use it with no network at all?</summary><p>Yes. Turn on Offline mode and web search and chat and speech model downloads stop; Find downloads its small search model only when you turn Find on. Chat, Find, Notes and Scan keep working with the models you already have. Apple Mail and Calendar sync your accounts on their own, so a reply you send or an event you add still goes out through them.</p></details>
+    <details><summary>Where are my files indexed?</summary><p>In a database on your Mac, built by a small search model that also runs on your Mac. Photos, video and audio are indexed only if you turn them on.</p></details>
+    <details><summary>How do I report a privacy problem?</summary><p>Follow the <a href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">security policy</a> to report it privately.</p></details>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="cta reveal" style="background:var(--night);color:var(--night-ink)">
+    <h2 class="h2" style="margin-top:0">Found something that leaves when it shouldn't?</h2>
+    <p class="lede" style="color:var(--night-ink2)">We'd rather hear it from you than read it in the code later.</p>
+    <div class="cta-row"><a class="btn btn-line btn-lg" href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">Report it privately</a></div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div><a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="28" height="28">Mference</a><p>A private AI assistant that runs entirely on your Mac. Apple Silicon, macOS 26 or later.</p></div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="privacy.html">Privacy</a></li><li><a href="models.html">Models</a></li></ul></div>
+    <div><h4>Developers</h4><ul><li><a href="developers.html">Engine and server</a></li><li><a href="developers.html#get-started">Build from source</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/docs/COMMUNITY_BENCHMARKS.md">Benchmark your Mac</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/NeelM0906/Mference">GitHub</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/LICENSE">MIT license</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">Security</a></li></ul></div>
+  </div>
+</footer>
+<script src="assets/js/site.js"></script>
+</body>
+</html>

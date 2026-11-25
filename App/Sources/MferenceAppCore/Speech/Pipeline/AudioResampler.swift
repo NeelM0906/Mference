@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import os
 
 /// Converts capture buffers (any rate, any channel count, any sample
 /// format) to the models' 16 kHz mono Float32 (spec 6.3). Every channel is
@@ -88,14 +89,19 @@ final class AudioResampler: @unchecked Sendable {
         guard let output = AVAudioPCMBuffer(pcmFormat: Self.outputFormat, frameCapacity: capacity) else {
             throw SpeechError.failed("cannot allocate a conversion buffer")
         }
-        var supplied = false
+        // The input block is `@Sendable`, so the hand-once flag lives in a
+        // lock rather than a captured `var` (an error under Swift 6.3).
+        let supplied = OSAllocatedUnfairLock(initialState: false)
         var error: NSError?
         let status = toModelRate.convert(to: output, error: &error) { _, inputStatus in
-            if supplied {
+            let first = supplied.withLock { done in
+                defer { done = true }
+                return !done
+            }
+            guard first else {
                 inputStatus.pointee = .noDataNow
                 return nil
             }
-            supplied = true
             inputStatus.pointee = .haveData
             return mono
         }
