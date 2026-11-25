@@ -57,8 +57,9 @@ A well-built PR is most often closed because its premise was wrong.
   against its control.
 - **The real path exercised** for loads, installs, streaming, the server, and
   file or network I/O, not only mocks.
-- **Measurements labelled honestly:** official, deviation (with the reason) or
-  void.
+- **Measurements reported honestly:** every protocol deviation named with its
+  reason. A run whose conditions broke mid-run (for example, a switch to
+  battery) is discarded, not reported.
 - **Small, readable diffs.** A declared refactor goes in its own PR.
 
 ## 4. Rejected even when well built
@@ -116,12 +117,14 @@ Pick the lowest rung that does the job:
 Run every gate your diff needs **on the final commit, with a clean tree**.
 Any later commit, amend or rebase voids the results. Run them again.
 
-Which gates apply follows the CI scope, which
-`git diff --name-only origin/main...HEAD | .github/scripts/ci-scope.sh` prints.
-A change is **docs-only** when every path is Markdown (or an issue template)
-that nothing CI runs reads. Any other change is a **code** change. That includes
-`App/`, because the app links the engine package, and `bringup-check.sh`,
-`Scripts/test.sh` and `.github/`.
+Which gates apply follows the CI scope. From the repository root,
+`git diff --name-only --no-renames origin/main...HEAD | bash .github/scripts/ci-scope.sh`
+prints it, the same way CI computes it. A change is **docs-only** when every
+path is Markdown or an issue template that nothing CI runs reads. Markdown
+under `.github/` and `App/` counts too. Every other path makes it a **code**
+change. That includes Swift and scripts under `App/` (the app links the engine
+package), `bringup-check.sh`, `Scripts/test.sh`, and the workflows and scripts
+under `.github/`.
 
 | Applies to | Gate | Command |
 |---|---|---|
@@ -153,8 +156,9 @@ When a change can alter model output, speed, memory use or an install:
 - run one model process at a time, never next to the Mac app with a model
   loaded;
 - for speed, follow [the benchmark protocol](docs/COMMUNITY_BENCHMARKS.md):
-  release build, AC power, fresh processes, no experimental controls. Compare
-  A and B in the same session;
+  release build, AC power, fresh processes, no experimental controls. As a
+  maintainer practice beyond the protocol, run an A/B comparison in one
+  session;
 - for an exact change, show byte-identical output against the control. For an
   approximate one, show quality on the criteria in section 1.
 
@@ -178,9 +182,9 @@ engine and fixtures.
 For a docs-only PR or a benchmark report, one review round is enough. If that
 round finds a real issue, the fixed commit still gets a check.
 
-After the PR opens, maintainers review it, and automated review comments may
-also appear. Handle all of them the same way. New commits need the gates and a
-review round again.
+After the PR opens, maintainers review it. Handle their comments, and any
+automated review comments if there are some, the same way. New commits need the
+gates and a review round again.
 
 ## 10. The description
 
