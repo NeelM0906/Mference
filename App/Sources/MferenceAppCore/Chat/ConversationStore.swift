@@ -74,6 +74,10 @@ public final class ConversationStore {
         conversation.updatedAt = now
         if role == .user, conversation.title == Conversation.defaultTitle {
             conversation.title = Self.title(from: content)
+            // Files sent without a message: the first file names the chat.
+            if conversation.title == Conversation.defaultTitle, let file = message.attachments.first {
+                conversation.title = Self.title(from: file.filename)
+            }
         }
         try context.save()
         return message
@@ -92,11 +96,27 @@ public final class ConversationStore {
     /// out: their page text would grow the history without bound, and their
     /// source numbers restart with each answer. Earlier answers also lose
     /// their "[n]" markers for the same reason. The answer being written keeps
-    /// all of its tool turns.
-    public func turns(for conversation: Conversation) -> [ChatTurn] {
+    /// all of its tool turns. A user message's attachments are written into
+    /// its turn (`ChatAttachment.modelContent`): the newest message's files get
+    /// the model's full attachment budget, earlier ones a quarter of it.
+    /// With `seesImages` (Quick or Deep with image understanding), a user
+    /// message's pictures also go along as pixels, in every turn, so prompt
+    /// reuse holds across the chat; their text stays in the turn too.
+    public func turns(for conversation: Conversation, seesImages: Bool = false) -> [ChatTurn] {
         let ordered = conversation.orderedMessages
         let lastUser = ordered.lastIndex { $0.role == .user } ?? -1
+        let model = conversation.model
         return ordered.enumerated().compactMap { offset, message in
+            if message.role == .user, message.attachmentsJSON != nil {
+                var turn = message.turn
+                let budget = offset == lastUser ? ChatAttachment.characterBudget(for: model)
+                                                : ChatAttachment.earlierCharacterBudget(for: model)
+                let attachments = message.attachments
+                turn.content = ChatAttachment.modelContent(message: message.content, attachments: attachments,
+                                                           budget: budget, seesImages: seesImages)
+                if seesImages { turn.images = ChatAttachment.images(of: attachments) }
+                return turn
+            }
             guard offset < lastUser else { return message.turn }
             switch message.role {
             case .tool:

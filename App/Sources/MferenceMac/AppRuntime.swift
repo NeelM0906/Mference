@@ -40,7 +40,10 @@ final class AppRuntime {
                              store: ConversationStore(container: services.modelContainer),
                              tools: web,
                              files: services.find,
-                             defaultModel: { [settings = services.settings] in settings.defaultModel })
+                             defaultModel: { [settings = services.settings] in settings.defaultModel },
+                             imageUnderstanding: services.imageDownloads.map {
+                                 ImageUnderstandingDownloads(settings: services.settings, downloads: $0)
+                             })
         screenModels = ScreenModels.live(services: services)
         voice = VoiceModels.live(services: services)
         // The voice screens talk to N4's meeting session and file queue, and

@@ -104,3 +104,31 @@ requirement. bundle.sh never creates or trusts a certificate: the maintainer
 makes that one in Keychain Access. `bundle.sh --copy-to DIR` also publishes
 the app to `DIR/Mference.app` with `DIR/COMMIT` (commit, dirty flag, time,
 identity), and refuses while a process runs from it.
+
+## Engine: image understanding (Phase 2, 2026-11-24)
+
+`EngineServicing` gains what lets Quick and Deep see pictures:
+
+- `ChatTurn.images: [ChatImage]` (encoded picture bytes) on user turns.
+  `EngineService` decodes them for a model whose engine traits say
+  `supportsVision` (a GGUF model with its vision projector paired) and drops
+  them for every other model. `ConversationStore.turns(for:seesImages:)` sends
+  a message's pictures in every later turn too, so prompt reuse holds; the
+  text read from them stays in the turn either way.
+- `AppModel.supportsImageUnderstanding` (Quick, Deep) and
+  `ModelOption.seesImages` / `imageUnderstandingBytes` (the add-on is installed
+  and paired).
+- The add-on's pins are `DownloadSource.imageUnderstanding`; it downloads
+  through its own `DownloadManager` (`AppServices.imageDownloads`) into
+  `~/llm-models/gguf`, where the engine pairs it with the model. Quick's is
+  saved as `Qwen3.5-4B-mmproj-F16.gguf`. The Model Library shows it as
+  "Image understanding" under Quick and Deep (download after approval,
+  remove), and the chat offers it once, on the first picture attached to
+  Quick or Deep without it (`AppSettings.hasOfferedImageUnderstanding`).
+  Until it is installed, pictures reach the model as their OCR text.
+
+Apple's on-device model (2026-11-24): where FoundationModels reports the
+`.vision` capability (macOS 27), `AppleModelInfo.seesImages` makes the Apple
+row `seesImages`, and `FoundationChatModel` sends a user turn's pictures as
+image attachments ahead of its text, in history turns too. Nothing to
+download, so the chat never offers image understanding for it.

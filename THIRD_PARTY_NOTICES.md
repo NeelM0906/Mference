@@ -149,6 +149,18 @@ checked against the Hugging Face LFS object ids (SHA-256) on 2026-11-18:
   model card declares `license: apache-2.0`, a quantization of Alibaba's
   [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
 
+Each has an optional vision projector, downloaded only when the person adds
+image understanding, read by llama.cpp's `mtmd` from the same revision of the
+same repository and checked the same way on 2026-11-24:
+
+- Quick's: `mmproj-F16.gguf`, 672,423,616 bytes, SHA-256
+  `cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864`
+  (the app saves it as `Qwen3.5-4B-mmproj-F16.gguf`), the vision tower of
+  Qwen3.5-4B under the same licence.
+- Deep's: `mmproj-Qwen3.8-27B-BF16.gguf`, 931,146,528 bytes, SHA-256
+  `13cb7bebccbd04afc8f4090cb949ecf8937cdf7377c5799b1a0c594e7c0d3e16`, the
+  vision tower of Qwen3.8-27B under the same licence.
+
 The Mac app's Find (content search) downloads one more GGUF when the person
 turns Find on, and a second when they turn on Settings › Find › Photos, video
 and audio, both checked the same way on 2026-11-19:

@@ -130,6 +130,12 @@ public struct EngineGGUFMetadata: Sendable, Hashable {
     /// Tensors of the next-token-prediction (MTP / nextn) head. Non-zero means
     /// the file can drive llama.cpp's MTP speculative decoding.
     public let nextNTensorCount: Int
+    /// `<architecture>.embedding_length`, when present: the width a vision
+    /// projector must project to.
+    public let embeddingLength: Int?
+    /// Set when the file is a multimodal projector (`general.type` `mmproj`,
+    /// architecture `clip`) rather than a model.
+    public let projector: EngineGGUFProjector?
 
     public var hasMTP: Bool { nextNTensorCount > 0 }
 
@@ -137,12 +143,44 @@ public struct EngineGGUFMetadata: Sendable, Hashable {
                 name: String? = nil,
                 contextLength: Int?,
                 tensorCount: Int,
-                nextNTensorCount: Int) {
+                nextNTensorCount: Int,
+                embeddingLength: Int? = nil,
+                projector: EngineGGUFProjector? = nil) {
         self.architecture = architecture
         self.name = name
         self.contextLength = contextLength
         self.tensorCount = tensorCount
         self.nextNTensorCount = nextNTensorCount
+        self.embeddingLength = embeddingLength
+        self.projector = projector
+    }
+}
+
+/// The header facts of a multimodal projector (`mmproj`) GGUF, which
+/// llama.cpp's `mtmd` loads beside a model to give it vision.
+public struct EngineGGUFProjector: Sendable, Hashable {
+    /// `clip.projector_type`, for example `qwen3vl_merger`.
+    public let projectorType: String?
+    /// `clip.has_vision_encoder`.
+    public let hasVisionEncoder: Bool
+    /// `clip.vision.projection_dim`: the model embedding width it feeds.
+    public let projectionDimension: Int?
+
+    public init(projectorType: String?, hasVisionEncoder: Bool, projectionDimension: Int?) {
+        self.projectorType = projectorType
+        self.hasVisionEncoder = hasVisionEncoder
+        self.projectionDimension = projectionDimension
+    }
+}
+
+/// A vision projector paired with a GGUF model: the `mmproj` file next to it.
+public struct EngineVisionProjector: Sendable, Hashable {
+    public let location: URL
+    public let sizeBytes: UInt64
+
+    public init(location: URL, sizeBytes: UInt64) {
+        self.location = location
+        self.sizeBytes = sizeBytes
     }
 }
 
@@ -177,6 +215,9 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
     /// context, or nil for none (`ModelFamily.memoryContextCap`: Inkling 2 on
     /// hosts under 48 GB). Any request, `max` included, is lowered to it.
     public let hostContextCap: Int?
+    /// The vision projector discovery paired with a GGUF model, or nil. With
+    /// one, the loaded model accepts images (`EngineModelTraits.supportsVision`).
+    public let visionProjector: EngineVisionProjector?
 
     /// The context a GGUF model runs with when none is requested (spec
     /// section 3); a backend may still lower it where memory requires.
@@ -214,7 +255,8 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
                 sizeBytes: UInt64,
                 contextLength: Int,
                 product: EngineProductSlot?,
-                hostContextCap: Int? = nil) {
+                hostContextCap: Int? = nil,
+                visionProjector: EngineVisionProjector? = nil) {
         self.id = id
         self.displayName = displayName
         self.engine = engine
@@ -224,6 +266,15 @@ public struct EngineModelDescriptor: Sendable, Hashable, Identifiable {
         self.contextLength = contextLength
         self.product = product
         self.hostContextCap = hostContextCap
+        self.visionProjector = visionProjector
+    }
+
+    /// The same model with `projector` paired, or unpaired with nil.
+    public func pairing(_ projector: EngineVisionProjector?) -> EngineModelDescriptor {
+        EngineModelDescriptor(id: id, displayName: displayName, engine: engine, format: format,
+                              location: location, sizeBytes: sizeBytes, contextLength: contextLength,
+                              product: product, hostContextCap: hostContextCap,
+                              visionProjector: projector)
     }
 }
 
@@ -310,6 +361,9 @@ public struct EngineModelTraits: Sendable {
     public var reusesPromptPrefixes: Bool
     /// Whether generation uses draft decoding (MTP) right now.
     public var usesDraftDecoding: Bool
+    /// Whether requests may carry images (`EngineRequest.media`): a GGUF
+    /// model loaded with a vision projector.
+    public var supportsVision: Bool
 
     public init(chatDialect: ChatDialect,
                 generationDefaults: GenerationConfig = .defaults,
@@ -317,7 +371,8 @@ public struct EngineModelTraits: Sendable {
                 acceptsReasoningEffort: Bool = false,
                 supportsQwenReasoningEffort: Bool = false,
                 reusesPromptPrefixes: Bool = false,
-                usesDraftDecoding: Bool = false) {
+                usesDraftDecoding: Bool = false,
+                supportsVision: Bool = false) {
         self.chatDialect = chatDialect
         self.generationDefaults = generationDefaults
         self.maxContext = maxContext
@@ -325,6 +380,7 @@ public struct EngineModelTraits: Sendable {
         self.supportsQwenReasoningEffort = supportsQwenReasoningEffort
         self.reusesPromptPrefixes = reusesPromptPrefixes
         self.usesDraftDecoding = usesDraftDecoding
+        self.supportsVision = supportsVision
     }
 }
 
@@ -344,6 +400,11 @@ public struct EngineRequest: Sendable {
     /// Inkling 2's own effort names beyond the four `reasoningEffort` has
     /// (`minimal`, `high`, `max`); used by that dialect only.
     public var inkling2Effort: MFTokenizer.Inkling2Effort?
+    /// Images by the index in `messages` of the user message they belong to,
+    /// in order; they come before that message's text in the prompt, as
+    /// llama.cpp's server places an `image_url` part ahead of the text.
+    /// Only a model with `traits.supportsVision` accepts any.
+    public var media: [Int: [EngineMedia]]
 
     public init(messages: [MFTokenizer.Message],
                 tools: [MFTokenizer.FunctionDefinition] = [],
@@ -351,7 +412,8 @@ public struct EngineRequest: Sendable {
                 maximumCompletionTokens: Int,
                 reasoningEffort: QwenReasoningEffort? = nil,
                 preserveThinking: Bool = false,
-                inkling2Effort: MFTokenizer.Inkling2Effort? = nil) {
+                inkling2Effort: MFTokenizer.Inkling2Effort? = nil,
+                media: [Int: [EngineMedia]] = [:]) {
         self.messages = messages
         self.tools = tools
         self.generationConfig = generationConfig
@@ -359,6 +421,7 @@ public struct EngineRequest: Sendable {
         self.reasoningEffort = reasoningEffort
         self.preserveThinking = preserveThinking
         self.inkling2Effort = inkling2Effort
+        self.media = media
     }
 
     /// Whether the prompt needs the tool-aware template and decoder: tools are
@@ -375,7 +438,8 @@ public struct EngineRequest: Sendable {
 /// `EngineModel.generate` on the same model.
 public struct EnginePreparedPrompt: Sendable {
     public let request: EngineRequest
-    /// The rendered prompt in the model's own token ids.
+    /// The rendered prompt in the model's own token ids; each vision token of
+    /// an image is `EngineMedia.placeholderToken`.
     public let promptTokens: [Int32]
     public let needsToolTemplate: Bool
 

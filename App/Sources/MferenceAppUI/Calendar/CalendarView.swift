@@ -8,24 +8,39 @@ import SwiftUI
 /// proposals drawn dashed with one-click Add, and the to-do panel.
 public struct CalendarView: View {
     @Environment(CalendarWeekModel.self) private var environmentModel: CalendarWeekModel?
+    @Environment(WeekAskModel.self) private var environmentWeekAsk: WeekAskModel?
     private let injected: CalendarWeekModel?
+    private let injectedWeekAsk: WeekAskModel?
     private let loadsOnAppear: Bool
+    /// Continue in Chat; nil hides the button.
+    private let continueInChat: ((WeekAskModel) -> Void)?
 
-    /// The shell's slot: the model comes from the environment.
-    public init() {
+    /// The shell's slot: the models come from the environment.
+    public init(continueInChat: ((WeekAskModel) -> Void)? = nil) {
         injected = nil
+        injectedWeekAsk = nil
         loadsOnAppear = true
+        self.continueInChat = continueInChat
     }
 
     /// Snapshots and previews; `loadsOnAppear` false keeps fixture state.
-    public init(model: CalendarWeekModel, loadsOnAppear: Bool = true) {
+    public init(model: CalendarWeekModel, weekAsk: WeekAskModel? = nil, loadsOnAppear: Bool = true) {
         injected = model
+        injectedWeekAsk = weekAsk
         self.loadsOnAppear = loadsOnAppear
+        continueInChat = nil
+    }
+
+    private var weekAsk: WeekAskModel? { injectedWeekAsk ?? environmentWeekAsk }
+
+    private var openChat: (() -> Void)? {
+        guard let weekAsk, let continueInChat else { return nil }
+        return { continueInChat(weekAsk) }
     }
 
     public var body: some View {
         if let model = injected ?? environmentModel {
-            CalendarContent(model: model)
+            CalendarContent(model: model, weekAsk: weekAsk, continueInChat: openChat)
                 .task { if loadsOnAppear { await model.load() } }
         } else {
             AppleEmptyState(systemImage: "calendar", title: "Calendar",
@@ -36,6 +51,10 @@ public struct CalendarView: View {
 
 struct CalendarContent: View {
     @Bindable var model: CalendarWeekModel
+    /// Ask about your week; nil before Apple services exist.
+    var weekAsk: WeekAskModel?
+    /// Opens a Private chat seeded with the answers; nil hides the button.
+    var continueInChat: (() -> Void)?
     /// The to-do panel per view, once the person toggled it; by default it
     /// shows in Day and Week and hides in Month and Year.
     @State private var todoPanel: [CalendarViewMode: Bool] = [:]
@@ -49,6 +68,19 @@ struct CalendarContent: View {
                 switch model.access {
                 case .granted:
                     period
+                        // Month: the answer card floats over the grid, so the
+                        // grid keeps its size.
+                        .overlay(alignment: .bottomLeading) {
+                            if model.mode == .month, !showsTodos, let weekAsk, !weekAsk.isIdle {
+                                WeekAskCard(ask: weekAsk, continueInChat: continueInChat)
+                                    .frame(maxWidth: WeekAskMetrics.monthWidth, alignment: .leading)
+                                    .padding(MFSpacing.m)
+                            }
+                        }
+                    if model.mode == .month, !showsTodos, let weekAsk {
+                        WeekAskPanel(ask: weekAsk, calendar: model, compact: true, continueInChat: continueInChat)
+                            .frame(maxWidth: WeekAskMetrics.monthWidth, alignment: .leading)
+                    }
                     if model.mode == .day || model.mode == .week, let proposal = model.proposalsThisWeek.first {
                         ProposalCard(proposal: proposal, model: model)
                     }
@@ -79,7 +111,7 @@ struct CalendarContent: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if showsTodos {
                 Rectangle().fill(MFColor.hairline).frame(width: 1)
-                TodoList(model: model)
+                TodoList(model: model, weekAsk: model.mode == .year ? nil : weekAsk, continueInChat: continueInChat)
                     .frame(width: 315)
                     .background(MFColor.canvas)
             }
@@ -94,7 +126,17 @@ struct CalendarContent: View {
         // Access granted, or events or reminders edited in Calendar or
         // Reminders: show them now, not after a relaunch.
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
-            Task { await model.calendarChanged() }
+            Task {
+                await model.calendarChanged()
+                await weekAsk?.calendarChanged()
+            }
+        }
+        .onChange(of: model.todos) { Task { await weekAsk?.calendarChanged() } }
+        // Calendar changes made while another section was showing reached no
+        // one: check the answers kept from before.
+        .task {
+            weekAsk?.scopeChanged()
+            await weekAsk?.calendarChanged()
         }
         .shellToolbar(id: "calendar.new-event") { NewEventToolbarButton(model: model) }
     }
@@ -102,7 +144,7 @@ struct CalendarContent: View {
     @ViewBuilder
     private var period: some View {
         switch model.mode {
-        case .day, .week: TimeGrid(model: model)
+        case .day, .week: TimeGrid(model: model, ask: weekAsk)
         case .month: MonthGrid(model: model)
         case .year: YearGrid(model: model)
         }
@@ -178,6 +220,8 @@ struct ModeSwitch: View {
 /// morning (or an earlier event) when the period changes.
 struct TimeGrid: View {
     var model: CalendarWeekModel
+    /// Draws the latest answer's open blocks and found events.
+    var ask: WeekAskModel?
     @Environment(\.mfRendersStatically) private var rendersStatically
     @State private var position = ScrollPosition(edge: .top)
     /// A new event being made by double-clicking an empty slot.
@@ -288,9 +332,25 @@ struct TimeGrid: View {
                 EventBlockButton(block: block, model: model)
                     .frame(width: max(laneWidth - MFSpacing.xxs, 4),
                            height: max(CGFloat(block.height) * hourHeight - 2, 14))
+                    .overlay {
+                        if ringed(block) {
+                            RoundedRectangle(cornerRadius: MFRadius.xs).strokeBorder(MFColor.ink, lineWidth: 2)
+                        }
+                    }
+                    .opacity(faded(block) ? 0.45 : 1)
                     .offset(x: gutter + CGFloat(block.day) * columnWidth + MFSpacing.xs
                                 + CGFloat(block.lane) * laneWidth,
                             y: CGFloat(block.top) * hourHeight + 1)
+            }
+            ForEach(ask?.highlightedOpenTimes ?? [], id: \.self) { interval in
+                if let column = model.days.firstIndex(where: { model.calendar.isDate($0, inSameDayAs: interval.start) }) {
+                    OpenTimeBlock(label: "Open · " + (ask?.text.duration(minutes: Int(interval.duration / 60)) ?? ""))
+                        .frame(width: max(columnWidth - MFSpacing.s, 4),
+                               height: max(CGFloat(interval.duration / 3_600) * hourHeight - 2, 14))
+                        .offset(x: gutter + CGFloat(column) * columnWidth + MFSpacing.xs,
+                                y: hours(interval.start) * hourHeight + 1)
+                        .allowsHitTesting(false)
+                }
             }
             nowLine(width: width, columnWidth: columnWidth)
             if let draftStart, let column = model.days.firstIndex(where: { model.layout.calendar.isDate($0, inSameDayAs: draftStart) }) {
@@ -342,6 +402,19 @@ struct TimeGrid: View {
         guard model.days.indices.contains(column) else { return }
         draftStart = model.layout.calendar.date(byAdding: .minute, value: halfHours * 30, to: model.days[column])
     }
+
+    /// An answer is pointing at some events or open time: the rest fade.
+    private var highlighting: Bool {
+        guard let ask else { return false }
+        return !ask.highlightedOpenTimes.isEmpty || !ask.highlightedEventIDs.isEmpty
+    }
+
+    private func ringed(_ block: WeekBlock) -> Bool {
+        guard let ask, case .event(let event) = block.kind else { return false }
+        return ask.highlightedEventIDs.contains(event.id)
+    }
+
+    private func faded(_ block: WeekBlock) -> Bool { highlighting && !ringed(block) }
 
     private func dayLabel(_ day: Date) -> some View {
         let calendar = model.layout.calendar
@@ -1004,5 +1077,24 @@ struct EventEditForm: View {
         }
         .padding(MFSpacing.l)
         .frame(width: 340)
+    }
+}
+
+/// An open block an answer found, drawn dashed over the empty grid.
+struct OpenTimeBlock: View {
+    var label: String
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: MFRadius.xs)
+            .fill(MFColor.successFill)
+            .overlay(RoundedRectangle(cornerRadius: MFRadius.xs)
+                .strokeBorder(MFColor.success, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
+            .overlay(alignment: .topLeading) {
+                Text(label)
+                    .font(MFFont.caption.weight(.semibold))
+                    .foregroundStyle(MFColor.success)
+                    .padding(MFSpacing.xs)
+            }
+            .accessibilityElement(children: .combine)
     }
 }

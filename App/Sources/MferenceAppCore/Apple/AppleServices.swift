@@ -11,14 +11,19 @@ public final class AppleServices {
     public let assistant: AppleModelService
     public let scan: ScanSession
     public let calendar: CalendarWeekModel
+    /// Ask about your week, over `calendar`.
+    public let weekAsk: WeekAskModel
     public let mail: MailInboxModel
     public let connections: AppleConnections
 
+    /// `weekAsk` defaults to one with no model: chips answer, typed
+    /// questions say no model can.
     public init(assistant: AppleModelService, scan: ScanSession, calendar: CalendarWeekModel, mail: MailInboxModel,
-                connections: AppleConnections) {
+                connections: AppleConnections, weekAsk: WeekAskModel? = nil) {
         self.assistant = assistant
         self.scan = scan
         self.calendar = calendar
+        self.weekAsk = weekAsk ?? WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: .none))
         self.mail = mail
         self.connections = connections
     }
@@ -42,7 +47,10 @@ public final class AppleServices {
                              scan: ScanSession(scanner: VisionScanner(), assistant: assistant,
                                                context: container.mainContext),
                              calendar: calendar, mail: mail,
-                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
+                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
+                             weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
+                                 picker: WeekModelPicker(engine: engine),
+                                 review: { WeekAnswerReview.current() }, log: .live())))
     }
 
     /// Previews, snapshots and tests: in-memory calendar, mail and planner, a
@@ -69,7 +77,8 @@ public final class AppleServices {
                                                context: container.mainContext,
                                                imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans")),
                              calendar: calendar, mail: mail,
-                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
+                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
+                             weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: WeekModelPicker(engine: engine))))
     }
 }
 

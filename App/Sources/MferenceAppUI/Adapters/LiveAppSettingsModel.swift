@@ -217,7 +217,7 @@ extension ScreenModels {
     /// L6).
     public static func live(services: AppServices) -> ScreenModels {
         let library = ModelLibrary(engine: services.engine, downloads: services.downloads,
-                                   settings: services.settings)
+                                   imageDownloads: services.imageDownloads, settings: services.settings)
         Task { await library.run() }
         let connections: any AppleConnectionsProviding = services.apple?.connections
             ?? BrokerConnections(broker: services.permissions)

@@ -65,11 +65,17 @@ let package = Package(
             name: "MferenceAppUI",
             dependencies: ["MferenceAppCore", "MferenceDesign"],
             swiftSettings: uiSwiftSettings),
+        // Ask about your week's checkpoint weeks, questions and answer key:
+        // linked only by the smoke run and the tests, never by the app.
+        .target(
+            name: "MferenceWeekAskFixtures",
+            dependencies: ["MferenceAppCore"],
+            swiftSettings: appSwiftSettings),
         // End-to-end smoke, one request per model through EngineService.live()
         // (U2). Built release and run only under the machine lock.
         .executableTarget(
             name: "MferenceSmoke",
-            dependencies: ["MferenceAppCore"],
+            dependencies: ["MferenceAppCore", "MferenceWeekAskFixtures"],
             swiftSettings: appSwiftSettings),
         .executableTarget(
             name: "MferenceMac",
@@ -79,6 +85,7 @@ let package = Package(
             name: "MferenceAppCoreTests",
             dependencies: [
                 "MferenceAppCore",
+                "MferenceWeekAskFixtures",
                 .product(name: "MferenceEngine", package: "Mference"),
                 .product(name: "Mference", package: "Mference"),
             ],

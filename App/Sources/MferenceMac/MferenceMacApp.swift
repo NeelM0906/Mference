@@ -120,6 +120,11 @@ private struct MenuBarContent: View {
                             shell.show(.chat)
                             showWindow()
                         },
+                        newPrivateChat: {
+                            runtime.chat.newChat(isPrivate: true)
+                            shell.show(.chat)
+                            showWindow()
+                        },
                         selectModel: { runtime.chat.selectModel($0) },
                         openSettings: {
                             shell.show(.settings)
