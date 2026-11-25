@@ -116,6 +116,10 @@ public struct QuantBitPolicy: Sendable, Equatable {
             // `embed_tokens` and `lm_head` is INT4 g64, and a dense llama has
             // no router to keep wider.
             return .uniformInt4
+        case .minicpm5_1b:
+            // The vendor's MLX conversion of the 1B (`openbmb/MiniCPM5-1B-MLX`
+            // rev `c973e24a`) carries the same base block and no overrides.
+            return .uniformInt4
         case .maple:
             // Maple has no original-repo installer entry, so no conversion
             // has been examined and no table can be honest. Uniform

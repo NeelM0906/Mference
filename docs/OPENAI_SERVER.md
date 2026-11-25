@@ -235,7 +235,7 @@ product models among them through the [engine](ENGINE.md) (`EngineCatalog` and
 - `--catalog product` (the default) lists only the product models, under their
   stable identifiers: `qwen3.5-4b` (Quick) and `qwen3.8-27b` (Deep) through
   llama.cpp, and `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64`,
-  `maple-preview-2bit-mlx` and `inkling-2-mini-ud-q4_k_xl` (on Macs with
+  `minicpm5-1b-mlx-4bit`, `maple-preview-2bit-mlx` and `inkling-2-mini-ud-q4_k_xl` (on Macs with
   32 GB or more) through the native runtime. A request for any other
   runnable install gets `400 model_not_runnable`. `--catalog all` is a
   developer switch that lists every runnable install; extra installs of one
@@ -478,7 +478,7 @@ set the server uses 4096) — or the reasoning budget swallows the visible
 answer and the request finishes with `finish_reason` `"length"`.
 
 `--max-context` takes any length up to the model's native context (default
-16K): 262,144 tokens for Qwen 3.6 and Qwen 3.8; 131,072 for MiniCPM5; 128,000
+16K): 262,144 tokens for Qwen 3.6 and Qwen 3.8; 131,072 for both MiniCPM5 sizes; 128,000
 for Maple. `--max-context max` gives every model its own native context, which
 suits a library of different models; families that do not grow their KV (all
 but Qwen 3.6) then reserve that whole context when they load. A model whose native

@@ -43,6 +43,7 @@ public enum EngineCatalogDiscovery {
         switch slot {
         case .qwen36: "qwen36"
         case .minicpm5: "minicpm5"
+        case .minicpm5_1b: "minicpm5-1b"
         case .maple: "maple"
         case .inkling2Mini: "inkling2mini"
         case .quick, .deep, .bonsai27b: nil

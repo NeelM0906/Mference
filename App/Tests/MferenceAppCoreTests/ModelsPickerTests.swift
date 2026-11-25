@@ -9,7 +9,7 @@ import Testing
         let picker = ModelPickerModel(engine: engine, selected: .quick)
         await picker.refresh()
         #expect(picker.recommended.map(\.model) == [.quick, .deep])
-        #expect(picker.alsoOnThisMac.map(\.model) == [.inkling2Mini, .qwen36, .minicpm5, .maple])
+        #expect(picker.alsoOnThisMac.map(\.model) == [.inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple])
         #expect(picker.row(for: .quick)?.statusText == "Ready")
         #expect(picker.row(for: .quick)?.isSelected == true)
         #expect(picker.row(for: .deep)?.statusText == "Not installed")

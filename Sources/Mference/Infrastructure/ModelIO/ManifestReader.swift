@@ -355,7 +355,7 @@ public enum ManifestReader {
             }
             return
         }
-        if expected.family == .minicpm5 {
+        if expected.family.isMiniCPM5 {
             // Dense, like Qwen 3.8: INT4 affine group-64 embedding and
             // attention slots (the MLP shares the attention slot), and the
             // router / shared-expert / routed-expert slots marked absent.

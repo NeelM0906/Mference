@@ -9,6 +9,7 @@ import Testing
             .qwen36: 262_144,
             .qwen38: 262_144,
             .minicpm5: 131_072,
+            .minicpm5_1b: 131_072,
             .maple: 128_000,
             // Launch cap; the checkpoint's own is 1,048,576.
             .inkling2Loop: 262_144,

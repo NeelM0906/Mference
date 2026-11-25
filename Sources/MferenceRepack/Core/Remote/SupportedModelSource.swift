@@ -228,6 +228,28 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 1_430_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// MiniCPM5-1B from the vendor's own MLX INT4 group-64 affine conversion,
+    /// through the pre-quantized path: every quantized byte is copied
+    /// unchanged. It is the `minicpm5` graph at 24 layers of hidden 1536, and
+    /// installs as its own family (`minicpm5_1b`) so it keeps its own baseline
+    /// and model ID next to the 2B.
+    ///
+    /// Pins recorded 2026-11-24 from the Hub at commit `c973e24a`. Download
+    /// bytes are the single `model.safetensors` (608,026,621 B); the index's
+    /// `total_size` is 607,964,160 B of tensor data, the resident set the
+    /// install writes, plus ~10 MB of tokenizer sidecars, manifest and receipt.
+    public static let minicpm51B = SupportedModelSource(
+        name: "minicpm5-1b",
+        displayName: "MiniCPM5-1B MLX 4-bit",
+        repoID: "openbmb/MiniCPM5-1B-MLX",
+        revision: "c973e24a2c77861038301f4e27d1b34a5931fc91",
+        sourceIndexSHA256:
+            "b9f00d16700ba0dd01bbd72d270080757355ddf41fbe678620a93dc39d5c8639",
+        modelID: "minicpm5-1b-mlx-4bit",
+        approximateDownloadBytes: 608_026_621,
+        installedBytes: 620_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Thinking Machines Inkling 2 Mini as Unsloth's UD-Q4_K_XL GGUF, the
     /// quant Mference ships: the vendor's own NVFP4 experts in layers 0-19,
     /// Q8_0 for the other experts and the dense weights, F32 for the router,
@@ -266,7 +288,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     public static let `default` = qwen36
 
     public static let all: [SupportedModelSource] = [
-        qwen36, qwen36Original, qwen38, maple, minicpm5, minicpm5MLX, inkling2Mini,
+        qwen36, qwen36Original, qwen38, maple, minicpm5, minicpm5MLX, minicpm51B,
+        inkling2Mini,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

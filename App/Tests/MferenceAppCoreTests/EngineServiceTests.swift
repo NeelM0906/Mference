@@ -36,6 +36,17 @@ import Testing
         #expect(AppModel.engineModels.count == EngineProductSlot.allCases.count)
     }
 
+    /// The two MiniCPM5 sizes are separate models the picker tells apart.
+    @Test func bothMiniCPM5SizesAreOfferedApart() {
+        #expect(EngineProductSlot(modelID: AppModel.minicpm5_1b.modelID) == .minicpm5_1b)
+        #expect(EngineProductSlot(modelID: AppModel.minicpm5.modelID) == .minicpm5)
+        #expect(AppModel.minicpm5_1b.group == .alsoOnThisMac)
+        #expect(AppModel.minicpm5_1b.engineLabel == "Mference")
+        #expect(AppModel.minicpm5_1b.supportsThinking == AppModel.minicpm5.supportsThinking)
+        #expect(AppModel.minicpm5_1b.shortName != AppModel.minicpm5.shortName)
+        #expect(AppModel.minicpm5_1b.detail != AppModel.minicpm5.detail)
+    }
+
     @Test func pickerRowsShowInstalledAndMissingModels() async {
         let (service, _) = Self.service(installed: [.quick, .maple])
         let rows = await service.models()

@@ -12,9 +12,17 @@ enum RepackModelFamily: String, Sendable, Equatable {
     /// MLX INT4 conversion (pre-quantized path). Bare `model.` prefix and a
     /// top-level `lm_head.weight` on both.
     case minicpm5 = "minicpm5"
+    /// MiniCPM5-1B: the `minicpm5` graph at 24 layers of hidden 1536,
+    /// installed from the vendor's MLX INT4 conversion (pre-quantized path).
+    /// Chosen by shape in `loadMiniCPM5`: a llama `config.json` does not
+    /// name its size.
+    case minicpm5_1b = "minicpm5_1b"
     /// Inkling 2 Mini, copied byte for byte from Unsloth's UD-Q4_K_XL GGUF
     /// (`Inkling2GGUFPlanner`); never planned from safetensors.
     case inkling2Loop = "inkling2Loop"
+
+    /// Both MiniCPM5 sizes: one tensor contract, one planner path.
+    var isMiniCPM5: Bool { self == .minicpm5 || self == .minicpm5_1b }
 }
 
 /// Inkling 2's axes, mirrored from the runtime's `ArchConfig`: the
@@ -730,7 +738,9 @@ struct ArchInfo: Sendable, Equatable {
             attentionKEqV: false,
             fullAttentionLayerMask: [UInt8](repeating: 1, count: numLayers),
             hiddenActivation: act,
-            family: .minicpm5,
+            // The 1B's production shape is its own family; the 2B's shape
+            // and every toy config stay `minicpm5`.
+            family: Self.miniCPM5Family(hiddenSize: hidden, numLayers: numLayers),
             attnOutputGate: false,
             // `LlamaAttention.scaling = head_dim ** -0.5`; `pow` reproduces it
             // bit-exactly (1 / sqrt is one ulp off, and the manifest check is
@@ -754,16 +764,27 @@ struct ArchInfo: Sendable, Equatable {
         return arch
     }
 
-    /// Production MiniCPM5-2B baseline (mirrors the runtime's
-    /// `ArchConfig.miniCPM5_2B`). A config that matches the production shape
-    /// (hidden 2048, 42 layers) must agree on every field; toy configs are
-    /// exempt.
+    /// The family a llama config installs as, by its shape.
+    static func miniCPM5Family(hiddenSize: Int, numLayers: Int) -> RepackModelFamily {
+        hiddenSize == 1536 && numLayers == 24 ? .minicpm5_1b : .minicpm5
+    }
+
+    /// Production MiniCPM5 baselines (mirroring the runtime's
+    /// `ArchConfig.miniCPM5_2B` and `ArchConfig.miniCPM5_1B`). A config that
+    /// matches a production shape (hidden 2048 over 42 layers, or 1536 over
+    /// 24) must agree on every field; toy configs are exempt.
     private static func crossCheckProductionMiniCPM5(_ a: ArchInfo,
                                                      configPath: String) throws {
-        guard a.hiddenSize == 2048, a.numLayers == 42 else { return }
+        let name: String
+        let intermediate: Int
+        switch (a.hiddenSize, a.numLayers) {
+        case (2048, 42): name = "MiniCPM5-2B"; intermediate = 6144
+        case (1536, 24): name = "MiniCPM5-1B"; intermediate = 4608
+        default: return
+        }
         let expected = ArchInfo(
-            hiddenSize: 2048,
-            intermediateSize: 6144,
+            hiddenSize: a.hiddenSize,
+            intermediateSize: intermediate,
             moeIntermediateSize: 0,
             numHeads: 16,
             numKVHeads: 2,
@@ -776,14 +797,14 @@ struct ArchInfo: Sendable, Equatable {
             ropeTheta: 5_000_000.0,
             fullRopeTheta: 5_000_000.0,
             partialRotaryFactor: 1.0,
-            numLayers: 42,
+            numLayers: a.numLayers,
             numExperts: 0,
             topKExperts: 0,
             tieWordEmbeddings: false,
             attentionKEqV: false,
-            fullAttentionLayerMask: [UInt8](repeating: 1, count: 42),
+            fullAttentionLayerMask: [UInt8](repeating: 1, count: a.numLayers),
             hiddenActivation: "silu",
-            family: .minicpm5,
+            family: miniCPM5Family(hiddenSize: a.hiddenSize, numLayers: a.numLayers),
             attnOutputGate: false,
             attentionScale: 0.08838834764831845,   // pow(128, -0.5)
             embeddingScaledBySqrtHidden: false,
@@ -797,13 +818,13 @@ struct ArchInfo: Sendable, Equatable {
             linearValueHeadDim: 0,
             linearConvKernelSize: 0,
             numSharedExperts: 0,
-            numDenseLayers: 42,
-            denseIntermediateSize: 6144,
+            numDenseLayers: a.numLayers,
+            denseIntermediateSize: intermediate,
             qkNorm: false)
         guard a == expected else {
             throw RepackError.configJsonInvalid(
                 path: configPath,
-                detail: "llama config does not match the pinned MiniCPM5-2B "
+                detail: "llama config does not match the pinned \(name) "
                     + "architecture baseline")
         }
     }
