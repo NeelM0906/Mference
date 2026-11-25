@@ -45,6 +45,7 @@ jobs:
           .build/release/MferenceCLI --help
           .build/release/MferenceServer --help
           .build/release/MferenceRepack --help
+          swift build -c release --package-path App --force-resolved-versions
           python3 Scripts/tests/test_source_release.py
           LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
       - name: Upload source, provenance and checksums

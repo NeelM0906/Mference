@@ -41,7 +41,9 @@ let package = Package(
         // Speech for Notes (Notes spec 3, 5.4; spike S1 2026-11-20): upstream
         // FluidAudio loads Fluid Speech Pro as `.v3` from a local folder.
         // Pinned exactly. Traits: ASR, VAD and diarization only; no TTS and
-        // no prebuilt NemoTextProcessing binary. Only MferenceAppCore/Speech
+        // the prebuilt NemoTextProcessing binary is not linked. (SwiftPM still
+        // downloads that ~94 MB xcframework while resolving: binary targets
+        // are fetched whatever the traits.) Only MferenceAppCore/Speech
         // imports it, and only `loadLocal`-style APIs that never download.
         .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.18.4",
                  traits: ["Diarizer"]),
