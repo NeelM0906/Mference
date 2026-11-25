@@ -17,10 +17,10 @@ import Testing
                                          engine: model.engineLabel == "llama.cpp" ? .llamaCpp : .mference,
                                          product: EngineProductSlot(modelID: model.modelID))
         })
-        let service = EngineService(discover: { catalog }) { catalog, observer in
+        let service = EngineService(discover: { catalog }, makeHost: { catalog, observer in
             EngineHost(catalog: catalog, backends: [native, llama], idleUnloadAfter: idleUnloadAfter,
                        observer: observer)
-        }
+        }, physicalMemory: AppServices.fakePhysicalMemory)
         return (service, journal)
     }
 

@@ -66,9 +66,9 @@ struct HangingToolbox: ChatToolbox, ChatToolboxProvider {
                                          engine: model.engineLabel == "llama.cpp" ? .llamaCpp : .mference,
                                          product: EngineProductSlot(modelID: model.modelID))
         })
-        return EngineService(discover: { catalog }) { catalog, observer in
+        return EngineService(discover: { catalog }, makeHost: { catalog, observer in
             EngineHost(catalog: catalog, backends: [native, llama], observer: observer)
-        }
+        }, physicalMemory: AppServices.fakePhysicalMemory)
     }
 
     static func viewModel(_ service: any EngineServicing,
