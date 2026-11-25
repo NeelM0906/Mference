@@ -364,6 +364,22 @@ struct LlamaVisionTests {
         #expect(!catalog.skipped.contains { $0.location.lastPathComponent.contains("mmproj") })
     }
 
+    /// Deep and Bonsai share Qwen3.8-27B's width; each takes its own pinned
+    /// projector when both sit in one folder.
+    @Test func modelsOfOneWidthEachPairTheirOwnProjector() {
+        let bonsaiFile = "/lib/gguf/Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf"
+        let deepProjector = "/lib/gguf/mmproj-Qwen3.8-27B-BF16.gguf"
+        let bonsaiProjector = "/lib/gguf/Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf"
+        let catalog = Self.discover(
+            files: [Self.deepFile, bonsaiFile, bonsaiProjector, deepProjector],
+            headers: [Self.deepFile: Self.modelMeta(width: 5_120, mtp: true),
+                      bonsaiFile: Self.modelMeta(width: 5_120, mtp: true),
+                      deepProjector: Self.projectorMeta(width: 5_120),
+                      bonsaiProjector: Self.projectorMeta(width: 5_120)])
+        #expect(catalog.descriptor(for: "qwen3.8-27b")?.visionProjector?.location.path == deepProjector)
+        #expect(catalog.descriptor(for: "bonsai-2.5-27b-q2_0")?.visionProjector?.location.path == bonsaiProjector)
+    }
+
     @Test func aProjectorOfAnotherWidthOrWithoutVisionIsNotPaired() {
         let generic = "/lib/gguf/mmproj-F16.gguf"
         let catalog = Self.discover(files: [Self.quickFile, generic],

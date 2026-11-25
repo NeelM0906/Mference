@@ -56,6 +56,7 @@ Notes and Errands tabs they show are not built yet.</sub>
 | --- | --- | ---: | --- | ---: |
 | Quick | [Qwen3.5-4B](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) UD-Q4_K_XL | 2.9 GB | 599 / 50 | 1.3 GB |
 | Deep | [Qwen3.8-27B GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ3_S, MTP | 12.1 GB | 85 / 17 | 3.1 GB + 12.1 GB mapped |
+| Bonsai | [Ternary Bonsai 2.5 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2.5-27B-GGUF) Q2_0, MTP | 7.9 GB | 95 / 22 | 3.2 GB + 7.9 GB mapped |
 | | [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (MoE) | 19.6 GB | 258 / 29 | 8.3 GB |
 | | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | 1.4 GB | 422 / 72 | 0.8 GB |
 | | [MiniCPM5-1B](https://huggingface.co/openbmb/MiniCPM5-1B-MLX) MLX 4-bit | 0.6 GB | not yet measured | not yet measured |

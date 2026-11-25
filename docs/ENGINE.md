@@ -23,17 +23,24 @@ behaviour is in [OPENAI_SERVER.md](OPENAI_SERVER.md).
 
 ## Models and identifiers
 
-The product offers seven models, and the catalog lists only these by default.
+The product offers eight models, and the catalog lists only these by default.
 
 | Slot | ID | Engine | On disk |
 | --- | --- | --- | --- |
 | Quick | `qwen3.5-4b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.5-4B-UD-Q4_K_XL.gguf` |
 | Deep | `qwen3.8-27b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` (carries MTP tensors) |
+| Bonsai | `bonsai-2.5-27b-q2_0` | `llama.cpp` | `~/llm-models/gguf/Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf` (carries MTP tensors) |
 | Qwen 3.6 | `qwen3.6-35b-a3b` | `mference` | `qwen36.gturbo` |
 | MiniCPM5 | `minicpm5-2b-int4g64` | `mference` | `minicpm5.gturbo` |
 | MiniCPM5 1B | `minicpm5-1b-mlx-4bit` | `mference` | `minicpm5-1b.gturbo` |
 | Maple | `maple-preview-2bit-mlx` | `mference` | `maple.gturbo` |
 | Inkling 2 Mini | `inkling-2-mini-ud-q4_k_xl` | `mference` | `inkling2mini.gturbo` (32 GB of memory and up) |
+
+Bonsai is PrismML's ternary Qwen3.8-27B in llama.cpp's stock `Q2_0` type,
+stored in a blockwise Hadamard basis (`prism.hadamard` metadata); the vendored
+llama.cpp applies the matching activation transform (FWHT). PrismML's
+`PTQ1_0` and `PQ2_0` packings need their fork and are not supported. Bonsai
+follows Deep in everything below: MTP, the catalog's MTP check, vision.
 
 Deep decodes with its MTP head: `LlamaBackend` loads the GGUF's nextn
 layer and drafts with llama.cpp's own `draft-mtp` (`common_speculative`, up
@@ -272,7 +279,9 @@ a weight file or a tensor.
   `clip.vision.projection_dim` equal to the model's `embedding_length`; a
   product model prefers its own file names (Quick:
   `Qwen3.5-4B-mmproj-F16.gguf`, then `mmproj-F16.gguf`; Deep:
-  `mmproj-Qwen3.8-27B-BF16.gguf`), then path order. With none beside it, a
+  `mmproj-Qwen3.8-27B-BF16.gguf`; Bonsai:
+  `Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf`, then its BF16 file), then path
+  order. With none beside it, a
   product model also takes one of those pinned files from the other GGUF
   directories (the app downloads into `~/llm-models/gguf`, while the model
   may sit in another library root). The pairing is
@@ -280,7 +289,7 @@ a weight file or a tensor.
 
 ### Product allowlist
 
-With the default scope (`EngineCatalogScope.product`), only the seven
+With the default scope (`EngineCatalogScope.product`), only the eight
 product models are listed:
 
 - A native product model is the install whose family identifier is the
@@ -294,8 +303,9 @@ product models are listed:
   under its identifier ("Needs a Mac with 32 GB of memory or more.").
   `discover` takes the memory as a parameter, for tests.
 - A product GGUF is recognized by its exact file name from D1. It needs a
-  readable header with a context length. Deep also needs its MTP tensors,
-  so a renamed non-MTP file is refused.
+  readable header with a context length. Deep and Bonsai also need their MTP
+  tensors (`EngineProductSlot.requiresMTP`), so a renamed non-MTP file is
+  refused.
 - Everything else found is skipped with "not in the product model list". A
   request for its ID gets that reason rather than "unknown model".
 
