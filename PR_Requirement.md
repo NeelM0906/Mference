@@ -73,7 +73,7 @@ A well-built PR is most often closed because its premise was wrong.
 | A `.metal` file missing from `shaderModules` and `shaderSubdirectories` | One shared library, one function namespace. |
 | An `ArchConfig` axis without its full chain, or with a default that changes existing installs | See [the family contract](docs/FAMILY_CONTRACT.md); kept installs must decode unchanged. |
 | Changing the runtime `Quantization` reference or the installer's `Int4AffineEncoder` / `Int8AffineEncoder` without the other | They are bit-exact twins, locked by the parity suites. |
-| App code importing `MferenceEngine` or `Mference` outside `MferenceAppCore/Engine/` and the `AppServices` composition root, a second `EngineService.live()`, or app tests that load a real model | One composition root and one resident model; [app work never loads a model](CLAUDE.md#app-work-never-loads-a-model). |
+| App sources importing `MferenceEngine` or `Mference` outside `MferenceAppCore/Engine/` and the `AppServices` composition root, a second `EngineService.live()`, or app tests that load a real model | One composition root and one resident model; [app work never loads a model](CLAUDE.md#app-work-never-loads-a-model). |
 | A shared app contract ([App/CONTRACTS.md](App/CONTRACTS.md)) changed inside another change | A contract change is its own PR. |
 | A new `@Suite` touching the `FakeHFURLProtocol` statics | It races the serialized remote-install suite; extend `RemotePayloadCopyTests`. |
 | Speed claims outside the benchmark protocol, or protocol runs with experimental controls or profiling on | Results must be comparable. |
@@ -130,8 +130,8 @@ that nothing CI runs reads. Any other change is a **code** change. That includes
 | every PR | source archive | `python3 Scripts/check_source_archive.py` |
 | code changes | release build | `swift build -c release` |
 | code changes | full serial suite | `Scripts/test.sh` (no `--filter`, even where CI runs a narrower scope) |
-| code changes | app release build | `swift build -c release --package-path App` (warnings are errors) |
-| code changes | app tests | `swift test --package-path App` |
+| code changes | app release build | `swift build -c release --package-path App --force-resolved-versions` (warnings are errors) |
+| code changes | app tests | `swift test --package-path App --force-resolved-versions` |
 | `Scripts/` touched | script tests | each `python3 Scripts/tests/test_*.py` |
 | `App/Scripts/` touched | app script tests | each `python3 App/Scripts/tests/test_*.py` |
 | `.github/scripts/` touched | CI scope tests | `python3 .github/scripts/test_ci_scope.py` |
@@ -139,7 +139,7 @@ that nothing CI runs reads. Any other change is a **code** change. That includes
 
 None of these downloads or loads a model. CI on `macos-26` must be green, but
 it is narrower than this table. It is path-scoped: a docs-only PR runs only the
-docs job, and draft PRs skip the test, app and docs jobs. On pull requests it
+scope classifier and the docs job, and draft PRs skip the test, app and docs jobs. On pull requests it
 runs neither the root release build nor the `.fullTier` cases. Always use
 `Scripts/test.sh`, never bare `swift test`, for the root package.
 
@@ -175,11 +175,12 @@ engine and fixtures.
    medium-or-higher finding remains.
 4. The findings ledger goes in the PR description.
 
-For a docs-only PR or a benchmark report, one review round is enough.
+For a docs-only PR or a benchmark report, one review round is enough. If that
+round finds a real issue, the fixed commit still gets a check.
 
-After the PR opens, maintainers review it, and the maintainers also run an
-automated review (Codex) on it. Handle those comments the same way. New commits
-need the gates and a review round again.
+After the PR opens, maintainers review it, and automated review comments may
+also appear. Handle all of them the same way. New commits need the gates and a
+review round again.
 
 ## 10. The description
 
@@ -228,8 +229,7 @@ code.
 ## 14. How this is enforced
 
 CI enforces part of this bar automatically, scoped by path (section 7). The
-rest is maintainer process, not repository automation. Maintainer agent
-sessions run a local pre-PR gate: they cannot open, mark ready or push to a PR
-until the gates for its scope and an independent review are recorded for that
-exact commit. Their build and model-run rules are enforced the same way.
-Outside contributors are held to the same bar in review.
+rest is maintainer process, not repository automation. Maintainers hold their
+own agent sessions to it before any pull request is opened, marked ready or
+updated: the gates for its scope and an independent review, recorded for that
+exact commit. Outside contributors are held to the same bar in review.
