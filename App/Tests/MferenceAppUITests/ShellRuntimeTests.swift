@@ -13,7 +13,11 @@ import Testing
         #expect(runtime.services === services)
         // `ObjectIdentifier`s, not `===` on two `AnyObject`s: Swift 6.3's
         // SILGen crashes on the reabstraction thunk `#expect` builds for that.
-        #expect(ObjectIdentifier(runtime.chat.service as AnyObject) == ObjectIdentifier(services.engine as AnyObject))
+        // Both sides stay bound while compared, so neither box can be freed
+        // and its address reused by the other.
+        let chatEngine = runtime.chat.service as AnyObject
+        let servicesEngine = services.engine as AnyObject
+        #expect(ObjectIdentifier(chatEngine) == ObjectIdentifier(servicesEngine))
         #expect(runtime.screenModels.library != nil && runtime.screenModels.memory != nil
                 && runtime.screenModels.settings != nil)
     }

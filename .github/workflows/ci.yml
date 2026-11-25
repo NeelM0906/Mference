@@ -111,8 +111,8 @@ jobs:
           python3 Scripts/tests/test_engine_validate.py
 
   # The Mac app is its own package (App/), so the root test job never builds
-  # it. Its release build treats warnings as errors, which is what catches a
-  # newer toolchain's diagnostics; its tests are model-free (fake engine).
+  # it. Its release build treats warnings as errors, so the runner toolchain's
+  # diagnostics fail the job; its tests are model-free (fake engine).
   app:
     needs: changes
     if: needs.changes.outputs.scope == 't0' || needs.changes.outputs.scope == 'full'
