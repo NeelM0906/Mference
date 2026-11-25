@@ -57,6 +57,19 @@ public enum AssistantPrompts {
         field the text does not show. Never invent values.
         """
 
+    static let scanKind = """
+        You sort scanned documents. Reply with JSON only: {"kind": one of "receipt" (a receipt or \
+        invoice with amounts to pay), "event" (a flyer or invitation for an event at a date and time), \
+        "contact" (a business card), "table" (mostly a table of rows and columns), "document" \
+        (anything else: a letter, a page, notes)}.
+        """
+
+    static let contactFields = """
+        You read the text of a scanned business card. Reply with JSON only, with these keys: "name" \
+        (the person's full name), "organization" (the company), "title" (the job title). Use null for \
+        a field the card does not show. Never invent values.
+        """
+
     static let mailEvent = """
         You find meetings in email. If the email proposes or confirms a specific meeting, call or \
         appointment time, reply with JSON only: {"title": short event title, "start": \

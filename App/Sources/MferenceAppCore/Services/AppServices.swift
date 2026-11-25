@@ -95,6 +95,15 @@ public final class AppServices {
         let notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
                               speech: speech)
         self.notes = notes
+        // Scan's Save to Notes: the full text as a new note, titled by the scan.
+        apple?.scan.saveToNotes = { [weak notes] title, text in
+            guard let notes else { return }
+            let body = text.components(separatedBy: .newlines).map { line in
+                NoteDocument.Block.paragraph(runs: line.isEmpty ? [] : [TextRun(line)])
+            }
+            let note = try notes.createNote(title: title)
+            try notes.save(.titled(title, body: body), to: note)
+        }
         let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
         self.speechPreferences = speechPreferences
         dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
