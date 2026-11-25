@@ -1,9 +1,14 @@
+import CoreGraphics
 import Foundation
 import FoundationModels
+import ImageIO
 
 /// Chat with Apple's on-device model through FoundationModels. Each answer
 /// is a fresh session over the chat's history, trimmed from the oldest end to
-/// the model's context (`SystemLanguageModel.contextSize`).
+/// the model's context (`SystemLanguageModel.contextSize`). On macOS 27,
+/// where the model has the `.vision` capability, a user turn's pictures go
+/// in as image attachments ahead of its text; elsewhere they are left out
+/// and the turn's text (what was read from them) stands alone.
 public struct FoundationChatModel: AppleChatModeling {
     public init() {}
 
@@ -19,7 +24,23 @@ public struct FoundationChatModel: AppleChatModeling {
         guard state != .notEligible else { return AppleModelInfo(state: state) }
         let labels = Self.labels(of: model)
         AppleModelLabels.update(labels)
-        return AppleModelInfo(state: state, labels: labels)
+        return AppleModelInfo(state: state, labels: labels, seesImages: Self.seesImages(model))
+    }
+
+    static func seesImages(_ model: SystemLanguageModel) -> Bool {
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) { return model.capabilities.contains(.vision) }
+        #endif
+        return false
+    }
+
+    /// A picture's pixels, or nil when ImageIO cannot read it.
+    static func cgImage(_ image: ChatImage) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(image.data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceCreateThumbnailWithTransform: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: 2_048]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     static func labels(of model: SystemLanguageModel) -> AppleModelLabels {
@@ -78,7 +99,7 @@ public struct FoundationChatModel: AppleChatModeling {
         let generation = FoundationModels.GenerationOptions(temperature: options.temperature.map(Double.init),
                                                             maximumResponseTokens: reserve)
         var sent = ""
-        for try await snapshot in session.streamResponse(to: plan.prompt, options: generation) {
+        for try await snapshot in session.streamResponse(to: prompt(plan), options: generation) {
             try Task.checkCancellation()
             if let delta = AppleChatContext.delta(sent: sent, snapshot: snapshot.content) {
                 continuation.yield(.content(delta))
@@ -101,11 +122,43 @@ public struct FoundationChatModel: AppleChatModeling {
         }
         for turn in plan.history {
             let content = turn.content ?? ""
-            entries.append(turn.role == .user ? .prompt(Transcript.Prompt(segments: [text(content)]))
-                                              : response(content))
+            entries.append(turn.role == .user
+                ? .prompt(Transcript.Prompt(segments: imageSegments(turn.images) + [text(content)]))
+                : response(content))
         }
-        if includingPrompt { entries.append(.prompt(Transcript.Prompt(segments: [text(plan.prompt)]))) }
+        if includingPrompt {
+            entries.append(.prompt(Transcript.Prompt(segments: imageSegments(plan.promptImages) + [text(plan.prompt)])))
+        }
         return entries
+    }
+
+    /// The last message as a prompt: its pictures, then its text.
+    private static func prompt(_ plan: AppleChatContext.Plan) -> Prompt {
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) {
+            let images = plan.promptImages.compactMap(cgImage)
+            if !images.isEmpty {
+                return Prompt {
+                    for image in images { Attachment(image) }
+                    plan.prompt
+                }
+            }
+        }
+        #endif
+        return Prompt(plan.prompt)
+    }
+
+    /// Image attachment segments for a turn's pictures (macOS 27); none
+    /// before it.
+    private static func imageSegments(_ images: [ChatImage]) -> [Transcript.Segment] {
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) {
+            return images.compactMap(cgImage).map {
+                .attachment(Transcript.AttachmentSegment(content: .image(Transcript.ImageAttachment($0))))
+            }
+        }
+        #endif
+        return []
     }
 
     private static func text(_ content: String) -> Transcript.Segment {

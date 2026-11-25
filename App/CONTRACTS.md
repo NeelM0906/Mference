@@ -126,3 +126,9 @@ identity), and refuses while a process runs from it.
   remove), and the chat offers it once, on the first picture attached to
   Quick or Deep without it (`AppSettings.hasOfferedImageUnderstanding`).
   Until it is installed, pictures reach the model as their OCR text.
+
+Apple's on-device model (2026-11-24): where FoundationModels reports the
+`.vision` capability (macOS 27), `AppleModelInfo.seesImages` makes the Apple
+row `seesImages`, and `FoundationChatModel` sends a user turn's pictures as
+image attachments ahead of its text, in history turns too. Nothing to
+download, so the chat never offers image understanding for it.
