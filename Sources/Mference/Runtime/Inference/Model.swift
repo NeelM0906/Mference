@@ -173,7 +173,7 @@ public struct Model {
         switch config.family {
         case .qwen36, .qwen38: return "language_model.model."
         case .maple: return "model."
-        case .minicpm5: return "model."
+        case .minicpm5, .minicpm5_1b: return "model."
         // Installed under the GGUF's own names (`blk.N.*`, `token_embd`).
         case .inkling2Loop: return ""
         }
@@ -182,7 +182,7 @@ public struct Model {
         switch config.family {
         case .qwen36, .qwen38: return "language_model.lm_head.weight"
         case .maple: return "lm_head.weight"
-        case .minicpm5: return "lm_head.weight"
+        case .minicpm5, .minicpm5_1b: return "lm_head.weight"
         case .inkling2Loop: return Self.inkling2OutputHeadName
         }
     }
@@ -193,7 +193,7 @@ public struct Model {
             return "\(trunkPrefix)embed_tokens.weight"
         case .maple:
             return "\(trunkPrefix)word_embeddings.weight"
-        case .minicpm5:
+        case .minicpm5, .minicpm5_1b:
             return "\(trunkPrefix)embed_tokens.weight"
         case .inkling2Loop:
             return Self.inkling2EmbeddingName
@@ -233,7 +233,7 @@ public struct Model {
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp.gate.weight")
         case .maple:
             return try resident(name: "model.layers.\(L).mlp.gate.weight")
-        case .minicpm5:
+        case .minicpm5, .minicpm5_1b:
             // Dense: no router tensor exists; the accessor throws
             // tensorNotFound if a caller ever asks.
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp.gate.weight")
@@ -262,7 +262,7 @@ public struct Model {
             return "\(trunkPrefix)layers.\(L).mlp.shared_expert.\(proj).weight"
         case .maple:
             return "model.layers.\(L).mlp.shared_expert.\(proj).weight"
-        case .minicpm5:
+        case .minicpm5, .minicpm5_1b:
             // Dense llama: the per-layer MLP under the bare `.mlp.` names.
             return "\(trunkPrefix)layers.\(L).mlp.\(proj).weight"
         case .inkling2Loop:

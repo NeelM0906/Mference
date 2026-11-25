@@ -34,6 +34,10 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     case qwen36
     /// Native MiniCPM5-2B install.
     case minicpm5
+    /// Native MiniCPM5-1B install: `openbmb/MiniCPM5-1B-MLX`, the vendor's
+    /// MLX INT4 conversion, copied unchanged by `MferenceRepack --model
+    /// minicpm5-1b`.
+    case minicpm5_1b
     /// Native Maple Preview install.
     case maple
     /// Native Inkling 2 Mini install: `unsloth/Inkling-2-Mini-GGUF`,
@@ -47,6 +51,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .deep: "qwen3.8-27b"
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
+        case .minicpm5_1b: "minicpm5-1b-mlx-4bit"
         case .maple: "maple-preview-2bit-mlx"
         case .inkling2Mini: "inkling-2-mini-ud-q4_k_xl"
         }
@@ -58,6 +63,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .deep: "Deep (Qwen3.8 27B)"
         case .qwen36: "Qwen 3.6 35B-A3B"
         case .minicpm5: "MiniCPM5 2B"
+        case .minicpm5_1b: "MiniCPM5 1B"
         case .maple: "Maple Preview"
         case .inkling2Mini: "Inkling 2 Mini"
         }
@@ -66,7 +72,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     public var engine: EngineKind {
         switch self {
         case .quick, .deep: .llamaCpp
-        case .qwen36, .minicpm5, .maple, .inkling2Mini: .mference
+        case .qwen36, .minicpm5, .minicpm5_1b, .maple, .inkling2Mini: .mference
         }
     }
 
@@ -77,7 +83,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     public var minimumPhysicalMemory: UInt64? {
         switch self {
         case .inkling2Mini: 32 << 30
-        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        case .quick, .deep, .qwen36, .minicpm5, .minicpm5_1b, .maple: nil
         }
     }
 
@@ -95,7 +101,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .inkling2Mini:
             Inkling2MemoryFootprint.estimate(installBytes: installBytes, physicalMemory: physicalMemory)?
                 .bytes(contextTokens: contextTokens)
-        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        case .quick, .deep, .qwen36, .minicpm5, .minicpm5_1b, .maple: nil
         }
     }
 

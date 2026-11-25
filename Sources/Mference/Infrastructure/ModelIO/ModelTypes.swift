@@ -15,12 +15,22 @@ public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     /// `model.` trunk prefix and a top-level `lm_head.weight`; no q/k norms,
     /// no output gate, no experts.
     case minicpm5 = "minicpm5"
+    /// MiniCPM5-1B: the same plain-llama graph as `minicpm5` at a smaller
+    /// size (24 layers of hidden 1536), installed byte for byte from the
+    /// vendor's MLX INT4 g64 upload. Its own case so `validateArch` keeps one
+    /// exact baseline per family and the install gets its own model ID; it
+    /// runs on `MiniCPM5ForwardRunner` and renders the 1B chat template.
+    case minicpm5_1b = "minicpm5_1b"
     /// Thinking Machines Inkling 2 Mini (`inkling2_loop`): 24 stored MoE
     /// layers whose core (layers 6 to 17) runs three times per token, installed
     /// byte for byte from Unsloth's UD-Q4_K_XL GGUF under its GGUF tensor
     /// names. Distinct from the retired `inklingSmall`, which stays refused.
     /// Runs on `Inkling2ForwardRunner`.
     case inkling2Loop = "inkling2Loop"
+
+    /// True for every MiniCPM5 size: the families that share the plain-llama
+    /// tensor contract and `MiniCPM5ForwardRunner`.
+    public var isMiniCPM5: Bool { self == .minicpm5 || self == .minicpm5_1b }
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -975,6 +985,47 @@ public struct ArchConfig: Sendable, Equatable {
         qkNorm: false
     )
 
+    /// Canonical MiniCPM5-1B baseline: `miniCPM5_2B`'s graph at the 1B's
+    /// size, 24 plain pre-norm dense layers of hidden 1536 and SwiGLU width
+    /// 4608. Heads, head width, RoPE, vocabulary, the untied `lm_head` and the
+    /// attention scale are the 2B's. Values are read from `config.json` of
+    /// `openbmb/MiniCPM5-1B-MLX` at revision `c973e24a`.
+    public static let miniCPM5_1B = ArchConfig(
+        hiddenSize: 1536,
+        intermediateSize: 4608,
+        moeIntermediateSize: 0,
+        numHeads: 16,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 130_560,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 5_000_000.0,
+        fullRopeTheta: 5_000_000.0,
+        partialRotaryFactor: 1.0,
+        numLayers: 24,
+        numExperts: 0,
+        topKExperts: 0,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: [UInt8](repeating: 1, count: 24),
+        hiddenActivation: "silu",
+        family: .minicpm5_1b,
+        attnOutputGate: false,
+        attentionScale: 0.08838834764831845,   // pow(128, -0.5), as for the 2B
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        numSharedExperts: 0,
+        numDenseLayers: 24,
+        denseIntermediateSize: 4608,
+        qkNorm: false
+    )
+
     /// Canonical Inkling 2 Mini baseline (`inkling2_loop`), as Unsloth's
     /// UD-Q4_K_XL GGUF of `thinkingmachines/Inkling-2-Mini` @ `b85c3cf`
     /// carries it: 24 stored MoE layers of 128 routed experts (top-8, width
@@ -1065,6 +1116,7 @@ public struct ArchConfig: Sendable, Equatable {
         .qwen38: .qwen38_27B,
         .maple: .maplePreview,
         .minicpm5: .miniCPM5_2B,
+        .minicpm5_1b: .miniCPM5_1B,
         .inkling2Loop: .inkling2Mini,
     ]
 

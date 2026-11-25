@@ -267,7 +267,7 @@ enum RepackPlanner {
             return name.hasPrefix("language_model.")
         case .maple:
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
-        case .minicpm5:
+        case .minicpm5, .minicpm5_1b:
             // The MLX control (pre-quantized path) uses the plain llama
             // spelling; the BF16 source is planned by OriginalRepoPlanner.
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
@@ -287,7 +287,7 @@ enum RepackPlanner {
         case .qwen38:          return nil
         case .maple:           routedContainer = ".mlp.switch_mlp."
         // Dense llama: every `.mlp.*_proj` is the layer's own FFN, resident.
-        case .minicpm5:        return nil
+        case .minicpm5, .minicpm5_1b: return nil
         // GGUF source only (`Inkling2GGUFPlanner`).
         case .inkling2Loop:    return nil
         }
@@ -1021,7 +1021,7 @@ enum RepackPlanner {
                 if n == "model.word_embeddings.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"             { return (3, 0, 0, n) }
                 if n == "lm_head.weight"                { return (4, 0, 0, n) }
-            case .minicpm5:
+            case .minicpm5, .minicpm5_1b:
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "lm_head.weight"             { return (4, 0, 0, n) }
@@ -1034,7 +1034,7 @@ enum RepackPlanner {
                 case .qwen36:          slot = qwenSlotRank(in: n)
                 case .qwen38:          slot = qwen38SlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
-                case .minicpm5:        slot = miniCPM5SlotRank(in: n)
+                case .minicpm5, .minicpm5_1b: slot = miniCPM5SlotRank(in: n)
                 case .inkling2Loop:    slot = 0
                 }
                 return (1, li, slot, n)

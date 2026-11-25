@@ -58,6 +58,7 @@ Notes and Errands tabs they show are not built yet.</sub>
 | Deep | [Qwen3.8-27B GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ3_S, MTP | 12.1 GB | 85 / 17 | 3.1 GB + 12.1 GB mapped |
 | | [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (MoE) | 19.6 GB | 258 / 29 | 8.3 GB |
 | | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | 1.4 GB | 422 / 72 | 0.8 GB |
+| | [MiniCPM5-1B](https://huggingface.co/openbmb/MiniCPM5-1B-MLX) MLX 4-bit | 0.6 GB | not yet measured | not yet measured |
 | | [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) 20B-A1B (MoE) | 6.6 GB | 44 / 33 | 0.7 GB |
 | | [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) UD-Q4_K_XL (looped MoE), 32 GB Macs and up | 17.7 GB | 229 / 26 | 14.4 GB |
 
@@ -83,12 +84,12 @@ App/Scripts/run.sh                       # builds, bundles and opens the app
 ```
 
 On first run the app helps you pick a model. Quick and Deep download from
-inside the app into `~/llm-models/gguf/`. The other four are installed from
+inside the app into `~/llm-models/gguf/`. The other five are installed from
 the terminal, and the app finds them in `~/llm-models` on its own:
 
 ```sh
 swift run -c release MferenceRepack --model qwen36 --output ~/llm-models/qwen36.gturbo
-# or --model minicpm5 / maple / inkling2mini; resume an interrupted install with --resume
+# or --model minicpm5 / minicpm5-1b / maple / inkling2mini; resume an interrupted install with --resume
 ```
 
 ## For developers

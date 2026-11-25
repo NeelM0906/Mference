@@ -127,7 +127,7 @@ extension ModelFamily {
     public func memoryContextCap(physicalMemory: UInt64) -> Int? {
         switch self {
         case .inkling2Loop: Inkling2MemoryFootprint.contextCap(physicalMemory: physicalMemory)
-        case .qwen36, .qwen38, .maple, .minicpm5: nil
+        case .qwen36, .qwen38, .maple, .minicpm5, .minicpm5_1b: nil
         }
     }
 }

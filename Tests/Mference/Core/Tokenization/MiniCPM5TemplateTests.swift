@@ -5,7 +5,11 @@ import Testing
 /// The `minicpm` dialect against a synthetic tokenizer fixture (a byte-level
 /// BPE vocab plus the family's real special ids) and the committed HF renders
 /// (`renders.json`, produced by `transformers` 5.6.2 from the real
-/// `tokenizer.json` + `chat_template.jinja` at revision `cd199ce3`).
+/// `tokenizer.json` + `chat_template.jinja`): MiniCPM5-2B at revision
+/// `cd199ce3` in `MiniCPM5Tokenizer/`, MiniCPM5-1B-MLX at `c973e24a` in
+/// `MiniCPM5_1BTokenizer/`. The two checkpoints' real `tokenizer.json` files
+/// are byte-identical (SHA-256 `3e065a55…`), so the 1B fixture reuses the
+/// 2B's synthetic vocab; only the templates differ.
 @Suite("MiniCPM5 template")
 struct MiniCPM5TemplateTests {
     let tok: MFTokenizer
@@ -14,12 +18,14 @@ struct MiniCPM5TemplateTests {
         self.tok = try await MFTokenizer.load(from: Self.fixtureFolder())
     }
 
-    static func fixtureFolder() throws -> URL {
+    static func fixtureFolder(_ name: String = "MiniCPM5Tokenizer") throws -> URL {
         try #require(Bundle.module.url(
-            forResource: "MiniCPM5Tokenizer",
+            forResource: name,
             withExtension: nil,
             subdirectory: "Fixtures"))
     }
+
+    static let oneBFixture = "MiniCPM5_1BTokenizer"
 
     private typealias Message = MFTokenizer.Message
 
@@ -33,8 +39,8 @@ struct MiniCPM5TemplateTests {
         let render: String
     }
 
-    static func renders() throws -> [Render] {
-        let url = try fixtureFolder().appendingPathComponent("renders.json")
+    static func renders(_ fixture: String = "MiniCPM5Tokenizer") throws -> [Render] {
+        let url = try fixtureFolder(fixture).appendingPathComponent("renders.json")
         guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
                 as? [String: Any],
               let items = root["renders"] as? [[String: Any]] else {
@@ -153,6 +159,46 @@ struct MiniCPM5TemplateTests {
             Issue.record("\(name) differs at byte \(firstDiff) near: \(context.debugDescription)")
         }
         #expect(actual == fixture.render)
+    }
+
+    @Test("Every committed MiniCPM5-1B HF render is reproduced byte for byte",
+          arguments: try MiniCPM5TemplateTests.renders(MiniCPM5TemplateTests.oneBFixture).map(\.name))
+    func oneBRendersMatchHF(name: String) async throws {
+        let fixture = try #require(try Self.renders(Self.oneBFixture).first { $0.name == name })
+        let oneB = try await MFTokenizer.load(from: Self.fixtureFolder(Self.oneBFixture),
+                                              family: .minicpm5_1b)
+        #expect(oneB.dialect == .minicpm)
+        #expect(oneB.miniCPMTemplate == .v1B)
+        let actual = try oneB.miniCPMRender(messages: fixture.messages,
+                                            tools: fixture.tools,
+                                            thinking: fixture.thinking)
+        if actual != fixture.render {
+            let a = Array(actual.utf8), e = Array(fixture.render.utf8)
+            let firstDiff = zip(a, e).enumerated().first { $0.element.0 != $0.element.1 }?.offset
+                ?? min(a.count, e.count)
+            let context = String(decoding: e[max(0, firstDiff - 40)..<min(e.count, firstDiff + 60)],
+                                 as: UTF8.self)
+            Issue.record("\(name) differs at byte \(firstDiff) near: \(context.debugDescription)")
+        }
+        #expect(actual == fixture.render)
+    }
+
+    @Test("The template variant follows the manifest family")
+    func templateVariantFollowsTheFamily() async throws {
+        #expect(tok.miniCPMTemplate == .v2B)
+        let twoB = try await MFTokenizer.load(from: Self.fixtureFolder(), family: .minicpm5)
+        #expect(twoB.miniCPMTemplate == .v2B)
+        let oneB = try await MFTokenizer.load(from: Self.fixtureFolder(Self.oneBFixture),
+                                              family: .minicpm5_1b)
+        #expect(oneB.miniCPMTemplate == .v1B)
+        // The public chat path renders the family's own template.
+        let history = try #require(try Self.renders(Self.oneBFixture)
+            .first { $0.name == "multi_turn_assistant_with_think" })
+        #expect(try oneB.applyChatTemplate(history.messages) == history.render)
+        let twoBHistory = try #require(try Self.renders()
+            .first { $0.name == "multi_turn_assistant_with_think" })
+        #expect(try twoB.applyChatTemplate(twoBHistory.messages) == twoBHistory.render)
+        #expect(history.render != twoBHistory.render)
     }
 
     @Test("The public text-only render is the thinking-enabled render")

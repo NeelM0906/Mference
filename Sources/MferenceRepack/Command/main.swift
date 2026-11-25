@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <qwen36|qwen36original|qwen38|maple|minicpm5|minicpm5mlx|inkling2mini>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>] [--local-gguf <file>]
+  MferenceRepack [--dry-run] [--model <qwen36|qwen36original|qwen38|maple|minicpm5|minicpm5mlx|minicpm5-1b|inkling2mini>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>] [--local-gguf <file>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
@@ -27,6 +27,8 @@ quantizer-quality gate.
 minicpm5 reads openbmb/MiniCPM5-2B's BF16 upload and quantizes to INT4 affine
 group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the
 vendor's own MLX INT4 conversion of the same checkpoint, the W2.1b control.
+minicpm5-1b installs openbmb/MiniCPM5-1B-MLX, the vendor's MLX INT4 conversion
+of MiniCPM5-1B (~0.6 GB read and written, quantized bytes copied unchanged).
 inkling2mini installs Unsloth's UD-Q4_K_XL GGUF of Thinking Machines Inkling 2
 Mini (~17.6 GB read and written): every tensor is copied unchanged, nothing is
 re-quantized. --local-gguf reads a local copy of that pinned file instead of the

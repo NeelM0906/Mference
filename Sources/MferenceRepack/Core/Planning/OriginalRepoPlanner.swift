@@ -62,7 +62,7 @@ enum OriginalRepoPlanner {
     /// multimodal container (`model.language_model.`); a plain
     /// `LlamaForCausalLM` upload uses the bare `model.`.
     static func trunkPrefix(for family: RepackModelFamily) -> String {
-        family == .minicpm5 ? "model." : textPrefix
+        family.isMiniCPM5 ? "model." : textPrefix
     }
     static let visionPrefix = "model.visual."
     static let mtpPrefix = "mtp."
@@ -292,7 +292,7 @@ enum OriginalRepoPlanner {
     static func residentName(for sourceName: String,
                              family: RepackModelFamily) -> String {
         switch family {
-        case .minicpm5:
+        case .minicpm5, .minicpm5_1b:
             // The vendor already spells the trunk `model.` and the head
             // `lm_head.weight`, which is what the runner looks up.
             return sourceName
@@ -356,7 +356,7 @@ enum OriginalRepoPlanner {
         case .qwen36:
             return isNormWeight(sourceName)
                 && !sourceName.hasSuffix(".linear_attn.norm.weight")
-        case .minicpm5:
+        case .minicpm5, .minicpm5_1b:
             // `LlamaRMSNorm` (transformers v5.6.2) is plain `w * x_hat`, and
             // the vendor's own MLX conversion stores the bare weights. No
             // fold. See docs/families/MINICPM5.md.
@@ -681,7 +681,7 @@ enum OriginalRepoPlanner {
         if name == prefix + "norm.weight" { return (3, 0, 0, name) }
         if name == lmHeadName { return (4, 0, 0, name) }
         if let layer = RepackPlanner.layerIndex(in: name) {
-            let slot = family == .minicpm5
+            let slot = family.isMiniCPM5
                 ? RepackPlanner.miniCPM5SlotRank(in: name)
                 : slotRank(in: name)
             return (1, layer, slot, name)

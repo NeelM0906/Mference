@@ -118,6 +118,10 @@ struct ServerFamilyModelIDTests {
         #expect(ServerFamilyModelID.modelID(for: .qwen38) == "qwen3.8-27b-4bit")
         #expect(ServerFamilyModelID.modelID(for: .maple) == "maple-preview-2bit-mlx")
         #expect(ServerFamilyModelID.modelID(for: .minicpm5) == "minicpm5-2b-int4g64")
+        #expect(ServerFamilyModelID.modelID(for: .minicpm5_1b) == "minicpm5-1b-mlx-4bit")
+        for identifier in ["minicpm5-2b-int4g64", "minicpm5-1b-mlx-4bit"] {
+            #expect(ServerArguments.usage.contains(identifier), Comment(rawValue: identifier))
+        }
     }
 
     @Test func unknownRawFamilyHasNoIdentifier() {
