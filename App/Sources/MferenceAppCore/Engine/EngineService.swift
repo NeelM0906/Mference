@@ -73,12 +73,12 @@ public actor EngineService: EngineServicing {
         self.physicalMemory = physicalMemory
     }
 
-    /// Deep needs more than 16 GB of memory (L4), and a model with an engine
+    /// Deep and Bonsai need more than 16 GB of memory (L4), and a model with an engine
     /// memory floor needs that much (`EngineProductSlot.minimumPhysicalMemory`:
     /// Inkling 2 Mini, 32 GB); the reason when `model` may not run on a Mac
     /// with `physicalMemory`, else nil.
     public static func memoryGateReason(_ model: AppModel, physicalMemory: UInt64) -> String? {
-        if model == .deep && physicalMemory <= 16 << 30 { return "Needs a Mac with more than 16 GB of memory." }
+        if (model == .deep || model == .bonsai27b) && physicalMemory <= 16 << 30 { return "Needs a Mac with more than 16 GB of memory." }
         return EngineProductSlot(modelID: model.modelID)?.memoryFloorReason(physicalMemory: physicalMemory)
     }
 

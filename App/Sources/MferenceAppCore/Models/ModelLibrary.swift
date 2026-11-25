@@ -46,6 +46,7 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
         switch model {
         case .quick: "Quick · Qwen3.5 4B"
         case .deep: "Deep · Qwen3.8 27B"
+        case .bonsai27b: "Bonsai 2.5 · 27B"
         case .inkling2Mini: "Inkling 2 · Mini"
         case .qwen36: "Qwen 3.6 · 35B-A3B"
         case .minicpm5: "MiniCPM5 · 2B"

@@ -471,6 +471,8 @@ func manager(_ sources: [DownloadSource], destination: URL, offline: Bool = fals
             #expect(source.sha256.count == 64)
             #expect(source.revision.count == 40)
             #expect(DownloadSource.isAllowed(host: source.url.host(), allowedHosts: DownloadSource.allowedHosts))
+            // The engine lists the downloaded file under the same model.
+            #expect(EngineCatalogDiscovery.productGGUFFiles[source.localFileName]?.modelID == source.model.modelID)
         }
         #expect(DownloadSource.isAllowed(host: "cas-bridge.xethub.hf.co", allowedHosts: DownloadSource.allowedHosts))
         #expect(!DownloadSource.isAllowed(host: "evilhuggingface.co", allowedHosts: DownloadSource.allowedHosts))
@@ -483,6 +485,8 @@ func manager(_ sources: [DownloadSource], destination: URL, offline: Bool = fals
         #expect(MemoryFit(physicalMemory: 16 << 30).isOffered(.deep) == false)
         #expect(MemoryFit(physicalMemory: 8 << 30).isOffered(.deep) == false)
         #expect(MemoryFit(physicalMemory: 24 << 30).isOffered(.deep))
+        #expect(MemoryFit(physicalMemory: 16 << 30).isOffered(.bonsai27b) == false)
+        #expect(MemoryFit(physicalMemory: 24 << 30).isOffered(.bonsai27b))
         #expect(MemoryFit(physicalMemory: 8 << 30).isOffered(.quick))
     }
 

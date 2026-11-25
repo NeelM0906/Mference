@@ -10,7 +10,7 @@ import Foundation
 public enum ModelGroup: String, Sendable, Hashable, Codable, CaseIterable {
     /// Quick, Deep, Auto.
     case recommended
-    /// Inkling 2 Mini, Qwen 3.6, MiniCPM5, Maple.
+    /// Bonsai 2.5 27B, Inkling 2 Mini, Qwen 3.6, MiniCPM5, Maple.
     case alsoOnThisMac
     /// Apple's on-device model (FoundationModels), shown only while
     /// Settings > Models > Apple Intelligence model is on.
@@ -19,7 +19,7 @@ public enum ModelGroup: String, Sendable, Hashable, Codable, CaseIterable {
 
 /// The product models the app offers (decision L1), in picker order.
 public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identifiable {
-    case quick, deep, inkling2Mini, qwen36, minicpm5, maple
+    case quick, deep, bonsai27b, inkling2Mini, qwen36, minicpm5, maple
     /// Apple's on-device model. Not an engine model: chat routes it to
     /// FoundationModels (`AppleChatRouting`), and the engine, the model
     /// library and downloads never list it (`engineModels`).
@@ -30,6 +30,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick: "qwen3.5-4b"
         case .deep: "qwen3.8-27b"
+        case .bonsai27b: "bonsai-2.5-27b-q2_0"
         case .inkling2Mini: "inkling-2-mini-ud-q4_k_xl"
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
@@ -54,7 +55,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     public var group: ModelGroup {
         switch self {
         case .quick, .deep: .recommended
-        case .inkling2Mini, .qwen36, .minicpm5, .maple: .alsoOnThisMac
+        case .bonsai27b, .inkling2Mini, .qwen36, .minicpm5, .maple: .alsoOnThisMac
         case .apple: .builtIntoMacOS
         }
     }
@@ -64,6 +65,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick: "Quick"
         case .deep: "Deep"
+        case .bonsai27b: "Bonsai 2.5"
         case .inkling2Mini: "Inkling 2 Mini"
         case .qwen36: "Qwen 3.6"
         case .minicpm5: "MiniCPM5"
@@ -77,6 +79,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick: "Quick 4B"
         case .deep: "Deep 27B"
+        case .bonsai27b: "Bonsai 27B"
         case .inkling2Mini: "Inkling 2"
         case .qwen36: "Qwen 3.6"
         case .minicpm5: "MiniCPM5"
@@ -90,6 +93,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick: "Qwen3.5 4B · default"
         case .deep: "Qwen3.8 27B · MTP"
+        case .bonsai27b: "Ternary Qwen3.8 27B · MTP"
         case .inkling2Mini: "Mini"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
@@ -103,6 +107,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick: "Everyday chat, mail and web answers. Runs on every Mac and iPhone."
         case .deep: "Harder reasoning and long documents. Drafts several tokens at once."
+        case .bonsai27b: "Deep-tier model in ternary weights, tuned for tool use. A third smaller than Deep."
         case .inkling2Mini: "Deep-tier mixture-of-experts model."
         case .qwen36: "Large mixture-of-experts. Experts stream from the SSD."
         case .minicpm5: "Very small and quick. Good for short replies."
@@ -114,7 +119,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     /// Engine label shown small in the picker and in Settings > Details only.
     public var engineLabel: String {
         switch self {
-        case .quick, .deep: "llama.cpp"
+        case .quick, .deep, .bonsai27b: "llama.cpp"
         case .inkling2Mini, .qwen36, .minicpm5, .maple: "Mference"
         case .apple: "Apple"
         }
@@ -125,11 +130,11 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
 
     /// Whether the model can see images once its image-understanding add-on
     /// (the vision projector, `DownloadSource.imageUnderstanding`) is
-    /// installed: Quick and Deep. Whether it is installed is
+    /// installed: Quick, Deep and Bonsai. Whether it is installed is
     /// `ModelOption.seesImages`.
     public var supportsImageUnderstanding: Bool {
         switch self {
-        case .quick, .deep: true
+        case .quick, .deep, .bonsai27b: true
         case .inkling2Mini, .qwen36, .minicpm5, .maple, .apple: false
         }
     }
@@ -137,7 +142,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     /// Whether the model reasons before answering by default (steps disclosure).
     public var supportsThinking: Bool {
         switch self {
-        case .quick, .deep, .inkling2Mini, .qwen36: true
+        case .quick, .deep, .bonsai27b, .inkling2Mini, .qwen36: true
         case .minicpm5, .maple, .apple: false
         }
     }
