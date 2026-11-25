@@ -108,6 +108,7 @@ struct MailComposeCard: View {
     private var closeButton: some View {
         Button { close() } label: { Image(systemName: "xmark") }
             .buttonStyle(.appleQuiet)
+            .disabled(!composer.canDiscard)
             .help("Close")
             .accessibilityLabel("Close the message")
     }
@@ -298,7 +299,7 @@ struct MailComposeCard: View {
             Spacer(minLength: MFSpacing.s)
             Button("Discard") { close() }
                 .buttonStyle(.appleSecondary)
-                .disabled(composer.sendState == .sending)
+                .disabled(!composer.canDiscard)
             Button(composer.sendState == .sending ? "Sending…" : "Send") {
                 Task { await composer.send() }
             }

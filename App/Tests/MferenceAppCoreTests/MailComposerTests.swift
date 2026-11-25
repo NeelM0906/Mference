@@ -7,13 +7,15 @@ import Testing
 /// repeats), once `gate` opens, and records the person's prompt.
 final class ScriptedComposeEngine: EngineServicing, @unchecked Sendable {
     let gate: ScanTestLatch?
+    let finish: GenerationFinish
     private let lock = NSLock()
     private var answers: [String]
     private var recorded: [String] = []
 
-    init(answers: [String], gate: ScanTestLatch? = nil) {
+    init(answers: [String], gate: ScanTestLatch? = nil, finish: GenerationFinish = .stop) {
         self.answers = answers
         self.gate = gate
+        self.finish = finish
     }
 
     var prompts: [String] { lock.withLock { recorded } }
@@ -29,13 +31,13 @@ final class ScriptedComposeEngine: EngineServicing, @unchecked Sendable {
             recorded.append(turns.last?.content ?? "")
             return answers.count > 1 ? answers.removeFirst() : (answers.first ?? "")
         }
-        let gate = gate
+        let gate = gate, finish = finish
         return GenerationStream { continuation in
             Task {
                 await gate?.wait()
                 continuation.yield(.content(answer))
                 continuation.yield(.completed(GenerationSummary(content: answer, reasoning: nil, toolCalls: [],
-                                                                finish: .stop, promptTokens: 1, completionTokens: 1)))
+                                                                finish: finish, promptTokens: 1, completionTokens: 1)))
                 continuation.finish()
             }
         }
@@ -186,6 +188,90 @@ final class ScriptedComposeEngine: EngineServicing, @unchecked Sendable {
         #expect(composer.body == "Edited by hand")
         #expect(composer.assistState == .idle)
         #expect(!composer.canUndo)
+    }
+
+    /// Quick never sees a clipped copy that would then replace the whole
+    /// body: past the limit, nothing is sent to it and nothing changes.
+    @Test @MainActor func aMessageTooLongForQuickIsLeftAlone() async {
+        let engine = ScriptedComposeEngine(answers: ["Short."])
+        let composer = Self.inbox(engine: engine).composer
+        composer.open()
+        let long = String(repeating: "word ", count: MailComposeWriter.maximumInput / 5 + 1)
+        composer.body = long
+        for action in [ComposeAction.fixGrammar, .rewrite(.shorter)] {
+            composer.run(action)
+            await composer.waitForAssist()
+            #expect(composer.assistState == .failed(MailComposeError.tooLong(limit: MailComposeWriter.maximumInput)
+                .userMessage))
+            #expect(composer.body == long)
+        }
+        composer.prompt = "turn this into an email"
+        composer.run(.draft)
+        await composer.waitForAssist()
+        #expect(composer.body == long)
+        #expect(engine.prompts.isEmpty)
+    }
+
+    /// An answer cut off at Quick's length limit never replaces the body.
+    @Test @MainActor func anIncompleteAnswerIsNotUsed() async {
+        let composer = Self.inbox(engine: ScriptedComposeEngine(answers: ["Hi Sam, I"], finish: .length)).composer
+        composer.open()
+        composer.body = "hi sam i cant make it friday, maybe next week"
+        composer.run(.fixGrammar)
+        await composer.waitForAssist()
+        #expect(composer.assistState == .failed(MailComposeError.incomplete.userMessage))
+        #expect(composer.body == "hi sam i cant make it friday, maybe next week")
+        #expect(!composer.canUndo)
+    }
+
+    /// While the message sends, the draft cannot be closed, so the send's
+    /// outcome can only ever close the draft it sent.
+    @Test @MainActor func aDraftCannotBeDiscardedWhileItSends() async {
+        let gate = ScanTestLatch()
+        let sender = GatedSender(gate: gate)
+        let composer = Self.inbox(engine: nil, sender: sender).composer
+        composer.open()
+        composer.to = "a@example.com"
+        composer.body = "Hello"
+        let sending = Task { await composer.send() }
+        while composer.sendState != .sending { await Task.yield() }
+        #expect(!composer.canDiscard && !composer.canSend)
+        composer.discard()
+        #expect(composer.isOpen && composer.body == "Hello")
+        await gate.open()
+        #expect(await sending.value == nil)
+        #expect(await sender.sent == [MailDraft(to: "a@example.com", subject: "", body: "Hello")])
+        #expect(!composer.isOpen && composer.body.isEmpty && composer.sendState == .idle)
+    }
+
+    /// Stop ends the engine's request too, not only the card's wait: the
+    /// live `EngineService` cancels it and the engine is free again.
+    @Test @MainActor func stopCancelsTheEngineRequest() async throws {
+        let reached = FakeEngineLatch()
+        let held = FakeEngineScript(events: [.content("Hi"), .content(" there")], holdAfterEvents: 1,
+                                    holdReached: reached, holdGate: FakeEngineLatch())
+        let journal = FakeEngineJournal()
+        let llama = FakeEngineBackend(engine: .llamaCpp, journal: journal, scripts: [AppModel.quick.modelID: held])
+        let catalog = EngineCatalog(models: [
+            FakeEngineBackend.descriptor(id: AppModel.quick.modelID, engine: .llamaCpp,
+                                         product: EngineProductSlot(modelID: AppModel.quick.modelID)),
+        ])
+        let engine = EngineService(discover: { catalog }) { catalog, observer in
+            EngineHost(catalog: catalog, backends: [llama], idleUnloadAfter: nil, observer: observer)
+        }
+        let composer = Self.inbox(engine: engine).composer
+        composer.open()
+        composer.body = "hi sam"
+        composer.run(.fixGrammar)
+        try await reached.wait()
+        composer.cancelAssist()
+        await composer.waitForAssist()
+        #expect(composer.body == "hi sam" && composer.assistState == .idle)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !journal.entries.contains(.generationCancelled(AppModel.quick.modelID)), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(journal.entries.contains(.generationCancelled(AppModel.quick.modelID)))
     }
 
     @Test func sendErrorsTalkAboutTheMessage() {

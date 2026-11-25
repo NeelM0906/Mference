@@ -116,8 +116,28 @@ public struct MailReplyDrafter: Sendable {
     }
 }
 
+/// Why Quick did not change the compose card's text.
+public enum MailComposeError: Error, Sendable, Hashable {
+    /// The text is longer than Quick is given at once; rewriting a clipped
+    /// copy would drop the rest of the message.
+    case tooLong(limit: Int)
+    /// Quick stopped at its length limit, so the text is incomplete.
+    case incomplete
+
+    public var userMessage: String {
+        switch self {
+        case .tooLong(let limit):
+            "This message is too long for Quick to rewrite (over \(limit.formatted()) characters). Nothing was changed."
+        case .incomplete: "Quick's version came out incomplete, so nothing was changed. Try a shorter message."
+        }
+    }
+}
+
 /// Writes and rewrites a new message with Quick through the engine, for the
 /// compose card. The text is only shown for review; nothing is sent here.
+/// The person's text is never clipped: text Quick would only see part of is
+/// refused, and an answer cut off at the length limit is never used, since
+/// either one would replace the whole body with part of it.
 public struct MailComposeWriter: Sendable {
     private let engine: any EngineServicing
     public let model: AppModel
@@ -134,6 +154,11 @@ public struct MailComposeWriter: Sendable {
         person did not say. Do not invent facts, names, dates or numbers.
         """)
 
+    /// The most text, in characters, sent to Quick to rewrite or build on.
+    public static let maximumInput = 4_000
+    /// Room for a rewrite of the longest accepted text.
+    static let maximumOutputTokens = 1_600
+
     /// The body of a new email from what the person asked for, building on
     /// their notes when the body already has text.
     public func draft(prompt: String, notes: String, to: String, subject: String) async throws -> String {
@@ -142,26 +167,35 @@ public struct MailComposeWriter: Sendable {
         if !recipient.isEmpty { text += "\nIt goes to: \(recipient)" }
         let topic = AssistantPrompts.oneLine(subject)
         if !topic.isEmpty { text += "\nSubject: \(topic)" }
-        if !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            text += "\n\nTurn the person's notes into the email:\n" + AssistantPrompts.untrusted(
-                AssistantPrompts.clip(notes, to: 4_000))
+        let notes = try Self.whole(notes, allowEmpty: true)
+        if !notes.isEmpty {
+            text += "\n\nTurn the person's notes into the email:\n" + AssistantPrompts.untrusted(notes)
         }
-        return try await generate(text, maximumTokens: 600)
+        return try await generate(text, maximumTokens: Self.maximumOutputTokens)
     }
 
     /// The same email in another tone.
     public func rewrite(_ body: String, tone: DraftTone) async throws -> String {
         let text = "Rewrite this email. \(tone.instruction) Keep its meaning and every fact.\n\n"
-            + AssistantPrompts.untrusted(AssistantPrompts.clip(body, to: 4_000))
-        return try await generate(text, maximumTokens: 600)
+            + AssistantPrompts.untrusted(try Self.whole(body))
+        return try await generate(text, maximumTokens: Self.maximumOutputTokens)
     }
 
     /// The same email with only spelling and grammar fixed.
     public func fixGrammar(_ body: String) async throws -> String {
         let text = "Fix only the spelling, grammar and punctuation of this email. Change nothing else: "
             + "keep its words, tone, order and line breaks wherever they are already correct.\n\n"
-            + AssistantPrompts.untrusted(AssistantPrompts.clip(body, to: 4_000))
-        return try await generate(text, maximumTokens: 600)
+            + AssistantPrompts.untrusted(try Self.whole(body))
+        return try await generate(text, maximumTokens: Self.maximumOutputTokens)
+    }
+
+    /// The text as it is, or `tooLong` past `maximumInput`; never a clipped
+    /// copy that would stand in for the whole body.
+    static func whole(_ text: String, allowEmpty: Bool = false) throws -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= maximumInput else { throw MailComposeError.tooLong(limit: maximumInput) }
+        guard allowEmpty || !trimmed.isEmpty else { throw AssistantModelError.unreadableAnswer }
+        return trimmed
     }
 
     /// A short subject line for the email.
@@ -181,13 +215,17 @@ public struct MailComposeWriter: Sendable {
         let turns = [ChatTurn(role: .system, content: Self.instructions), ChatTurn(role: .user, content: prompt)]
         let options = GenerationOptions(thinking: false, maximumCompletionTokens: maximumTokens)
         var text = ""
+        var finish: GenerationFinish?
         for try await update in engine.generate(model: model, turns: turns, options: options) {
             switch update {
             case .content(let chunk): text += chunk
-            case .completed(let summary): if !summary.content.isEmpty { text = summary.content }
+            case .completed(let summary):
+                if !summary.content.isEmpty { text = summary.content }
+                finish = summary.finish
             case .prepared, .reasoning, .toolCall: break
             }
         }
+        guard finish != .length else { throw MailComposeError.incomplete }
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { throw AssistantModelError.unreadableAnswer }
         return cleaned
