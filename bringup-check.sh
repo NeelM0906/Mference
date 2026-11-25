@@ -92,7 +92,7 @@ Runs the family bring-up conformance stages in order and prints a verdict.
 Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
-  <family>      one of: qwen36 qwen38 maple minicpm5
+  <family>      one of: qwen36 qwen38 maple minicpm5 minicpm5-1b
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -125,6 +125,9 @@ case "${family}" in
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;
+  # The 1B shares the runner, tokenizer and planner suites; its own cases
+  # (baseline, template renders, sizes contract) are in the same filter.
+  minicpm5-1b)     suite_filter='[Mm]iniCPM5' ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
 

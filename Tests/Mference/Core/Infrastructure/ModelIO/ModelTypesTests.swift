@@ -32,7 +32,7 @@ import Foundation
     /// Only the kept families have baselines.
     @Test func knownArchitecturesAreTheKeptFamilies() {
         #expect(Set(ArchConfig.knownArchitectures.keys)
-                == [.qwen36, .qwen38, .maple, .minicpm5, .inkling2Loop])
+                == [.qwen36, .qwen38, .maple, .minicpm5, .minicpm5_1b, .inkling2Loop])
         #expect(Set(ModelFamily.allCases) == Set(ArchConfig.knownArchitectures.keys))
         for (family, config) in ArchConfig.knownArchitectures {
             #expect(config.family == family)
@@ -153,16 +153,68 @@ import Foundation
     @Test func qkNormDefaultsToTrueForEveryShippedFamily() {
         // MiniCPM5 is plain-llama attention; Inkling 2 clips q and k
         // (`inkling2.qkClipThreshold`) instead of norming them.
-        let plainQK: Set<ModelFamily> = [.minicpm5, .inkling2Loop]
+        let plainQK: Set<ModelFamily> = [.minicpm5, .minicpm5_1b, .inkling2Loop]
         for (family, config) in ArchConfig.knownArchitectures where !plainQK.contains(family) {
             #expect(config.qkNorm, "\(family.rawValue) should keep q/k norms")
         }
         #expect(ArchConfig.knownArchitectures[.minicpm5]?.qkNorm == false)
+        #expect(ArchConfig.knownArchitectures[.minicpm5_1b]?.qkNorm == false)
+    }
+
+    /// Pins the 1B baseline against `openbmb/MiniCPM5-1B-MLX` revision
+    /// `c973e24a` `config.json`: hidden 1536, intermediate 4608, 24 layers,
+    /// and every other field the 2B's.
+    @Test func archConfigMiniCPM5_1BBaselineMatchesCheckpoint() {
+        let a = ArchConfig.miniCPM5_1B
+        let b = ArchConfig.miniCPM5_2B
+        #expect(a.family == .minicpm5_1b)
+        #expect(a.family.isMiniCPM5 && b.family.isMiniCPM5)
+        #expect(a.hiddenSize == 1536)
+        #expect(a.intermediateSize == 4608)
+        #expect(a.denseIntermediateSize == 4608)
+        #expect(a.numLayers == 24)
+        #expect(a.numDenseLayers == 24)
+        #expect(a.fullAttentionLayerMask == [UInt8](repeating: 1, count: 24))
+        #expect(a.moeIntermediateSize == b.moeIntermediateSize)
+        #expect(a.numHeads == b.numHeads)
+        #expect(a.numKVHeads == b.numKVHeads)
+        #expect(a.numFullKVHeads == b.numFullKVHeads)
+        #expect(a.headDim == b.headDim)
+        #expect(a.fullHeadDim == b.fullHeadDim)
+        #expect(a.vocabSize == b.vocabSize)
+        #expect(a.unpaddedVocabSize == b.unpaddedVocabSize)
+        #expect(a.tieWordEmbeddings == b.tieWordEmbeddings)
+        #expect(a.attentionKEqV == b.attentionKEqV)
+        #expect(a.hiddenActivation == b.hiddenActivation)
+        #expect(a.finalLogitSoftcap == b.finalLogitSoftcap)
+        #expect(a.slidingWindow == b.slidingWindow)
+        #expect(a.numExperts == b.numExperts)
+        #expect(a.topKExperts == b.topKExperts)
+        #expect(a.numSharedExperts == b.numSharedExperts)
+        #expect(a.attnOutputGate == b.attnOutputGate)
+        #expect(a.qkNorm == b.qkNorm)
+        #expect(a.attentionScale == b.attentionScale)
+        #expect(a.embeddingScaledBySqrtHidden == b.embeddingScaledBySqrtHidden)
+        #expect(a.routerScaled == b.routerScaled)
+        #expect(a.ffnSandwichNorms == b.ffnSandwichNorms)
+        #expect(a.sharedExpertGated == b.sharedExpertGated)
+        #expect(a.ropeTheta == b.ropeTheta)
+        #expect(a.fullRopeTheta == b.fullRopeTheta)
+        #expect(a.partialRotaryFactor == b.partialRotaryFactor)
+        #expect(a.ropeNeoxSubdim == b.ropeNeoxSubdim)
+        #expect(a.linearAttention == .none)
+        #expect(a.compressedAttention == .none)
+        #expect(a.hyperConnections == .none)
+        #expect(a.relativePosition == .none)
+        #expect(a.flashNext == .none)
+        #expect(a.inkling2 == .none)
     }
 
     @Test func miniCPM5IsRegisteredForAutoDetection() {
         #expect(ArchConfig.knownArchitectures[.minicpm5]?.family == .minicpm5)
         #expect(ModelFamily(rawValue: "minicpm5") == .minicpm5)
+        #expect(ArchConfig.knownArchitectures[.minicpm5_1b]?.family == .minicpm5_1b)
+        #expect(ModelFamily(rawValue: "minicpm5_1b") == .minicpm5_1b)
     }
 
     @Test func modelErrorDescriptionsContainKeyFacts() {

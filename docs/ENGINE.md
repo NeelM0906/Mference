@@ -23,7 +23,7 @@ behaviour is in [OPENAI_SERVER.md](OPENAI_SERVER.md).
 
 ## Models and identifiers
 
-The product offers six models, and the catalog lists only these by default.
+The product offers seven models, and the catalog lists only these by default.
 
 | Slot | ID | Engine | On disk |
 | --- | --- | --- | --- |
@@ -31,6 +31,7 @@ The product offers six models, and the catalog lists only these by default.
 | Deep | `qwen3.8-27b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` (carries MTP tensors) |
 | Qwen 3.6 | `qwen3.6-35b-a3b` | `mference` | `qwen36.gturbo` |
 | MiniCPM5 | `minicpm5-2b-int4g64` | `mference` | `minicpm5.gturbo` |
+| MiniCPM5 1B | `minicpm5-1b-mlx-4bit` | `mference` | `minicpm5-1b.gturbo` |
 | Maple | `maple-preview-2bit-mlx` | `mference` | `maple.gturbo` |
 | Inkling 2 Mini | `inkling-2-mini-ud-q4_k_xl` | `mference` | `inkling2mini.gturbo` (32 GB of memory and up) |
 
@@ -234,12 +235,13 @@ a weight file or a tensor.
 
 ### Product allowlist
 
-With the default scope (`EngineCatalogScope.product`), only the six
+With the default scope (`EngineCatalogScope.product`), only the seven
 product models are listed:
 
 - A native product model is the install whose family identifier is the
   slot's ID. When several are found, the one in the earliest root wins,
-  then the one labelled `qwen36`, `minicpm5`, `maple`, or `inkling2mini`,
+  then the one labelled `qwen36`, `minicpm5`, `minicpm5-1b`, `maple`, or
+  `inkling2mini`,
   then path order. The others are skipped, and the skip names the winner.
 - A native product model with a memory floor
   (`EngineProductSlot.minimumPhysicalMemory`, 32 GB for Inkling 2 Mini) is

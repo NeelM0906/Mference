@@ -2,16 +2,18 @@
 
 A private on-device assistant for the Mac (the SwiftUI app in `App/`) on its own
 Swift and Metal inference engine. Native pinned checkpoints: Qwen 3.6
-35B-A3B, Maple Preview, Qwen 3.8 27B, MiniCPM5-2B, and Inkling 2 Mini (the
-Unsloth UD-Q4_K_XL GGUF, every tensor copied unchanged). The shared core and KV
+35B-A3B, Maple Preview, Qwen 3.8 27B, MiniCPM5-2B, MiniCPM5-1B (the vendor's
+MLX 4-bit conversion), and Inkling 2 Mini (the Unsloth UD-Q4_K_XL GGUF, every
+tensor copied unchanged). The shared core and KV
 cache stay resident; routed experts stream from SSD per token. Qwen 3.8 27B
-and MiniCPM5-2B are dense and fully resident. Inkling 2 Mini keeps its looped
+and both MiniCPM5 sizes are dense and fully resident. Inkling 2 Mini keeps its looped
 core's experts resident and stages the rest on 32 to 47 GB Macs, and holds
 every layer from 48 GB; it is offered on Macs with 32 GB or more. Through the `MferenceEngine` library, the app and `MferenceServer --library`
 run GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
 UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
-GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers six models: Quick,
-Deep, Qwen 3.6, MiniCPM5, Maple and Inkling 2 Mini (32 GB and up); see
+GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers seven models: Quick,
+Deep, Qwen 3.6, MiniCPM5 2B, MiniCPM5 1B, Maple and Inkling 2 Mini (32 GB and
+up); see
 [the engine](docs/ENGINE.md).
 
 ## Scope
@@ -49,9 +51,9 @@ Inkling 2 Mini (`--model inkling2mini`) reads one pinned file,
 SHA-256 `e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3`),
 and copies every tensor unchanged; `--local-gguf <file>` installs from a local
 copy of that file after checking its size and SHA-256.
-Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) up
+Set `HF_TOKEN` only if requested. Source reads range from ~0.6 GB (MiniCPM5-1B) up
 to the vendor BF16 repo that the `qwen36original` control install reads,
-producing installs from ~1.4 GB to ~20 GB; check disk before installing.
+producing installs from ~0.6 GB to ~20 GB; check disk before installing.
 Retired families (Gemma 4 and its QAT install, DeepSeek-V4-Flash,
 Inkling-Small, GLM-5.3-Flash, Flint, Qwen3.8-Flash-Next and its Unsloth GGUF,
 Swift-Qwen3.8) live only in git history at `mference-app` `8ff588c`; this
@@ -62,7 +64,7 @@ remove them with `--discard-partial`.
 ## Models and the library
 
 Install directories take the family's own label (`qwen36.gturbo`,
-`qwen38.gturbo`, `minicpm5.gturbo`, and so on for the labels
+`qwen38.gturbo`, `minicpm5.gturbo`, `minicpm5-1b.gturbo`, and so on for the labels
 `MferenceRepack --help` lists), but detection goes by each directory's own
 manifest, not its name. `MferenceServer --library`
 scans the library roots — the `Mference.libraryRoot` default if set,

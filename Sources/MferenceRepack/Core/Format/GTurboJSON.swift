@@ -35,6 +35,10 @@ enum GTurboJSON {
         case .inkling2Loop:
             // Never quantized at install: its tensors are the GGUF's bytes.
             return "none-gguf-bytes-copied"
+        case .minicpm5_1b:
+            // No original-repo source: installed only from the vendor's MLX
+            // conversion, whose quantized bytes are copied unchanged.
+            return "none-mlx-bytes-copied"
         }
     }
 
@@ -95,7 +99,7 @@ enum GTurboJSON {
         // MiniCPM5: the same dense trio, plus the one axis it is the first
         // family to set away from the default. Emitted for this family only,
         // so every other manifest stays byte-identical.
-        if arch.family == .minicpm5 {
+        if arch.family.isMiniCPM5 {
             archDict["numSharedExperts"] = arch.numSharedExperts
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["denseIntermediateSize"] = arch.denseIntermediateSize
@@ -132,7 +136,7 @@ enum GTurboJSON {
         // Dense family: there is no router, shared expert or routed expert to
         // quantize. Mark the slots absent (Maple's sharedExpert convention);
         // embedding/attention keep the affine INT4 entries from the loop.
-        if arch.family == .qwen38 || arch.family == .minicpm5 {
+        if arch.family == .qwen38 || arch.family.isMiniCPM5 {
             let absent: [String: Any] = [
                 "weightBits": 0,
                 "scheme": "none",

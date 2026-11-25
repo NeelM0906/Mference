@@ -370,9 +370,9 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
     }
 
     private static func validate(config: ArchConfig, maxContext: Int) throws {
-        guard config.family == .minicpm5 else {
+        guard config.family.isMiniCPM5 else {
             throw MiniCPM5ForwardRunnerError.invalidConfiguration(
-                "MiniCPM5ForwardRunner requires the minicpm5 family")
+                "MiniCPM5ForwardRunner requires a MiniCPM5 family")
         }
         guard config.numExperts == 0, !config.attnOutputGate, !config.qkNorm,
               !config.hasLinearAttentionLayers, !config.hasCompressedAttentionLayers,

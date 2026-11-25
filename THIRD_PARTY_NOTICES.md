@@ -10,7 +10,7 @@ Mference's runtime, installer, and application code are derived from
 Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
-rebrand throughout; support for Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5-2B, and Inkling 2 Mini
+rebrand throughout; support for Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5-2B, MiniCPM5-1B, and Inkling 2 Mini
 across architecture configuration,
 streaming installation, Metal kernels, forward runners, tokenization, and
 products; model-derived kernel specialization; and expanded validation and
@@ -117,6 +117,18 @@ revision `35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3` of
 is the vendor's own conversion under the same license. No reference code was
 imported for this family: its architecture was read from
 `transformers` v5.6.2 (Apache-2.0) and nothing was copied from it.
+
+MiniCPM5-1B: revision `c973e24a2c77861038301f4e27d1b34a5931fc91` of
+[`openbmb/MiniCPM5-1B-MLX`](https://huggingface.co/openbmb/MiniCPM5-1B-MLX),
+the vendor's own MLX INT4 affine group-64 conversion, installed with its
+quantized bytes copied unchanged; the installer verifies its source-index
+SHA-256 `b9f00d16700ba0dd01bbd72d270080757355ddf41fbe678620a93dc39d5c8639`.
+OpenBMB publishes it under the same
+[Apache License 2.0](https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE)
+(`license: apache-2.0` in the model card). The 1B chat-template fixture
+(`Tests/Mference/Core/Tokenization/Fixtures/MiniCPM5_1BTokenizer/chat_template.jinja`)
+is the vendor's template from that revision, unchanged; no reference code was
+imported.
 
 GGUF models run through the `LlamaCpp` target are not installed by
 `MferenceRepack`; they are single files read in place. Two are product models,
