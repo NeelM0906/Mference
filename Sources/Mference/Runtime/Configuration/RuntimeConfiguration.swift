@@ -168,7 +168,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static func familyPrefillChunkTokens(for family: ModelFamily) -> Int? {
         switch family {
         case .inkling2Loop: 2048
-        case .qwen36, .qwen38, .maple, .minicpm5: nil
+        case .qwen36, .qwen38, .maple, .minicpm5, .minicpm5_1b: nil
         }
     }
 

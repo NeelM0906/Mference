@@ -111,6 +111,9 @@ public struct MFTokenizer: @unchecked Sendable {
     /// clean-up rule (" ' " to "'") rewrites a chain of quotes from arbitrarily
     /// far back.
     var decodeCleansUpSpaces = true
+    /// The `minicpm` dialect's checkpoint template, chosen from the manifest
+    /// family (`MiniCPMChatTemplate.swift`); unused by other dialects.
+    let miniCPMTemplate: MiniCPMTemplateVariant
 
     public static func load(from folder: URL) async throws -> MFTokenizer {
         try await load(from: folder, family: nil)
@@ -189,7 +192,7 @@ public struct MFTokenizer: @unchecked Sendable {
         self.supportsOptInThinking = family == .qwen36
 
         let dialect: ChatDialect? =
-            if family == .minicpm5
+            if family?.isMiniCPM5 == true
                         || (Self.specialTokenID(tokenizer, Self.miniCPMFunctionOpen) != nil
                             && Self.specialTokenID(tokenizer, Self.imEndMark) != nil) {
                 // Shares `<|im_end|>` with ChatML; the `<function` special
@@ -226,6 +229,7 @@ public struct MFTokenizer: @unchecked Sendable {
         }
 
         self.dialect = dialect
+        self.miniCPMTemplate = MiniCPMTemplateVariant(family: family)
         self.bosID = resolved.bosID
         self.bosPrefixID = resolved.bosPrefixID
         self.eosID = resolved.eosID

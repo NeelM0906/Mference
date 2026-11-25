@@ -3,7 +3,10 @@ import Foundation
 /// The `minicpm` dialect: a hand-port of `openbmb/MiniCPM5-2B`'s
 /// `chat_template.jinja` (revision `cd199ce3`, SHA-256 `cc945752…`), byte-matched
 /// to `transformers` 5.6.2 `apply_chat_template` on the committed fixture set
-/// (`Tests/Mference/Core/Tokenization/Fixtures/MiniCPM5Tokenizer/renders.json`).
+/// (`Tests/Mference/Core/Tokenization/Fixtures/MiniCPM5Tokenizer/renders.json`),
+/// and of `openbmb/MiniCPM5-1B-MLX`'s (revision `c973e24a`, SHA-256
+/// `7451a05c…`, fixtures in `MiniCPM5_1BTokenizer/`). The two templates differ
+/// only in how a past assistant turn renders; see `MiniCPMTemplateVariant`.
 ///
 /// ChatML framing with `<s>` first. Three facts of the *rendered* template that
 /// are easy to get wrong from reading it, and are pinned by the fixtures:
@@ -36,6 +39,23 @@ extension MFTokenizer {
 
     static let miniCPMDefaultThinking: MiniCPMThinking = .enabled
 
+    /// Which checkpoint's template the dialect renders. Everything but the
+    /// assistant turn is shared.
+    ///
+    /// - `v2B` (`MiniCPM5-2B`): every assistant turn keeps its reasoning, and
+    ///   a turn without a think block is given an empty one.
+    /// - `v1B` (`MiniCPM5-1B`): only assistant turns after the last real user
+    ///   query (one that is not a bare `<tool_response>` wrapper) keep their
+    ///   reasoning; every other turn renders its content alone, reasoning
+    ///   stripped, with no empty think block added.
+    enum MiniCPMTemplateVariant: Sendable {
+        case v2B, v1B
+
+        init(family: ModelFamily?) {
+            self = family == .minicpm5_1b ? .v1B : .v2B
+        }
+    }
+
     private static let miniCPMBOS = "<s>"
     private static let miniCPMToolDefinitionsHead =
         "# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>"
@@ -53,7 +73,9 @@ extension MFTokenizer {
     func miniCPMRender(messages: [Message],
                        tools: [FunctionDefinition],
                        thinking: MiniCPMThinking,
-                       addGenerationPrompt: Bool = true) throws -> String {
+                       addGenerationPrompt: Bool = true,
+                       variant: MiniCPMTemplateVariant? = nil) throws -> String {
+        let variant = variant ?? miniCPMTemplate
         var s = Self.miniCPMBOS
         if !tools.isEmpty {
             let definitions = try Self.miniCPMToolDefinitions(tools)
@@ -73,6 +95,7 @@ extension MFTokenizer {
             s += Self.imStartMark + "system\n" + (first.content ?? "") + Self.imEndMark + "\n"
         }
 
+        let lastQueryIndex = Self.miniCPMLastQueryIndex(messages)
         for (index, message) in messages.enumerated() {
             let content = message.content ?? ""
             switch message.role {
@@ -83,7 +106,9 @@ extension MFTokenizer {
                     s += Self.imStartMark + "system\n" + content + Self.imEndMark + "\n"
                 }
             case .assistant:
-                s += try Self.miniCPMAssistantTurn(content: content, calls: message.toolCalls)
+                s += try Self.miniCPMAssistantTurn(
+                    content: content, calls: message.toolCalls, variant: variant,
+                    afterLastQuery: index > lastQueryIndex)
             case .tool:
                 let previousIsTool = index > 0 && messages[index - 1].role == .tool
                 let nextIsTool = index + 1 < messages.count && messages[index + 1].role == .tool
@@ -104,8 +129,27 @@ extension MFTokenizer {
         return s
     }
 
+    /// `ns.last_query_index`: the template walks the messages backwards and
+    /// stops at the first user turn with string content that is not a bare
+    /// `<tool_response>…</tool_response>` wrapper; with none it is the last
+    /// index. Only the 1B template reads it. Developer turns render as user
+    /// turns here, so they count as one.
+    static func miniCPMLastQueryIndex(_ messages: [Message]) -> Int {
+        for index in messages.indices.reversed() {
+            let message = messages[index]
+            guard message.role == .user || message.role == .developer,
+                  let content = message.content else { continue }
+            if !(content.hasPrefix("<tool_response>") && content.hasSuffix("</tool_response>")) {
+                return index
+            }
+        }
+        return messages.count - 1
+    }
+
     private static func miniCPMAssistantTurn(content raw: String,
-                                             calls: [HistoricalToolCall]) throws -> String {
+                                             calls: [HistoricalToolCall],
+                                             variant: MiniCPMTemplateVariant,
+                                             afterLastQuery: Bool) throws -> String {
         var content = raw
         var reasoning = ""
         if let close = content.range(of: "</think>") {
@@ -128,7 +172,16 @@ extension MFTokenizer {
             }
         }
         var s: String
-        if !reasoning.isEmpty {
+        if variant == .v1B {
+            // 1B: reasoning survives only after the last user query; no
+            // empty think block is ever added.
+            if afterLastQuery && !reasoning.isEmpty {
+                s = imStartMark + "assistant\n<think>\n" + pythonStripNewlines(reasoning)
+                    + "\n</think>\n\n" + pythonLstripNewlines(content)
+            } else {
+                s = imStartMark + "assistant\n" + content
+            }
+        } else if !reasoning.isEmpty {
             s = imStartMark + "assistant\n<think>\n" + pythonStripNewlines(reasoning)
                 + "\n</think>\n\n" + pythonLstripNewlines(content)
         } else if !content.contains("<think>") && !content.contains("</think>") {

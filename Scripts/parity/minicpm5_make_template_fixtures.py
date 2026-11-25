@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """Byte-exact chat-template fixtures for the ``minicpm5`` dialect.
 
-Renders a fixed set of conversations through the pinned checkpoint's real
+Renders a fixed set of conversations through a pinned checkpoint's real
 ``tokenizer.json`` + ``chat_template.jinja`` with ``transformers``
 ``apply_chat_template`` and writes them, with their inputs, to
-``Tests/Mference/Core/Tokenization/Fixtures/MiniCPM5Tokenizer/renders.json``.
+``Tests/Mference/Core/Tokenization/Fixtures/<fixture>/renders.json``.
 ``MiniCPM5TemplateTests`` replays the inputs through the hand-ported Swift
-dialect and compares the strings byte for byte.
+dialect and compares the strings byte for byte. Two checkpoints are pinned:
+MiniCPM5-2B (fixture ``MiniCPM5Tokenizer``, the default) and MiniCPM5-1B-MLX
+(fixture ``MiniCPM5_1BTokenizer``), whose templates differ in how a past
+assistant turn renders.
 
 Tool-call arguments are given with keys in sorted order on purpose: the Swift
 ``JSONValue.object`` is unordered and renders parameters sorted by key, while
 Jinja preserves insertion order (recorded on docs/families/MINICPM5.md).
 
-    Scripts/parity/minicpm5_make_template_fixtures.py <dir-with-tokenizer-files>
+    Scripts/parity/minicpm5_make_template_fixtures.py <dir-with-tokenizer-files> [2b|1b]
 """
 import json, sys, hashlib
 from pathlib import Path
 from transformers import AutoTokenizer
 import transformers
 
+CHECKPOINTS = {
+    "2b": ("MiniCPM5Tokenizer", "openbmb/MiniCPM5-2B", "cd199ce3ee67549c42ef7372f809f2c63599a3e9"),
+    "1b": ("MiniCPM5_1BTokenizer", "openbmb/MiniCPM5-1B-MLX", "c973e24a2c77861038301f4e27d1b34a5931fc91"),
+}
 src = Path(sys.argv[1])
-out_dir = Path(__file__).resolve().parents[2] / "Tests/Mference/Core/Tokenization/Fixtures/MiniCPM5Tokenizer"
+fixture, repo, revision = CHECKPOINTS[sys.argv[2] if len(sys.argv) > 2 else "2b"]
+out_dir = Path(__file__).resolve().parents[2] / "Tests/Mference/Core/Tokenization/Fixtures" / fixture
 tok = AutoTokenizer.from_pretrained(str(src))
 
 TOOLS = [
@@ -116,6 +124,33 @@ CASES = [
             call("get_weather", {"city": "Oslo"}, "call_7")]},
         {"role": "tool", "content": "cold", "tool_call_id": "call_7"},
         ], TOOLS, {"enable_thinking": True}),
+    # Where the two templates part: reasoning in a tool loop that the last
+    # user query closed off, and one it still belongs to.
+    ("tool_loop_think_before_and_after_last_query", [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": "<think>\nold loop\n</think>\n\nChecking.", "tool_calls": [
+            call("get_weather", {"city": "Oslo"}, "call_8")]},
+        {"role": "tool", "content": "cold", "tool_call_id": "call_8"},
+        {"role": "assistant", "content": "<think>\nsummarize\n</think>\n\nIt is cold."},
+        {"role": "user", "content": "And Rome?"},
+        {"role": "assistant", "content": "<think>\nnew loop\n</think>\n\nChecking again.", "tool_calls": [
+            call("get_weather", {"city": "Rome"}, "call_9")]},
+        {"role": "tool", "content": "warm", "tool_call_id": "call_9"},
+        ], TOOLS, {"enable_thinking": True}),
+    # A user turn that is only a tool-response wrapper is not a query: the
+    # last real query is the one before it.
+    ("user_tool_response_wrapper_is_not_a_query", [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "<think>\nkept\n</think>\n\nA1"},
+        {"role": "user", "content": "<tool_response>\nraw\n</tool_response>"},
+        ], None, {"enable_thinking": True}),
+    # An unclosed think block in history, and an empty assistant turn.
+    ("history_unclosed_think_and_empty_turn", [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "<think>\nunfinished"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "Q3"}], None, {"enable_thinking": True}),
 ]
 
 # The three frozen community-protocol prompts, so the byte-exact check also
@@ -142,7 +177,7 @@ probe = {s: tok.encode(s, add_special_tokens=False) for s in
          ["<think>\n", "</think>\n\n", "<function name=\"get_weather\"><param name=\"city\">Paris</param></function>",
           "<tool_response>\nx\n</tool_response>", "<tool_sep>", "Hello world", "<|im_start|>user\nHi<|im_end|>\n"]}
 out = {
-    "source": {"repo": "openbmb/MiniCPM5-2B", "revision": "cd199ce3ee67549c42ef7372f809f2c63599a3e9",
+    "source": {"repo": repo, "revision": revision,
                "chat_template_sha256": hashlib.sha256((src / "chat_template.jinja").read_bytes()).hexdigest(),
                "tokenizer_json_sha256": hashlib.sha256((src / "tokenizer.json").read_bytes()).hexdigest(),
                "transformers": transformers.__version__},

@@ -43,6 +43,7 @@ documented as what has been exercised, not as what is permitted.
 | Q38 | Qwen 3.8 27B | `qwen38` | `ArchConfig.qwen38_27B` |
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
 | MC5 | MiniCPM5-2B | `minicpm5` | `ArchConfig.miniCPM5_2B` |
+| MC1 | MiniCPM5-1B (vendor MLX 4-bit) | `minicpm5_1b` | `ArchConfig.miniCPM5_1B` |
 | IK2 | Inkling 2 Mini (Unsloth UD-Q4_K_XL GGUF) | `inkling2Loop` | `ArchConfig.inkling2Mini` |
 
 Retired (values only, no baseline): G4 Gemma 4 26B-A4B (`gemma4`, also any
@@ -69,7 +70,17 @@ FNU has no column of its own in the field tables below: every value equals
 FNX's except `family` and the two storage-shaped PLE fields,
 `pleNgramShardCount` (1: the GGUF stores the n-gram table as one merged
 tensor) and `pleNgramVocabSizeBase` (0: the GGUF carries the explicit per-head
-vocab sizes instead of the base). MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
+vocab sizes instead of the base).
+
+MC1 has no column of its own either: it is MC5's graph at a smaller size, so
+every value equals MC5's except `family` and the size fields: `hiddenSize`
+1536, `intermediateSize` and `denseIntermediateSize` 4608, `numLayers` and
+`numDenseLayers` 24, and `fullAttentionLayerMask` `1` on all 24 layers. It is
+its own family, not a second MC5 baseline, so `validateArch` keeps one exact
+baseline per family and the install gets its own model ID; it runs on
+`MiniCPM5ForwardRunner`.
+
+MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
 arrived together. Keep the two facts
 separate — a new
 port earns its `ArchConfig` baseline, `ModelFamily` case, tensor accessors and

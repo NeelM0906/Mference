@@ -4,7 +4,7 @@ extension ModelFamily {
     public var maximumContext: Int {
         switch self {
         case .qwen36, .qwen38: 262_144
-        case .minicpm5: 131_072
+        case .minicpm5, .minicpm5_1b: 131_072
         case .maple: 128_000
         // The checkpoint's own is 1,048,576. Launch caps it at 262,144 (8 GiB
         // of FP16 KV over its eight global visits), which also keeps

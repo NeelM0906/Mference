@@ -41,11 +41,12 @@ struct EngineCatalogDiscoveryTests {
 
     static let standardDisk = fileSystem(
         children: ["/lib": ["/lib/gguf", "/lib/maple.gturbo", "/lib/minicpm5.gturbo",
-                            "/lib/half.gturbo", "/lib/qwen36.gturbo", "/lib/qwen38.gturbo",
+                            "/lib/minicpm5-1b.gturbo", "/lib/half.gturbo", "/lib/qwen36.gturbo", "/lib/qwen38.gturbo",
                             "/lib/inkling2mini.gturbo"]],
         probes: ["/lib/qwen36.gturbo": .complete(family: .qwen36),
                  "/lib/inkling2mini.gturbo": .complete(family: .inkling2Loop),
                  "/lib/minicpm5.gturbo": .complete(family: .minicpm5),
+                 "/lib/minicpm5-1b.gturbo": .complete(family: .minicpm5_1b),
                  "/lib/maple.gturbo": .complete(family: .maple),
                  "/lib/qwen38.gturbo": .complete(family: .qwen38),
                  "/lib/half.gturbo": .partial("receipt missing")],
@@ -63,10 +64,18 @@ struct EngineCatalogDiscoveryTests {
         let catalog = EngineCatalogDiscovery.discover(roots: [Self.library], ggufDirectories: [Self.gguf],
                                                       fileSystem: Self.standardDisk, physicalMemory: Self.roomy)
         #expect(catalog.models.map(\.id) == [
-            "bonsai-2.5-27b-q2_0", "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64",
-            "qwen3.5-4b", "qwen3.6-35b-a3b", "qwen3.8-27b",
+            "bonsai-2.5-27b-q2_0", "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-1b-mlx-4bit",
+            "minicpm5-2b-int4g64", "qwen3.5-4b", "qwen3.6-35b-a3b", "qwen3.8-27b",
         ])
         #expect(Set(catalog.models.compactMap(\.product)) == Set(EngineProductSlot.allCases))
+        // The two MiniCPM5 sizes are separate product models side by side.
+        let small = try #require(catalog.descriptor(for: "minicpm5-1b-mlx-4bit"))
+        #expect(small.product == .minicpm5_1b)
+        #expect(small.engine == .mference)
+        #expect(small.format == .gturbo(family: .minicpm5_1b, checkpointID: nil))
+        #expect(small.location.lastPathComponent == "minicpm5-1b.gturbo")
+        #expect(small.contextLength == 131_072)
+        #expect(catalog.descriptor(for: "minicpm5-2b-int4g64")?.product == .minicpm5)
         let deep = try #require(catalog.descriptor(for: "qwen3.8-27b"))
         #expect(deep.engine == .llamaCpp)
         #expect(deep.location == Self.deepFile)
@@ -113,8 +122,9 @@ struct EngineCatalogDiscoveryTests {
                                                       scope: .all, fileSystem: Self.standardDisk,
                                                       physicalMemory: Self.roomy)
         #expect(catalog.models.map(\.id) == [
-            "bonsai-2.5-27b-q2_0", "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64",
-            "other-model.q8_0", "qwen3.5-4b", "qwen3.6-35b-a3b", "qwen3.8-27b", "qwen3.8-27b-4bit",
+            "bonsai-2.5-27b-q2_0", "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-1b-mlx-4bit",
+            "minicpm5-2b-int4g64", "other-model.q8_0", "qwen3.5-4b",
+            "qwen3.6-35b-a3b", "qwen3.8-27b", "qwen3.8-27b-4bit",
         ])
         let other = try #require(catalog.descriptor(for: "other-model.q8_0"))
         #expect(other.product == nil)
@@ -390,6 +400,7 @@ struct EngineCatalogDiscoveryTests {
             .qwen38: "qwen3.8-27b-4bit",
             .maple: "maple-preview-2bit-mlx",
             .minicpm5: "minicpm5-2b-int4g64",
+            .minicpm5_1b: "minicpm5-1b-mlx-4bit",
             .inkling2Loop: "inkling-2-mini-ud-q4_k_xl",
         ]
         #expect(Set(expected.keys) == Set(ModelFamily.allCases))
@@ -403,6 +414,7 @@ struct EngineCatalogDiscoveryTests {
                 == "qwen3.6-35b-a3b")
         #expect(EngineNativeModelID.modelID(for: .qwen36) == EngineProductSlot.qwen36.modelID)
         #expect(EngineNativeModelID.modelID(for: .minicpm5) == EngineProductSlot.minicpm5.modelID)
+        #expect(EngineNativeModelID.modelID(for: .minicpm5_1b) == EngineProductSlot.minicpm5_1b.modelID)
         #expect(EngineNativeModelID.modelID(for: .maple) == EngineProductSlot.maple.modelID)
         #expect(EngineNativeModelID.modelID(for: .inkling2Loop) == EngineProductSlot.inkling2Mini.modelID)
         #expect(EngineCatalogDiscovery.ggufModelID(fileName: "Foo-Bar.Q4.gguf") == "foo-bar.q4")

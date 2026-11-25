@@ -10,7 +10,10 @@ extension ArchConfig {
     /// production shape does (`hiddenSize % 64`, even rotaryDim, `numHeads %
     /// numKVHeads == 0`) and match the toy `LlamaConfig` the reference-parity
     /// goldens are captured from (`Scripts/parity/minicpm5_make_goldens.py`).
-    static func miniCPM5Toy() -> ArchConfig {
+    ///
+    /// `family` lets a test stand the same toy up as `minicpm5_1b`: the two
+    /// sizes share every axis but the size fields, so the toy covers both.
+    static func miniCPM5Toy(family: ModelFamily = .minicpm5) -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
             intermediateSize: 128,
@@ -33,7 +36,7 @@ extension ArchConfig {
             attentionKEqV: false,
             fullAttentionLayerMask: [1, 1, 1, 1],
             hiddenActivation: "silu",
-            family: .minicpm5,
+            family: family,
             attnOutputGate: false,
             attentionScale: 0.25,   // 16^-0.5
             embeddingScaledBySqrtHidden: false,

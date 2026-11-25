@@ -69,8 +69,8 @@ enum MiniCPM5Parity {
     /// Writes a `.gturbo` install of the toy checkpoint: every rank-2
     /// projection INT4 affine group-64 through `Int4AffineEncoder`, norms
     /// BF16 verbatim, zero experts, the minicpm5 manifest.
-    static func installToyCheckpoint() throws -> URL {
-        let arch = archConfig()
+    static func installToyCheckpoint(family: ModelFamily = .minicpm5) throws -> URL {
+        let arch = ArchConfig.miniCPM5Toy(family: family)
         let source = try Safetensors(url: checkpointURL)
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-minicpm5-parity-\(UUID().uuidString)")

@@ -59,6 +59,7 @@ Notes and Errands tabs they show are not built yet.</sub>
 | Bonsai | [Ternary Bonsai 2.5 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2.5-27B-GGUF) Q2_0, MTP | 7.9 GB | 95 / 22 | 3.2 GB + 7.9 GB mapped |
 | | [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (MoE) | 19.6 GB | 258 / 29 | 8.3 GB |
 | | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | 1.4 GB | 422 / 72 | 0.8 GB |
+| | [MiniCPM5-1B](https://huggingface.co/openbmb/MiniCPM5-1B-MLX) MLX 4-bit | 0.6 GB | not yet measured | not yet measured |
 | | [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) 20B-A1B (MoE) | 6.6 GB | 44 / 33 | 0.7 GB |
 | | [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) UD-Q4_K_XL (looped MoE), 32 GB Macs and up | 17.7 GB | 229 / 26 | 14.4 GB |
 
@@ -84,12 +85,12 @@ App/Scripts/run.sh                       # builds, bundles and opens the app
 ```
 
 On first run the app helps you pick a model. Quick, Deep and Bonsai download
-from inside the app into `~/llm-models/gguf/`. The other four are installed from
+from inside the app into `~/llm-models/gguf/`. The other five are installed from
 the terminal, and the app finds them in `~/llm-models` on its own:
 
 ```sh
 swift run -c release MferenceRepack --model qwen36 --output ~/llm-models/qwen36.gturbo
-# or --model minicpm5 / maple / inkling2mini; resume an interrupted install with --resume
+# or --model minicpm5 / minicpm5-1b / maple / inkling2mini; resume an interrupted install with --resume
 ```
 
 ## For developers

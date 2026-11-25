@@ -172,6 +172,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         case .inkling2Mini: "Mini"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
+        case .minicpm5_1b: "1B"
         case .maple, .apple: ""
         }
     }
@@ -184,6 +185,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         case .inkling2Mini: "Mference install of Unsloth UD-Q4_K_XL"
         case .qwen36: "Mference install, experts stream from the SSD"
         case .minicpm5: "Mference install, 4-bit"
+        case .minicpm5_1b: "Mference install, 4-bit"
         case .maple: "Mference install, 2-bit"
         case .apple: "Built into macOS"
         }

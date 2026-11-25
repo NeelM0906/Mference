@@ -55,6 +55,9 @@ public struct MemoryFit: Sendable, Hashable {
         case .inkling2Mini: (1.0, 2_048 << 20)
         case .qwen36: (0.3, 2_048 << 20)
         case .minicpm5: (1.0, 1_024 << 20)
+        // Fully resident like the 2B; 24 layers of the same KV width, so a
+        // little over half the 2B's KV at the same context.
+        case .minicpm5_1b: (1.0, 768 << 20)
         case .maple: (1.0, 1_536 << 20)
         case .apple: (0, 0)
         }

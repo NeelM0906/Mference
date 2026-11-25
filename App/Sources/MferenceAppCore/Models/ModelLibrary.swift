@@ -50,6 +50,7 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
         case .inkling2Mini: "Inkling 2 · Mini"
         case .qwen36: "Qwen 3.6 · 35B-A3B"
         case .minicpm5: "MiniCPM5 · 2B"
+        case .minicpm5_1b: "MiniCPM5 · 1B"
         case .maple: "Maple · Preview"
         case .apple: "Apple Intelligence"
         }

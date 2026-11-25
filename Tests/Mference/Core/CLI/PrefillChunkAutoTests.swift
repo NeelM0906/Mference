@@ -65,7 +65,7 @@ import Testing
                 let expected = switch family {
                 case .inkling2Loop: 2_048
                 case .qwen36: memory >= 16 * gib ? 2_048 : 128
-                case .qwen38, .maple, .minicpm5: 128
+                case .qwen38, .maple, .minicpm5, .minicpm5_1b: 128
                 }
                 #expect(PrefillChunkChoice.auto.chatChunkTokens(for: family, physicalMemoryBytes: memory) == expected,
                         "\(family) at \(memory >> 20) MiB")

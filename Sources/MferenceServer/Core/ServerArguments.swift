@@ -64,7 +64,8 @@ public struct ServerArguments: Equatable, Sendable {
       --catalog <product|all>
                              With --library: list only the product models
                              (default: qwen3.6-35b-a3b, minicpm5-2b-int4g64,
-                             maple-preview-2bit-mlx) or every runnable install
+                             minicpm5-1b-mlx-4bit, maple-preview-2bit-mlx) or
+                             every runnable install
                              (all, a developer switch). A request for an
                              install the product catalog declines gets 400
                              model_not_runnable naming --catalog all.
@@ -78,8 +79,9 @@ public struct ServerArguments: Equatable, Sendable {
                              and fails when Tailscale is unavailable.
       --model-id <id>        API model identifier (default derived from the
                              installed model: qwen3.6-35b-a3b,
-                             qwen3.8-27b-4bit, maple-preview-2bit-mlx, or
-                             minicpm5-2b-int4g64). Single-model mode only.
+                             qwen3.8-27b-4bit, maple-preview-2bit-mlx,
+                             minicpm5-2b-int4g64, or minicpm5-1b-mlx-4bit).
+                             Single-model mode only.
       --max-context <tokens|max>
                              Context length in tokens (default 16384), up to
                              the model's native context: 262144 for Qwen 3.6

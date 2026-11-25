@@ -82,6 +82,72 @@ struct MiniCPM5RepackPlannerTests {
         #expect(arch.qkNorm == false)
     }
 
+    /// The 1B's sizes over the 2B's config (`openbmb/MiniCPM5-1B-MLX` @
+    /// `c973e24a` differs only in these keys and its MLX `quantization`
+    /// block), which installs as its own family.
+    private func asMiniCPM5_1B(_ config: inout [String: Any]) {
+        config["_name_or_path"] = "MiniCPM5-1B-MLX"
+        config["hidden_size"] = 1536
+        config["intermediate_size"] = 4608
+        config["num_hidden_layers"] = 24
+        config["quantization"] = ["group_size": 64, "bits": 4, "mode": "affine"]
+        config["quantization_config"] = ["group_size": 64, "bits": 4, "mode": "affine"]
+    }
+
+    @Test func productionMiniCPM5_1BConfigParsesAsItsOwnFamily() throws {
+        let root = temporaryRoot("prod-1b")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let configPath = (root as NSString).appendingPathComponent("config.json")
+        try writeProductionConfig(to: configPath, mutate: { asMiniCPM5_1B(&$0) })
+
+        let arch = try ArchInfo.load(configPath: configPath)
+        #expect(arch.family == .minicpm5_1b)
+        #expect(arch.family.isMiniCPM5)
+        #expect(arch.hiddenSize == 1536)
+        #expect(arch.intermediateSize == 4608)
+        #expect(arch.denseIntermediateSize == 4608)
+        #expect(arch.numLayers == 24)
+        #expect(arch.numDenseLayers == 24)
+        #expect(arch.fullAttentionLayerMask == [UInt8](repeating: 1, count: 24))
+        #expect(arch.numHeads == 16)
+        #expect(arch.numKVHeads == 2)
+        #expect(arch.headDim == 128)
+        #expect(arch.vocabSize == 130_560)
+        #expect(arch.ropeTheta == 5_000_000.0)
+        #expect(arch.attentionScale == 0.08838834764831845)
+        #expect(arch.qkNorm == false)
+        #expect(arch.tieWordEmbeddings == false)
+    }
+
+    @Test("a 1B-shaped llama config that is not MiniCPM5-1B is refused",
+          arguments: [
+            Mutation(key: "num_attention_heads", json: "12"),
+            Mutation(key: "intermediate_size", json: "6144"),
+            Mutation(key: "rope_theta", json: "10000.0"),
+            Mutation(key: "tie_word_embeddings", json: "true"),
+            Mutation(key: "vocab_size", json: "130000"),
+          ])
+    private func productionMiniCPM5_1BConfigMismatchIsRejected(mutation: Mutation) throws {
+        let root = temporaryRoot("prod-1b-bad")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let configPath = (root as NSString).appendingPathComponent("config.json")
+        try writeProductionConfig(to: configPath, mutate: { config in
+            asMiniCPM5_1B(&config)
+            config[mutation.key] = mutation.value
+        })
+        #expect(throws: RepackError.self) {
+            _ = try ArchInfo.load(configPath: configPath)
+        }
+    }
+
+    @Test func familyFollowsTheShape() {
+        #expect(ArchInfo.miniCPM5Family(hiddenSize: 1536, numLayers: 24) == .minicpm5_1b)
+        #expect(ArchInfo.miniCPM5Family(hiddenSize: 2048, numLayers: 42) == .minicpm5)
+        // Toy and partial shapes stay the 2B's family, as before.
+        #expect(ArchInfo.miniCPM5Family(hiddenSize: 1536, numLayers: 4) == .minicpm5)
+        #expect(ArchInfo.miniCPM5Family(hiddenSize: 128, numLayers: 24) == .minicpm5)
+    }
+
     /// One JSON mutation of the production config, as a `Sendable` test
     /// argument: the key and a JSON-encoded replacement value.
     private struct Mutation: Sendable, CustomTestStringConvertible {
@@ -156,6 +222,18 @@ struct MiniCPM5RepackPlannerTests {
             == "minicpm5-2b-mlx-4bit")
         // Two installs of one checkpoint must stay tellable apart.
         #expect(bf16?.modelID != control?.modelID)
+
+        let small = try? #require(SupportedModelSource.named("minicpm5-1b"))
+        #expect(small?.repoID == "openbmb/MiniCPM5-1B-MLX")
+        #expect(small?.kind == .preQuantized)
+        #expect(small?.isPinned == true)
+        #expect(small?.revision == "c973e24a2c77861038301f4e27d1b34a5931fc91")
+        #expect(small?.approximateDownloadBytes == 608_026_621)
+        #expect(SourceFingerprint.modelID(forIndexSha256:
+            "b9f00d16700ba0dd01bbd72d270080757355ddf41fbe678620a93dc39d5c8639")
+            == "minicpm5-1b-mlx-4bit")
+        #expect(small?.modelID != control?.modelID)
+        #expect(small?.modelID != bf16?.modelID)
     }
 
     /// A missing `quantization` block is accepted only when the caller vouches

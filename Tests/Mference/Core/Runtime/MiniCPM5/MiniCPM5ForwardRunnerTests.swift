@@ -117,6 +117,22 @@ import Testing
         #expect((runtime.producer as? any FusedHeadLogitProducer)?.usesFusedGreedyHead == true)
     }
 
+    /// The 1B family runs on the same runner: its manifest family routes it
+    /// there, not to the shared fallback runner.
+    @Test func factory_selectsTheMiniCPM5RunnerForThe1BFamily() throws {
+        let dir = try MiniCPM5Parity.installToyCheckpoint(family: .minicpm5_1b)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ctx = try MetalContext()
+        let model = try Model.load(directoryURL: dir, device: ctx.device,
+                                   expecting: .miniCPM5Toy(family: .minicpm5_1b))
+        #expect(model.config.family == .minicpm5_1b)
+        let runtime = try ForwardRunnerFactory.make(
+            model: model, context: ctx, maxContext: 64,
+            runtimeConfiguration: RuntimeConfiguration(prefillEnabled: true, forceLogitsHead: false))
+        #expect(runtime.producer is MiniCPM5ForwardRunner)
+        #expect(runtime.kvStorageMode == .fp16)
+    }
+
     /// The runner refuses a config that still carries q/k norms: that family
     /// belongs to the fused-epilogue runners.
     @Test func runner_refusesAQKNormConfig() throws {

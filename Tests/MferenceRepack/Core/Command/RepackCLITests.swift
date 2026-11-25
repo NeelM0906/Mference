@@ -82,7 +82,7 @@ struct RepackCLITests {
     }
 
     @Test func miniCPM5ModelSelectorsAreAccepted() throws {
-        for selector in ["minicpm5", "minicpm5mlx"] {
+        for selector in ["minicpm5", "minicpm5mlx", "minicpm5-1b"] {
             let output = temporaryOutput("\(selector)-model")
             defer { clean(output) }
             let result = try run([
