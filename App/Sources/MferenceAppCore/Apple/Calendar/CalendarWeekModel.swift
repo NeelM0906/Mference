@@ -459,9 +459,12 @@ public final class CalendarWeekModel {
     }
 
     public func setDone(_ done: Bool, for id: UUID) {
+        let stamp = now()
         persist {
             guard let index = $0.todos.firstIndex(where: { $0.id == id }) else { return }
+            guard $0.todos[index].isDone != done else { return }
             $0.todos[index].isDone = done
+            $0.todos[index].completedAt = done ? stamp : nil
         }
         changedLocally()
     }
@@ -500,8 +503,9 @@ public final class CalendarWeekModel {
         }
     }
 
-    /// The panel's groups: Overdue, Today, each later day, No date, then
-    /// Completed. A day group is shown for the selected day even when empty.
+    /// The panel's groups: Overdue, Today, each later day and No date, with
+    /// to-dos done today struck through in place. A day group is shown for
+    /// the selected day even when empty.
     public var todoSections: [TodoSection] {
         TodoSection.sections(todos, today: today, selected: calendar.startOfDay(for: selectedDate), calendar: calendar)
     }
@@ -584,6 +588,11 @@ public final class CalendarWeekModel {
                         // during the sync keeps its edit (pushed next time).
                         if $0.todos[index].reminderFields == pushed[$0.todos[index].id] {
                             $0.todos[index].title = fields.title
+                            // Stamped only when it changes: a reminder that
+                            // stays done keeps its day and leaves the panel.
+                            let wasDone = $0.todos[index].isDone
+                            if !wasDone && fields.isDone { $0.todos[index].completedAt = stamp }
+                            if wasDone && !fields.isDone { $0.todos[index].completedAt = nil }
                             $0.todos[index].isDone = fields.isDone
                             $0.todos[index].due = fields.due
                         }

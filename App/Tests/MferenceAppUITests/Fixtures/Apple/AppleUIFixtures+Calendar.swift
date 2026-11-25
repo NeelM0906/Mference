@@ -41,6 +41,7 @@ extension AppleUIFixtures {
                  createdAt: date(14, 9, 2)),
         TodoItem(title: "Share the launch checklist",
                  source: ItemSource(kind: .meeting, label: "Weekly product sync"), createdAt: date(14, 9, 3)),
-        TodoItem(title: "Expense the team lunch", isDone: true, createdAt: date(14, 9, 4)),
+        // Checked off this morning: shown struck through in No date.
+        TodoItem(title: "Expense the team lunch", isDone: true, createdAt: date(14, 9, 4), completedAt: now),
     ]
 }

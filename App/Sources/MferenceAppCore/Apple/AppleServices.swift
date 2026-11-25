@@ -40,7 +40,8 @@ public final class AppleServices {
         let mailSource = AppleMailSource()
         let calendar = CalendarWeekModel(service: calendarService, store: plannerStore)
         let mail = MailInboxModel(source: mailSource, assistant: assistant,
-                                  drafter: MailReplyDrafter(engine: engine), sender: AppleMailSender(broker: broker),
+                                  drafter: MailReplyDrafter(engine: engine),
+                                  composeWriter: MailComposeWriter(engine: engine), sender: AppleMailSender(broker: broker),
                                   broker: broker,
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,
@@ -69,7 +70,8 @@ public final class AppleServices {
             fallback: QuickTextModel(engine: engine))
         let calendar = CalendarWeekModel(service: calendarService, store: PlannerStore(url: nil))
         let mail = MailInboxModel(source: mailSource, assistant: assistant,
-                                  drafter: MailReplyDrafter(engine: engine), sender: RecordingMailSender(),
+                                  drafter: MailReplyDrafter(engine: engine),
+                                  composeWriter: MailComposeWriter(engine: engine), sender: RecordingMailSender(),
                                   broker: broker, mailApp: FixedMailApp(),
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,

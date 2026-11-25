@@ -14,7 +14,6 @@ struct TodoList: View {
     @State private var dueChoice: DueChoice?
     @State private var picksDate = false
     @State private var pickedDate = Date.now
-    @State private var showsCompleted = false
     /// The mini month's page, in months from the selected day's month.
     @State private var monthOffset = 0
     @FocusState private var addFieldFocused: Bool
@@ -64,16 +63,7 @@ struct TodoList: View {
             // Add a to-do sits under the heading, apart from Ask, so a
             // question is never filed as a to-do by mistake.
             addBox
-            if let weekAsk, looksLikeQuestion {
-                Button("Ask this about your week instead") {
-                    weekAsk.draft = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                    newTitle = ""
-                    Task { await weekAsk.ask() }
-                }
-                .buttonStyle(.plain)
-                .font(MFFont.caption.weight(.semibold))
-                .foregroundStyle(MFColor.accent)
-            }
+            if looksLikeQuestion { questionHint }
             MFScroll {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(model.todoSections) { section in
@@ -95,8 +85,48 @@ struct TodoList: View {
         return !weekAsk.isIdle
     }
 
-    private var looksLikeQuestion: Bool {
-        newTitle.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
+    /// A question about the schedule is never filed as a to-do: Return
+    /// sends it to Ask (Day and Week), or keeps it in the box (Month, Year).
+    private var looksLikeQuestion: Bool { TodoQuestion.isQuestion(newTitle) }
+
+    /// Why Ask cannot take the question right now; nil when it can.
+    private var askBusyReason: String? {
+        guard let weekAsk else { return nil }
+        if weekAsk.isFull { return "Three questions is the limit here. Clear the answers below to ask again." }
+        if weekAsk.pending != nil { return "Wait for the answer below, then ask this." }
+        return nil
+    }
+
+    @ViewBuilder
+    private var questionHint: some View {
+        Group {
+            if weekAsk == nil {
+                HStack(spacing: MFSpacing.s) {
+                    Text("Questions work in Day and Week.")
+                        .foregroundStyle(MFColor.secondary)
+                    Button("Switch to Week") { Task { await model.show(.week) } }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(MFColor.accent)
+                }
+            } else if let reason = askBusyReason {
+                Text(reason)
+                    .foregroundStyle(MFColor.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Button("Ask this about your week instead", action: askInstead)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(MFColor.accent)
+            }
+        }
+        .font(MFFont.caption.weight(.semibold))
+    }
+
+    /// Moves the question to Ask; the text stays in the box when Ask is busy.
+    private func askInstead() {
+        guard let weekAsk, askBusyReason == nil else { return }
+        weekAsk.draft = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        newTitle = ""
+        Task { await weekAsk.ask() }
     }
 
     // MARK: Mini month
@@ -176,21 +206,6 @@ struct TodoList: View {
         case .undated:
             header("No date", tone: MFColor.tertiary)
             rows(section.todos, overdue: false)
-        case .completed:
-            Button { showsCompleted.toggle() } label: {
-                HStack(spacing: MFSpacing.xs) {
-                    Text("Completed · \(section.todos.count)")
-                    Image(systemName: showsCompleted ? "chevron.down" : "chevron.right")
-                }
-                .font(MFFont.micro.weight(.bold))
-                .foregroundStyle(MFColor.tertiary)
-                .padding(.top, MFSpacing.m)
-                .padding(.bottom, MFSpacing.xxs)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(showsCompleted ? "Hide completed to-dos" : "Show completed to-dos")
-            if showsCompleted { rows(section.todos, overdue: false) }
         }
     }
 
@@ -311,6 +326,10 @@ struct TodoList: View {
 
     private func add() {
         guard !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !looksLikeQuestion else {
+            askInstead()
+            return
+        }
         model.addTodo(text: newTitle, due: due, dueChosen: dueChoice != nil)
         newTitle = ""
         dueChoice = nil
@@ -356,7 +375,7 @@ struct TodoRow: View {
                     .strikethrough(todo.isDone)
                 if let meta {
                     HStack(spacing: MFSpacing.xs) {
-                        if overdue, let due = todo.due {
+                        if overdue, !todo.isDone, let due = todo.due {
                             Text(TodoDateFormat.short(due, calendar: calendar))
                                 .monospacedDigit()
                                 .foregroundStyle(MFColor.danger)

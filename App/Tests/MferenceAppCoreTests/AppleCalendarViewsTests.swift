@@ -88,7 +88,7 @@ import Testing
         #expect(model.todoSections[1].todos.map(\.title) == ["Email the landlord"])
     }
 
-    @Test func sectionsGroupOverdueTodayLaterUndatedAndDone() {
+    @Test func sectionsGroupOverdueTodayLaterAndUndated() {
         let calendar = CalendarFixtures.calendar
         func at(_ day: Int, _ hour: Int) -> Date { CalendarFixtures.date(day, hour) }
         let todos = [
@@ -96,11 +96,82 @@ import Testing
             TodoItem(title: "Today", due: at(15, 17), createdAt: at(2, 0)),
             TodoItem(title: "Friday", due: at(18, 0), createdAt: at(3, 0)),
             TodoItem(title: "Someday", createdAt: at(4, 0)),
-            TodoItem(title: "Finished", isDone: true, due: at(13, 0), createdAt: at(5, 0)),
+            // Done on an earlier day, or before the day was recorded: gone.
+            TodoItem(title: "Finished Sunday", isDone: true, due: at(13, 0), createdAt: at(5, 0), completedAt: at(14, 9)),
+            TodoItem(title: "Finished long ago", isDone: true, due: at(15, 0), createdAt: at(6, 0)),
         ]
         let sections = TodoSection.sections(todos, today: at(15, 0), selected: at(16, 0), calendar: calendar)
-        #expect(sections.map(\.kind) == [.overdue, .day(at(15, 0)), .day(at(16, 0)), .day(at(18, 0)), .undated, .completed])
-        #expect(sections.map { $0.todos.map(\.title) } == [["Late"], ["Today"], [], ["Friday"], ["Someday"], ["Finished"]])
+        #expect(sections.map(\.kind) == [.overdue, .day(at(15, 0)), .day(at(16, 0)), .day(at(18, 0)), .undated])
+        #expect(sections.map { $0.todos.map(\.title) } == [["Late"], ["Today"], [], ["Friday"], ["Someday"]])
+    }
+
+    /// No Completed group: a to-do checked off today stays where it was,
+    /// after the open ones and struck through; one that was overdue shows
+    /// under Today, so the red Overdue group counts open to-dos only.
+    @Test func toDosDoneTodayStayInTheirGroup() {
+        let calendar = CalendarFixtures.calendar
+        func at(_ day: Int, _ hour: Int) -> Date { CalendarFixtures.date(day, hour) }
+        let todos = [
+            TodoItem(title: "Paid rent", isDone: true, due: at(15, 0), createdAt: at(1, 0), completedAt: at(15, 7)),
+            TodoItem(title: "Call bank", due: at(15, 0), createdAt: at(2, 0)),
+            TodoItem(title: "Late, now done", isDone: true, due: at(12, 0), createdAt: at(3, 0), completedAt: at(15, 7)),
+            TodoItem(title: "Still late", due: at(12, 0), createdAt: at(4, 0)),
+            TodoItem(title: "Friday, done early", isDone: true, due: at(18, 0), createdAt: at(5, 0), completedAt: at(15, 7)),
+            TodoItem(title: "Undated, done", isDone: true, createdAt: at(6, 0), completedAt: at(15, 7)),
+        ]
+        let sections = TodoSection.sections(todos, today: at(15, 0), selected: at(15, 0), calendar: calendar)
+        #expect(sections.map(\.kind) == [.overdue, .day(at(15, 0)), .day(at(18, 0)), .undated])
+        #expect(sections.map { $0.todos.map(\.title) } == [
+            ["Still late"], ["Call bank", "Paid rent", "Late, now done"], ["Friday, done early"], ["Undated, done"],
+        ])
+    }
+
+    @Test @MainActor func checkingOffRecordsTheDayAndUncheckingClearsIt() throws {
+        let model = Self.model()
+        let todo = try #require(model.addTodo(text: "Water plants", due: model.today))
+        model.setDone(true, for: todo.id)
+        #expect(model.todos.first?.completedAt == CalendarFixtures.now)
+        #expect(model.todoSections.first?.todos.map(\.title) == ["Water plants"])
+        model.setDone(false, for: todo.id)
+        #expect(model.todos.first?.completedAt == nil)
+        #expect(model.todos.first?.isDone == false)
+    }
+
+    /// A reminder done in Reminders is stamped once, when it turns done; a
+    /// later sync never moves that day forward, so it leaves the panel.
+    @Test @MainActor func remindersDoneThereAreStampedOnlyWhenTheyTurnDone() async throws {
+        final class Clock: @unchecked Sendable { var now = CalendarFixtures.now }
+        let clock = Clock()
+        let service = InMemoryCalendarService(remindersAccess: .granted)
+        let model = CalendarWeekModel(service: service, store: PlannerStore(url: nil), layout: AppleCalendarTests.layout,
+                                      defaults: Self.syncOn(), now: { clock.now }, syncsAutomatically: false)
+        let id = await service.addReminderInReminders("Pick up dry cleaning", due: CalendarFixtures.date(15, 0))
+        await model.syncReminders()
+        #expect(model.todos.first?.completedAt == nil)
+        await service.editReminder(id, isDone: true)
+        await model.syncReminders()
+        #expect(model.todos.first?.isDone == true)
+        #expect(model.todos.first?.completedAt == CalendarFixtures.now)
+        clock.now = CalendarFixtures.date(16, 9)
+        await model.syncReminders()
+        #expect(model.todos.first?.completedAt == CalendarFixtures.now)
+        #expect(!model.todoSections.contains { $0.todos.contains { $0.title == "Pick up dry cleaning" } })
+        // Reopened in Reminders: open again, with no day.
+        await service.editReminder(id, isDone: false)
+        await model.syncReminders()
+        #expect(model.todos.first.map { !$0.isDone && $0.completedAt == nil } == true)
+    }
+
+    @Test func questionsAreToldApartFromToDos() {
+        for question in ["When am I free tomorrow", "what do i have thursday", "Am I busy on Friday",
+                         "do I have anything Monday", "Which day is busiest", "how busy is my week",
+                         "What's on this week", "anything due today?", "  when's my next meeting  "] {
+            #expect(TodoQuestion.isQuestion(question), "\(question)")
+        }
+        for todo in ["Ask Priya about the deck", "Check flight time", "Email the landlord", "Do laundry",
+                     "Whatsapp mom", "Am", "", "Which", "Book a free slot for Sam"] {
+            #expect(!TodoQuestion.isQuestion(todo), "\(todo)")
+        }
     }
 
     @Test func shortDatesFollowTheRegion() {

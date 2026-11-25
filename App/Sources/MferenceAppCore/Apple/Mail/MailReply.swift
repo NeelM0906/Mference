@@ -55,13 +55,14 @@ public struct MailDraft: Sendable, Hashable {
 
 /// How a draft should change ("Shorter", "Warmer" in mockup 03).
 public enum DraftTone: String, Sendable, Hashable, CaseIterable {
-    case standard, shorter, warmer
+    case standard, shorter, warmer, formal
 
     var instruction: String {
         switch self {
         case .standard: "Keep it brief and friendly, in the first person, as the recipient of the email."
         case .shorter: "Make it as short as possible: one or two sentences."
         case .warmer: "Make it warmer and more personal, still brief."
+        case .formal: "Make it more formal and professional, still brief."
         }
     }
 }
@@ -115,6 +116,84 @@ public struct MailReplyDrafter: Sendable {
     }
 }
 
+/// Writes and rewrites a new message with Quick through the engine, for the
+/// compose card. The text is only shown for review; nothing is sent here.
+public struct MailComposeWriter: Sendable {
+    private let engine: any EngineServicing
+    public let model: AppModel
+
+    public init(engine: any EngineServicing, model: AppModel = .quick) {
+        self.engine = engine
+        self.model = model
+    }
+
+    static let instructions = AssistantPrompts.instructions("""
+        You help a person write a new email that they will review and send themselves. Reply with \
+        the email text only: no subject line unless asked, no placeholders in brackets, no notes \
+        about what you did. Write in the first person, as the sender. Never promise things the \
+        person did not say. Do not invent facts, names, dates or numbers.
+        """)
+
+    /// The body of a new email from what the person asked for, building on
+    /// their notes when the body already has text.
+    public func draft(prompt: String, notes: String, to: String, subject: String) async throws -> String {
+        var text = "Write the body of an email. What the person wants: \(AssistantPrompts.oneLine(prompt, limit: 500))"
+        let recipient = AssistantPrompts.oneLine(to, limit: 120)
+        if !recipient.isEmpty { text += "\nIt goes to: \(recipient)" }
+        let topic = AssistantPrompts.oneLine(subject)
+        if !topic.isEmpty { text += "\nSubject: \(topic)" }
+        if !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            text += "\n\nTurn the person's notes into the email:\n" + AssistantPrompts.untrusted(
+                AssistantPrompts.clip(notes, to: 4_000))
+        }
+        return try await generate(text, maximumTokens: 600)
+    }
+
+    /// The same email in another tone.
+    public func rewrite(_ body: String, tone: DraftTone) async throws -> String {
+        let text = "Rewrite this email. \(tone.instruction) Keep its meaning and every fact.\n\n"
+            + AssistantPrompts.untrusted(AssistantPrompts.clip(body, to: 4_000))
+        return try await generate(text, maximumTokens: 600)
+    }
+
+    /// The same email with only spelling and grammar fixed.
+    public func fixGrammar(_ body: String) async throws -> String {
+        let text = "Fix only the spelling, grammar and punctuation of this email. Change nothing else: "
+            + "keep its words, tone, order and line breaks wherever they are already correct.\n\n"
+            + AssistantPrompts.untrusted(AssistantPrompts.clip(body, to: 4_000))
+        return try await generate(text, maximumTokens: 600)
+    }
+
+    /// A short subject line for the email.
+    public func subject(for body: String) async throws -> String {
+        let text = "Write a subject line for this email: at most eight words, no quotes, nothing else.\n\n"
+            + AssistantPrompts.untrusted(AssistantPrompts.clip(body, to: 2_000))
+        let answer = try await generate(text, maximumTokens: 40)
+        let line = answer.components(separatedBy: .newlines).first ?? answer
+        var cleaned = AssistantPrompts.oneLine(line, limit: 120).trimmingCharacters(in: .whitespaces)
+        if cleaned.lowercased().hasPrefix("subject:") { cleaned = String(cleaned.dropFirst("subject:".count)) }
+        cleaned = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’ "))
+        guard !cleaned.isEmpty else { throw AssistantModelError.unreadableAnswer }
+        return cleaned
+    }
+
+    private func generate(_ prompt: String, maximumTokens: Int) async throws -> String {
+        let turns = [ChatTurn(role: .system, content: Self.instructions), ChatTurn(role: .user, content: prompt)]
+        let options = GenerationOptions(thinking: false, maximumCompletionTokens: maximumTokens)
+        var text = ""
+        for try await update in engine.generate(model: model, turns: turns, options: options) {
+            switch update {
+            case .content(let chunk): text += chunk
+            case .completed(let summary): if !summary.content.isEmpty { text = summary.content }
+            case .prepared, .reasoning, .toolCall: break
+            }
+        }
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { throw AssistantModelError.unreadableAnswer }
+        return cleaned
+    }
+}
+
 /// Sends a reviewed draft. Only ever called from the Send button.
 public protocol MailSending: Sendable {
     func send(_ draft: MailDraft) async throws
@@ -129,7 +208,7 @@ public enum MailSendError: Error, Sendable, Hashable {
         switch self {
         case .notAllowed: "Mference may not control Mail. Allow it in System Settings > Privacy & Security > Automation."
         case .invalidRecipient: "The recipient's address is not valid."
-        case .scriptFailed(let detail): "Mail could not send the reply: \(detail)"
+        case .scriptFailed(let detail): "Mail could not send the message: \(detail)"
         }
     }
 }

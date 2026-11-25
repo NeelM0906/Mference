@@ -463,6 +463,51 @@ struct GatedScanner: DocumentRecognizing {
         #expect(session.fields.value(.total) == "44.49")
     }
 
+    /// Clear works at every step: while reading (the read never reaches the
+    /// screen), in review, and after a failure; a pasted image is deleted.
+    @Test @MainActor func clearWorksWhileReadingInReviewAndAfterAFailure() async throws {
+        let container = try AppModelContainer.inMemory()
+        let gate = ScanTestLatch()
+        let model = ScriptedAssistantTextModel(kind: .appleOnDevice, availability: .unavailable(reason: "off"),
+                                               answer: "unused")
+        let session = ScanSession(scanner: GatedScanner(release: gate, lines: ["CORNER HARDWARE", "TOTAL 44.49"]),
+                                  assistant: AppleModelService(primary: model, fallback: nil),
+                                  context: container.mainContext, imageDirectory: URL.temporaryDirectory)
+        // While reading: the late failure stays off the cleared screen.
+        session.open(URL(filePath: "/fixtures/slow-failing.png"))
+        #expect(session.phase == .reading)
+        session.reset()
+        #expect(session.phase == .empty && session.imageURL == nil)
+        await gate.open()
+        await session.waitForReading()
+        #expect(session.phase == .empty)
+
+        // In review, from a pasted image: the private copy is deleted.
+        try session.openPasted(Data("png bytes".utf8))
+        await session.waitForReading()
+        let pasted = try #require(session.imageURL)
+        #expect(session.phase == .review)
+        session.reset()
+        #expect(session.phase == .empty && session.fields.fields.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: pasted.path))
+        #expect(!FileManager.default.fileExists(atPath: pasted.deletingLastPathComponent().path))
+        // Pasting again after a clear makes a new private folder.
+        try session.openPasted(Data("png bytes".utf8))
+        await session.waitForReading()
+        #expect(session.phase == .review)
+        session.reset()
+
+        // After a failure.
+        session.open(URL(filePath: "/fixtures/slow-failing-again.png"))
+        await session.waitForReading()
+        guard case .failed = session.phase else {
+            Issue.record("expected a failed read, got \(session.phase)")
+            return
+        }
+        session.reset()
+        #expect(session.phase == .empty)
+    }
+
     @Test func acceptsImageAndPDFFiles() {
         #expect(ScanSession.accepts(URL(filePath: "/x/a.HEIC")))
         #expect(ScanSession.accepts(URL(filePath: "/x/a.pdf")))

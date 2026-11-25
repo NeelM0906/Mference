@@ -44,7 +44,7 @@ import Testing
     }
 
     /// Ask about your week: idle chips, a free-time answer drawn on the
-    /// grid, a busiest-day answer, Month's bar, and an out-of-date answer.
+    /// grid, a busiest-day answer, Month without Ask, and an out-of-date answer.
     @Test func askAboutYourWeek() async throws {
         let fixedNow = AppleUIFixtures.now
         let defaults = UserDefaults(suiteName: "mference-snapshots-\(UUID().uuidString)")!
@@ -71,10 +71,12 @@ import Testing
         #expect(ask.answers.count == 2)
         try render("04-calendar-ask-busiest")
         ask.clear()
+        // Month has no Ask about your week.
         await model.show(.month)
-        await ask.ask(.due)
-        try render("04-calendar-ask-month")
+        try render("04-calendar-month-no-ask")
         await model.show(.week)
+        await ask.ask(.due)
+        #expect(!ask.isIdle)
         _ = try await service.add(ProposedEvent(title: "Dentist", start: fixedNow.addingTimeInterval(26 * 3_600),
                                                 end: fixedNow.addingTimeInterval(27 * 3_600),
                                                 source: ItemSource(kind: .manual, label: "x")))

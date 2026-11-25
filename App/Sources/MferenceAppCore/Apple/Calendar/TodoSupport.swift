@@ -23,7 +23,6 @@ public struct TodoSection: Sendable, Hashable, Identifiable {
         case overdue
         case day(Date)
         case undated
-        case completed
     }
 
     public var kind: Kind
@@ -34,16 +33,21 @@ public struct TodoSection: Sendable, Hashable, Identifiable {
         case .overdue: "overdue"
         case .day(let date): "day-\(Int(date.timeIntervalSince1970))"
         case .undated: "undated"
-        case .completed: "completed"
         }
     }
 
     /// Overdue, Today, each later day with to-dos (and the selected day,
-    /// even empty, so a typed to-do has a visible home), No date, Completed.
-    /// Inside a group, oldest first.
+    /// even empty, so a typed to-do has a visible home), No date. A to-do
+    /// checked off today stays in its group after the open ones, struck
+    /// through; one that was overdue moves to Today, so Overdue holds open
+    /// to-dos only. To-dos done on an earlier day (or before the check-off
+    /// day was recorded) are not shown. Inside a group, oldest first.
     public static func sections(_ todos: [TodoItem], today: Date, selected: Date, calendar: Calendar) -> [TodoSection] {
         let byAge = todos.sorted { ($0.createdAt, $0.title) < ($1.createdAt, $1.title) }
         let open = byAge.filter { !$0.isDone }
+        let doneToday = byAge.filter { todo in
+            todo.isDone && todo.completedAt.map { calendar.isDate($0, inSameDayAs: today) } == true
+        }
         var overdue: [TodoItem] = []
         var days: [Date: [TodoItem]] = [today: []]
         if selected >= today { days[selected] = days[selected] ?? [] }
@@ -52,6 +56,10 @@ public struct TodoSection: Sendable, Hashable, Identifiable {
             guard let due = todo.due else { undated.append(todo); continue }
             let day = calendar.startOfDay(for: due)
             if day < today { overdue.append(todo) } else { days[day, default: []].append(todo) }
+        }
+        for todo in doneToday {
+            guard let due = todo.due else { undated.append(todo); continue }
+            days[max(calendar.startOfDay(for: due), today), default: []].append(todo)
         }
         var result: [TodoSection] = []
         if !overdue.isEmpty { result.append(TodoSection(kind: .overdue, todos: overdue)) }
@@ -62,8 +70,6 @@ public struct TodoSection: Sendable, Hashable, Identifiable {
             result.append(TodoSection(kind: .day(day), todos: items))
         }
         if !undated.isEmpty { result.append(TodoSection(kind: .undated, todos: undated)) }
-        let done = byAge.filter(\.isDone)
-        if !done.isEmpty { result.append(TodoSection(kind: .completed, todos: done)) }
         return result
     }
 }
@@ -129,5 +135,28 @@ public enum TodoInput {
             return (rest, calendar.startOfDay(for: date))
         }
         return (trimmed, nil)
+    }
+}
+
+/// Text typed in the to-do box that is a question about the schedule, not a
+/// task: it goes to Ask about your week and never becomes a to-do. A
+/// question mark at the end, or one of a few unambiguous openings ("when am
+/// i free", "what do i have thursday"). Openings only, so to-dos such as
+/// "Ask Priya about the deck" or "Check flight time" stay to-dos.
+public enum TodoQuestion {
+    static let openings = [
+        "when am i", "when do i", "when's my", "when is my", "what do i", "what's on", "what is on",
+        "what does my", "what have i got", "do i have", "am i free", "am i busy", "which day", "how busy",
+        "how much free", "how many meetings", "is my week", "is my day", "how does my",
+    ]
+
+    public static func isQuestion(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasSuffix("?") { return true }
+        let lowered = trimmed.lowercased().replacingOccurrences(of: "’", with: "'")
+        return openings.contains { opening in
+            lowered == opening || lowered.hasPrefix(opening + " ")
+        }
     }
 }

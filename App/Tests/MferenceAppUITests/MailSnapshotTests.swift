@@ -12,6 +12,7 @@ import Testing
         let draft = "Hi Priya, 11 works. I’ve moved it on my side. I’ll have the copy decisions written up by Tuesday so we can spend the time on the screens. See you Wednesday!"
         let model = MailInboxModel(source: source, assistant: AppleModelService(primary: assistant, fallback: nil),
                                    drafter: MailReplyDrafter(engine: AppleUIFixtures.FixedEngine(answer: draft)),
+                                   composeWriter: MailComposeWriter(engine: AppleUIFixtures.FixedEngine(answer: draft)),
                                    sender: RecordingMailSender(), broker: AppleUIFixtures.NoPromptBroker(),
                                    mailApp: FixedMailApp())
         await model.load()
@@ -24,6 +25,22 @@ import Testing
             try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
                 .environment(model), name: "03-mail", colorScheme: scheme)
         }
+
+        // Compose docks at the bottom left over the open mailbox, not modal.
+        model.composer.open()
+        model.composer.to = "priya@example.com"
+        model.composer.subject = "Copy decisions"
+        model.composer.body = "Hi Priya,\n\nHere are the copy decisions from today. The onboarding headline stays as is."
+        model.composer.prompt = "summarize the copy decisions for Priya"
+        #expect(model.isEditingText)
+        for scheme in [ColorScheme.light, .dark] {
+            try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
+                .environment(model), name: "03-mail-compose", colorScheme: scheme)
+        }
+        model.composer.minimize()
+        try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
+            .environment(model), name: "03-mail-compose-minimized")
+        model.composer.discard()
 
         let blocked = MailInboxModel(source: AppleUIFixtures.FixedMailSource(status: .needsFullDiskAccess, inbox: [],
                                                                              bodies: [:]),

@@ -591,7 +591,7 @@ final class GatedEngine: EngineServicing, @unchecked Sendable {
         #expect(await sender.sent.isEmpty)
         #expect(await model.sendNewMessage(to: " a@example.com ", subject: "Hi", body: "Hello") == nil)
         #expect(await sender.sent == [MailDraft(to: "a@example.com", subject: "Hi", body: "Hello")])
-        model.isComposing = true
+        model.composer.open()
         #expect(model.isEditingText)
     }
 

@@ -136,6 +136,10 @@ public struct TodoItem: Sendable, Hashable, Identifiable, Codable {
     /// The reminder was deleted in Reminders: it is not created again.
     public var unlinkedFromReminders: Bool = false
     public var createdAt: Date
+    /// When it was checked off (nil while open, and for to-dos done before
+    /// this was recorded). A to-do done today stays in its group, struck
+    /// through; one done on an earlier day leaves the panel.
+    public var completedAt: Date?
 
     /// The fields Mference owns in a reminder.
     public struct ReminderFields: Sendable, Hashable, Codable {
@@ -154,7 +158,7 @@ public struct TodoItem: Sendable, Hashable, Identifiable, Codable {
 
     public init(id: UUID = UUID(), title: String, isDone: Bool = false, due: Date? = nil,
                 source: ItemSource = ItemSource(kind: .manual, label: "Added by you"),
-                reminderID: String? = nil, createdAt: Date = .now) {
+                reminderID: String? = nil, createdAt: Date = .now, completedAt: Date? = nil) {
         self.id = id
         self.title = title
         self.isDone = isDone
@@ -162,6 +166,7 @@ public struct TodoItem: Sendable, Hashable, Identifiable, Codable {
         self.source = source
         self.reminderID = reminderID
         self.createdAt = createdAt
+        self.completedAt = completedAt
     }
 }
 
