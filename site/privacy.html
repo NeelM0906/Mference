@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy · Mference</title>
-<meta name="description" content="Every way Mference touches the network, and how to turn each one off. The model, your index and your memory are files on your Mac.">
+<meta name="description" content="How Mference touches the network, and what Offline mode turns off. The model, your index and your memory are files on your Mac.">
 <meta property="og:title" content="What stays on your Mac? All of it.">
 <meta property="og:image" content="assets/shots/chat.jpg">
 <link rel="icon" href="assets/icon.png">
@@ -49,7 +49,7 @@
         <h3>On this Mac, always</h3>
         <ul>
           <li>The model and every answer it writes</li>
-          <li>Chats, memory and Skills</li>
+          <li>Chats and memory</li>
           <li>The Find index and its search model</li>
           <li>Notes, recordings and transcripts</li>
           <li>Scanned receipts and documents</li>
@@ -58,7 +58,7 @@
       <div class="zone out">
         <h3>Leaves only when you ask</h3>
         <ul>
-          <li data-flow="out" data-on-label="When asked"><span>Web search<small>Queries go through the search engine bundled in the app; the pages it reads come straight from their sites</small></span><span class="tag ask">When asked</span></li>
+          <li data-flow="out" data-on-label="When asked"><span>Web search<small>The bundled search engine sends your query to public search engines; the pages it reads come straight from their sites</small></span><span class="tag ask">When asked</span></li>
           <li data-flow="system"><span>Mail and calendar sync<small>Your own providers, through Apple Mail and Calendar; Offline mode does not pause it</small></span><span class="tag ask">Apple's sync</span></li>
           <li data-flow="out" data-on-label="When asked"><span>Model downloads<small>Pinned files from Hugging Face, checked by SHA-256</small></span><span class="tag ask">When asked</span></li>
           <li data-flow="out" data-on-label="Once"><span>Speech models<small>Downloaded when you set Notes up</small></span><span class="tag ask">Once</span></li>
@@ -76,7 +76,7 @@
     <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m5 5 14 14"/></svg></div><h3>Trackers removed</h3><p>Mail is read as text with tracking pixels removed, and the message tells you how many it found.</p></div>
     <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/></svg></div><h3>Memory you can read</h3><p>Everything the assistant remembers is listed in one place. Review it, and remove what you don't want kept.</p></div>
     <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div><h3>Private chats</h3><p>Mark a conversation private and it is never used for memory.</p></div>
-    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 8.5 8 10 4.5-1.5 8-5 8-10V6z"/></svg></div><h3>Asked at first use</h3><p>Calendar, Reminders, Mail, Full Disk Access, the microphone, the camera and Photos are each requested when you first open the feature that needs them, never at install.</p></div>
+    <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 8.5 8 10 4.5-1.5 8-5 8-10V6z"/></svg></div><h3>Asked at first use</h3><p>Calendar, Reminders, Mail, Full Disk Access, the microphone, call audio, the camera and Photos are each requested when you first open the feature that needs them, never at install.</p></div>
     <div class="tile reveal"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg></div><h3>Open to inspection</h3><p>MIT licensed. Every line that reads your data is on GitHub, and the bundled search engine ships with its source.</p></div>
   </div>
 </section>
@@ -84,7 +84,7 @@
 <section class="wrap">
   <h2 class="h2 reveal" style="text-align:center;font-size:clamp(32px,3.8vw,48px)">Privacy questions</h2>
   <div class="faq reveal">
-    <details open><summary>Does Mference send my chats anywhere?</summary><p>No. The model runs on your Mac and there is no Mference server to send them to. With web search on, the search query goes out through the bundled search engine; the conversation itself does not.</p></details>
+    <details open><summary>Does Mference send my chats anywhere?</summary><p>No. The model runs on your Mac and there is no Mference server to send them to. With web search on, the search query goes out through the bundled search engine to public search engines; the conversation itself does not.</p></details>
     <details><summary>Can I use it with no network at all?</summary><p>Yes. Turn on Offline mode and web search and chat and speech model downloads stop; Find downloads its small search model only when you turn Find on. Chat, Find, Notes and Scan keep working with the models you already have. Apple Mail and Calendar sync your accounts on their own, so a reply you send or an event you add still goes out through them.</p></details>
     <details><summary>Where are my files indexed?</summary><p>In a database on your Mac, built by a small search model that also runs on your Mac. Photos, video and audio are indexed only if you turn them on.</p></details>
     <details><summary>How do I report a privacy problem?</summary><p>Follow the <a href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">security policy</a> to report it privately.</p></details>

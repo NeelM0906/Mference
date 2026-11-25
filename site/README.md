@@ -8,12 +8,12 @@ from `assets/fonts`).
 | --- | --- |
 | `index.html` | Home: hero, product tour, features, privacy, models, FAQ |
 | `features.html` | Chat, Find, Mail, Calendar, Notes and Scan in detail |
-| `privacy.html` | What stays on the Mac and every way the app uses the network |
+| `privacy.html` | What stays on the Mac, how the app uses the network, and what Offline mode stops |
 | `models.html` | Supported models, the memory picker, and how to get a model |
 | `developers.html` | Build from source, install models, engine, server and CLI |
 | `assets/css/site.css` | All styles. Colors follow the app's `MFColor` tokens, light and dark |
 | `assets/js/site.js` | The tour, Find demo, Offline switch, memory picker and copy buttons |
-| `data.js` | Model sizes, memory and measured decode speeds, all taken from the [README](../README.md) |
+| `data.js` | Model sizes from the [README](../README.md), and the memory each needs by the app's `MemoryFit` rule |
 | `assets/shots/` | The app's design renders, copied from `docs/assets/readme/` |
 | `assets/fonts/` | Geist (OFL, see `OFL.txt`), copied from `App/Resources/Fonts/` |
 
@@ -23,8 +23,9 @@ Preview it locally:
 python3 -m http.server 8080 --bind 127.0.0.1 --directory site
 ```
 
-When a number in the README changes, change the same number in `data.js`.
-A speed is shown only where the README reports it for that Mac. When a render
+When a size in the README changes, change it in `data.js` and recompute that
+model's `need` (install x resident share + headroom, as in
+`App/Sources/MferenceAppCore/Models/MemoryFit.swift`). When a render
 in `docs/assets/readme/` changes, copy it into `assets/shots/`.
 
 ## Publishing

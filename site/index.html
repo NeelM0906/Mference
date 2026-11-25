@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mference: personal AI that runs on your Mac</title>
-<meta name="description" content="A private assistant that runs entirely on your Mac. Chat, find files by what is in them, sort your mail and plan your week, with nothing leaving the machine.">
+<meta name="description" content="A private assistant that runs entirely on your Mac. Chat, find files by what is in them, sort your mail and plan your week, on a model that runs on the Mac itself.">
 <meta property="og:title" content="Mference: personal AI, kept personal">
 <meta property="og:description" content="A private assistant that runs entirely on your Mac, on eight local models, from MiniCPM5 1B to Inkling 2 Mini. Open source, for Apple Silicon.">
 <meta property="og:image" content="assets/shots/chat.jpg">
@@ -34,7 +34,7 @@
 <section class="hero wrap">
   <p class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Runs entirely on your Mac</p>
   <h1 class="display">Personal AI, kept personal.</h1>
-  <p class="lede">Mference chats, finds your files by what is in them, sorts your mail and plans your week, on a model that runs on the Mac itself. Your notes, mail and calendar never leave it.</p>
+  <p class="lede">Mference chats, finds your files by what is in them, sorts your mail and plans your week, on a model that runs on the Mac itself. Your chats, notes and files stay on it.</p>
   <div class="cta-row">
     <a class="btn btn-ink btn-lg" href="developers.html#get-started"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Get it for Mac</a>
     <a class="btn btn-line btn-lg" href="#tour">Take the tour</a>
@@ -44,7 +44,7 @@
 
 <section class="tour wrap" id="tour" data-tour aria-label="Product tour">
   <div class="tabs" role="tablist" aria-label="Screens">
-    <button class="tab" role="tab" id="t-chat" aria-controls="p-chat" data-caption="Chat searches the web through a search engine bundled in the app and cites every claim. The model answering is on your Mac."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat<span class="bar"></span></button>
+    <button class="tab" role="tab" id="t-chat" aria-controls="p-chat" data-caption="Chat searches the web through a search engine bundled in the app, which asks public search engines for you, and cites every claim. The model answering is on your Mac."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat<span class="bar"></span></button>
     <button class="tab" role="tab" id="t-find" aria-controls="p-find" data-caption="Find searches what is inside your files, photos, videos and voice memos. Press ⌥Space from any app."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Find<span class="bar"></span></button>
     <button class="tab" role="tab" id="t-mail" aria-controls="p-mail" data-caption="Mail sorts what matters, removes trackers, proposes the calendar change and drafts the reply in your voice. You press Send."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Mail<span class="bar"></span></button>
     <button class="tab" role="tab" id="t-cal" aria-controls="p-cal" data-caption="Your calendars and Reminders in one week, with events proposed from your mail."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>Calendar<span class="bar"></span></button>
@@ -97,7 +97,7 @@
   <div class="stats">
     <div><b>On device</b><span>The model, your index and your memory are files on your Mac</span></div>
     <div><b>8 models</b><span>From a 0.6 GB MiniCPM5 to a 35B Qwen</span></div>
-    <div><b>One switch</b><span>Offline mode turns off web search and model downloads</span></div>
+    <div><b>One switch</b><span>Offline mode turns off web search and chat and speech model downloads</span></div>
     <div><b>MIT</b><span>Read every line that touches your data</span></div>
   </div>
 </section>
@@ -121,7 +121,7 @@
     <article class="card reveal">
       <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat</p>
       <h3 class="h3">Answers from the web, with sources.</h3>
-      <p class="body">A search engine is bundled inside the app. Answers carry numbered citations; only the search query leaves your Mac, never the conversation.</p>
+      <p class="body">A search engine bundled inside the app sends the search query to public search engines; the conversation never leaves your Mac. Answers carry numbered citations.</p>
       <div class="chips"><span class="chip">1 stride-desks</span><span class="chip">2 oakline/sale</span><span class="chip">3 deskreviews</span></div>
     </article>
     <article class="card reveal">
@@ -164,12 +164,12 @@
     </div>
     <div class="console reveal">
       <div class="switch-row">
-        <div><b id="off-l">Offline mode</b><span data-offline-sub data-on="On. No web search, no model downloads." data-off="Off. Only what you ask for goes out."></span></div>
+        <div><b id="off-l">Offline mode</b><span data-offline-sub data-on="On. No web search, no chat or speech model downloads." data-off="Off. Only what you ask for goes out."></span></div>
         <button class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="off-l"></button>
       </div>
       <ul class="flows">
         <li data-flow="local"><span>Chats and memory</span><span class="wire local"></span><span class="tag local">Mac only</span></li>
-        <li data-flow="local"><span>Find index and search model</span><span class="wire local"></span><span class="tag local">Mac only</span></li>
+        <li data-flow="local"><span>Find index and searches</span><span class="wire local"></span><span class="tag local">Mac only</span></li>
         <li data-flow="out" data-on-label="Bundled engine"><span>Web search</span><span class="wire"></span><span class="tag ask">Bundled engine</span></li>
         <li data-flow="system"><span>Mail and calendar sync</span><span class="wire"></span><span class="tag ask">Your providers</span></li>
         <li data-flow="out" data-on-label="When you ask"><span>Chat and speech model downloads</span><span class="wire"></span><span class="tag ask">When you ask</span></li>
@@ -217,7 +217,7 @@ App/Scripts/run.sh</pre>
     <details open><summary>What stays on my Mac?</summary><p>Your chats, notes, files, mail, calendar, the Find index and the model itself. Mail and calendars keep syncing with your own providers through Apple Mail and Calendar, as they already do.</p></details>
     <details><summary>Does it need the internet?</summary><p>Only for what you ask for: web search, model downloads, and syncing your own accounts. Offline mode turns off web search and chat and speech model downloads, and chat, Find, Notes and Scan keep working; your accounts keep syncing through Apple Mail and Calendar.</p></details>
     <details><summary>Which Macs does it run on?</summary><p>Apple Silicon Macs on macOS 26 or later. An 8 GB Mac runs Quick and both MiniCPM5 models; Maple and Qwen 3.6 want 16 GB, Deep and Bonsai more than 16 GB, and Inkling 2 Mini 32 GB. The app shows how much memory each model needs before you load it.</p></details>
-    <details><summary>Will the app ask for access to my data?</summary><p>Only when you first use the feature that needs it. Calendar, Reminders, Mail, Full Disk Access, the microphone, the camera and Photos are each requested at that moment, never at install.</p></details>
+    <details><summary>Will the app ask for access to my data?</summary><p>Only when you first use the feature that needs it. Calendar, Reminders, Mail, Full Disk Access, the microphone, call audio, the camera and Photos are each requested at that moment, never at install.</p></details>
     <details><summary>What does it cost?</summary><p>Nothing. Mference is open source under the MIT license. It is pre-release, so today you build it from source.</p></details>
   </div>
 </section>

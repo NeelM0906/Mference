@@ -17,8 +17,9 @@
 ## What it does
 
 - **Chat** with a local model. Turn on web search and answers come back with
-  numbered citations, through a search engine bundled inside the app. Offline
-  mode turns off web search and model downloads.
+  numbered citations, through a search engine bundled inside the app that
+  queries public search engines. Offline mode turns off web search and chat
+  and speech model downloads.
 - **Find** files by what is in them: "the lease clause about pets", "that
   screenshot with the wifi password". Word matches show as you type and
   meaning matches follow, from any app with ⌥Space. Turn on photos, video and
@@ -40,8 +41,8 @@
   each one needs on your Mac before you load it.
 
 Your chats, notes, files, mail and calendar stay on the Mac. The app asks for
-Calendar, Reminders, Mail, Full Disk Access, the microphone, the camera or
-Photos only when you first use the feature that needs it.
+Calendar, Reminders, Mail, Full Disk Access, the microphone, call audio, the
+camera or Photos only when you first use the feature that needs it.
 
 <table>
   <tr>
