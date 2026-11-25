@@ -31,8 +31,9 @@ python3 Scripts/check_source_archive.py          # what `git archive HEAD` would
   request CI leaves them out; nothing they assert changes.
 - Every test uses Swift Testing (`@Suite` / `@Test`), not XCTest. `--filter` is
   a regex over `Suite/test`; `bringup-check.sh` holds the per-family suite
-  regexes (`Qwen38`, `Maple`, `[Mm]iniCPM5`, ...) for the four families
-  (Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5).
+  regexes (`Qwen38`, `Maple`, `[Mm]iniCPM5`, `Inkling2`, ...) for the six
+  native families (Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5 2B and 1B,
+  Inkling 2 Mini).
 - The build, the Swift suite, the link check, and `Scripts/tests/test_*.py`
   (stdlib `unittest`, no dependencies) never download or load a model. CI runs
   the suite, the Python checks and the link check on `macos-26` (the MSL 4.0
@@ -128,7 +129,8 @@ refuses a family by name until its runner lands. Family-specific tensor names
 
 `ForwardRunnerFactory.make` picks the runner from `model.config.family`.
 `RealForwardRunner` is the shared one, and Qwen 3.6 is its remaining family.
-Maple, Qwen 3.8 and MiniCPM5 each have a dedicated `*ForwardRunner`. All of them conform to `LogitProducer` /
+Maple, Qwen 3.8, MiniCPM5 (both sizes) and Inkling 2 Mini each have a
+dedicated `*ForwardRunner`. All of them conform to `LogitProducer` /
 `ContinuableLogitProducer` (`Runtime/Generation/LogitProducer.swift`), and
 optional abilities are further protocols there (`ChunkedPrefillRunner`,
 `FusedHeadLogitProducer`, ...). `runRawCompletion` is

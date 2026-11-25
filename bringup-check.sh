@@ -18,7 +18,8 @@
 #   2  install verify     MferenceRepack --verify-install. Needs <gturbo-dir>.
 #   3  ladder smoke       three fresh-process greedy generations at 16 / 32 /
 #                         auto expert-cache slots; the three stdouts must be
-#                         byte-identical. Needs <gturbo-dir>.
+#                         byte-identical. Needs <gturbo-dir>. SKIPPED for
+#                         inkling2mini, which places its own experts.
 #   4  protocol scaffold  creates the results directory and prints the
 #                         run-benchmark.sh command to run next. It never runs
 #                         the benchmark: that stays a deliberate invocation.
@@ -92,9 +93,10 @@ Runs the family bring-up conformance stages in order and prints a verdict.
 Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
-  <family>      one of: qwen36 qwen38 maple minicpm5 minicpm5-1b
+  <family>      one of: qwen36 qwen38 maple minicpm5 minicpm5-1b inkling2mini
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
-                (install verify, ladder smoke) are SKIPPED.
+                (install verify, ladder smoke) are SKIPPED. Stage 3 is
+                also SKIPPED for inkling2mini (no slot cache to ladder).
   --dry-run     print every command each stage would execute and run nothing.
   --help, -h    this text.
 
@@ -128,8 +130,18 @@ case "${family}" in
   # The 1B shares the runner, tokenizer and planner suites; its own cases
   # (baseline, template renders, sizes contract) are in the same filter.
   minicpm5-1b)     suite_filter='[Mm]iniCPM5' ;;
+  # Runner toys, kernels, chat format, decoder, goldens and installer; the
+  # real-install suites are env-gated and skip here.
+  inkling2mini)    suite_filter='Inkling2' ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
+
+# Stage 3's slot ladder exercises the pread expert cache. Inkling 2 Mini
+# places its experts itself (resident, or staged one layer ahead below 48 GB;
+# Inkling2ExpertResidency.swift), so the ladder does not apply to it.
+ladder_skip_reason=""
+[ "${family}" = "inkling2mini" ] \
+  && ladder_skip_reason="Inkling 2 Mini places its own experts; the slot ladder does not apply"
 
 skipped=0
 stage_log=""
@@ -239,6 +251,8 @@ fi
 rungs=(16 32 auto)
 if [ -z "${model_dir}" ]; then
   skip 3 "no gturbo-dir given; ladder smoke needs an installed model"
+elif [ -n "${ladder_skip_reason}" ]; then
+  skip 3 "${ladder_skip_reason}"
 else
   ladder_dir="${out_root}/ladder-smoke"
   show "mkdir -p ${ladder_dir}"
