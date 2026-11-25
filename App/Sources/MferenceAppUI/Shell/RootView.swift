@@ -120,7 +120,7 @@ struct SectionContent: View {
                 }
             case .find: FindView(openChat: openChatAbout, askAcross: askAcross)
             case .mail: MailView()
-            case .calendar: CalendarView()
+            case .calendar: CalendarView(continueInChat: weekToChat)
             case .scan: ScanView()
             case .settings:
                 SettingsView(library: screenModels?.library, memory: screenModels?.memory,
@@ -137,6 +137,22 @@ struct SectionContent: View {
     /// Find's "Ask about this": a new chat about the file, with Files on.
     private func openChatAbout(_ file: URL) {
         chat?.startChat(about: file)
+        shell?.show(.chat)
+    }
+
+    /// Nil without a chat model (snapshots), which hides the button.
+    private var weekToChat: ((WeekAskModel) -> Void)? {
+        guard chat != nil else { return nil }
+        return { ask in continueWeekInChat(ask) }
+    }
+
+    /// Calendar's "Continue in Chat": a Private chat holding the week's
+    /// questions and answers.
+    private func continueWeekInChat(_ ask: WeekAskModel) {
+        guard chat?.continueChat(title: ask.chatTitle, context: ask.chatContext, turns: ask.chatTurns) == true else {
+            ask.chatUnavailable()
+            return
+        }
         shell?.show(.chat)
     }
 

@@ -104,6 +104,18 @@ struct MessageView: View {
     }
 
     private var userBubble: some View {
+        VStack(alignment: .trailing, spacing: MFSpacing.xs + MFSpacing.xxs) {
+            if !message.attachments.isEmpty {
+                HStack(spacing: MFSpacing.xs + MFSpacing.xxs) {
+                    Spacer(minLength: MFSpacing.xxl)
+                    ForEach(message.attachments) { SentAttachmentChip(attachment: $0) }
+                }
+            }
+            if !message.content.isEmpty { userText }
+        }
+    }
+
+    private var userText: some View {
         HStack {
             Spacer(minLength: MFSpacing.xxl)
             Text(message.content)

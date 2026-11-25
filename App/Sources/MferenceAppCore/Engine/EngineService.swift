@@ -155,7 +155,11 @@ public actor EngineService: EngineServicing {
             return ModelOption(model: model, availability: availability,
                                sizeBytes: descriptor.sizeBytes,
                                contextLength: descriptor.contextLength,
-                               location: descriptor.location)
+                               location: descriptor.location,
+                               seesImages: model.supportsImageUnderstanding && descriptor.visionProjector != nil,
+                               imageUnderstandingBytes: descriptor.visionProjector?.sizeBytes ?? 0,
+                               imageUnderstandingLocation: model.supportsImageUnderstanding
+                                   ? descriptor.visionProjector?.location : nil)
         }
     }
 
@@ -371,7 +375,9 @@ public actor EngineService: EngineServicing {
                                                 reasoningEffort: effort,
                                                 // Replay earlier turns' reasoning too (Qwen templates
                                                 // drop it before the last user turn otherwise).
-                                                preserveThinking: engineModel.traits.acceptsReasoningEffort)
+                                                preserveThinking: engineModel.traits.acceptsReasoningEffort,
+                                                media: engineModel.traits.supportsVision
+                                                    ? Self.media(turns) : [:])
                     let prepared = try await engineModel.prepare(request)
                     emit(.prepared(promptTokens: prepared.promptTokens.count))
                     return try await engineModel.generate(prepared) { event in
@@ -403,6 +409,17 @@ public actor EngineService: EngineServicing {
     }
 
     // MARK: Mapping
+
+    /// The pictures of the user turns, decoded, by turn index. A picture
+    /// ImageIO cannot read is left out (the turn's text still names it).
+    static func media(_ turns: [ChatTurn]) -> [Int: [EngineMedia]] {
+        var media: [Int: [EngineMedia]] = [:]
+        for (index, turn) in turns.enumerated() where turn.role == .user && !turn.images.isEmpty {
+            let decoded = turn.images.compactMap { EngineMedia.image(encoded: $0.data) }
+            if !decoded.isEmpty { media[index] = decoded }
+        }
+        return media
+    }
 
     static func message(_ turn: ChatTurn) -> MFTokenizer.Message {
         let role: MFTokenizer.Role = switch turn.role {

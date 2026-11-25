@@ -99,6 +99,7 @@ public actor EventKitService: CalendarServicing {
         try requireAccess(.event)
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
         return store.events(matching: predicate)
+            .filter { Self.takesPart(status: $0.status, ownStatus: Self.ownStatus($0)) }
             .map(Self.event)
             .sorted { ($0.start, $0.title) < ($1.start, $1.title) }
     }
@@ -173,7 +174,28 @@ public actor EventKitService: CalendarServicing {
                              isAllDay: event.isAllDay,
                              calendarName: event.calendar?.title ?? "Calendar",
                              calendarColor: event.calendar?.color.flatMap(hex),
-                             location: event.location)
+                             location: event.location,
+                             isUserCalendar: event.calendar.map {
+                                 isUserCalendar(type: $0.type, allowsContentModifications: $0.allowsContentModifications)
+                             } ?? true,
+                             isFree: event.availability == .free)
+    }
+
+    /// The person's own reply to an invitation, if they are invited.
+    static func ownStatus(_ event: EKEvent) -> EKParticipantStatus? {
+        event.attendees?.first(where: \.isCurrentUser)?.participantStatus
+    }
+
+    /// Whether an event is still on: cancelled events and invitations the
+    /// person declined are left out, so they never take time.
+    static func takesPart(status: EKEventStatus, ownStatus: EKParticipantStatus?) -> Bool {
+        status != .canceled && ownStatus != .declined
+    }
+
+    /// A calendar the person adds events to: not subscribed (holidays), not
+    /// Birthdays, not read-only.
+    static func isUserCalendar(type: EKCalendarType, allowsContentModifications: Bool) -> Bool {
+        type != .subscription && type != .birthday && allowsContentModifications
     }
 
     static func hex(_ color: NSColor) -> UInt32? {

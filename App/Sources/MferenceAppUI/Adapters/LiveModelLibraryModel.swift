@@ -74,6 +74,24 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         library.retryLoad(model)
     }
 
+    /// Called by the approval dialog (the library's or the chat's offer) only.
+    public func downloadImageUnderstanding(_ id: String) {
+        guard let model = AppModel(modelID: id), let source = library.imageUnderstandingSource(for: model) else {
+            return
+        }
+        library.startImageUnderstandingDownload(DownloadApproval(confirming: source))
+    }
+
+    public func pauseImageUnderstanding(_ id: String) {
+        guard let model = AppModel(modelID: id) else { return }
+        library.pauseImageUnderstanding(model)
+    }
+
+    public func removeImageUnderstanding(_ id: String) {
+        guard let model = AppModel(modelID: id) else { return }
+        library.removeImageUnderstanding(model)
+    }
+
     public func cancelDownload(_ id: String) {
         guard let model = AppModel(modelID: id) else { return }
         library.discardDownload(model)
@@ -102,7 +120,15 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
                    location: row.location?.path,
                    isRecommended: row.model.group == .recommended,
                    state: state(row),
-                   fit: fit(row))
+                   fit: fit(row),
+                   imageUnderstanding: row.imageUnderstanding.map(imageUnderstanding))
+    }
+
+    static func imageUnderstanding(_ addOn: ImageUnderstandingRow) -> ImageUnderstandingEntry {
+        let row = ModelLibraryRow(model: .quick, state: addOn.state, sizeBytes: addOn.sizeBytes,
+                                  isDefault: false, fit: .fits)
+        return ImageUnderstandingEntry(state: state(row), sizeBytes: Int64(clamping: addOn.sizeBytes),
+                                       externalLocation: addOn.isRemovable ? nil : addOn.location?.path)
     }
 
     static func state(_ row: ModelLibraryRow) -> ModelEntryState {

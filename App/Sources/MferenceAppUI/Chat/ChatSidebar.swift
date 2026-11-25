@@ -11,7 +11,10 @@ struct ChatSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.l) {
-            newChatButton
+            HStack(spacing: MFSpacing.s) {
+                newChatButton
+                newPrivateChatButton
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: MFSpacing.l) {
                     if model.groups.groups.isEmpty {
@@ -60,6 +63,25 @@ struct ChatSidebar: View {
         .keyboardShortcut("n", modifiers: .command)
         .accessibilityLabel("New chat")
         .accessibilityHint("Command N")
+    }
+
+    /// A private chat: never used for memory, listed under Private.
+    private var newPrivateChatButton: some View {
+        Button {
+            model.newChat(isPrivate: true)
+        } label: {
+            Image(systemName: "lock")
+                .font(MFFont.calloutEmphasis)
+                .foregroundStyle(MFColor.ink)
+                .frame(width: ChatMetrics.sidebarButton, height: ChatMetrics.sidebarButton)
+                .background(MFColor.fill, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("n", modifiers: [.command, .shift])
+        .help("New private chat (⇧⌘N)")
+        .accessibilityLabel("New private chat")
+        .accessibilityHint("Shift Command N. Private chats are never used for memory")
     }
 
     private func section(_ group: ConversationGroups.Group) -> some View {

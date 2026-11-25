@@ -6,7 +6,7 @@ import SwiftData
 // for everything the app stores under ~/Library/Application Support/Mference/.
 // U2 owns this file. Adding, renaming or removing a stored property is a new
 // `VersionedSchema` plus a migration stage, through one PR the coordinator
-// approves. Rich values (citations, steps, scan fields) are stored as encoded
+// approves (V3, chat attachments: 2026-11-24). Rich values (citations, steps, scan fields) are stored as encoded
 // `Data` with their Codable types defined next to the feature that owns them.
 
 public enum MferenceSchemaV1: VersionedSchema {
@@ -327,6 +327,97 @@ public enum MferenceSchemaV2: VersionedSchema {
     }
 }
 
+/// Version 3 (chat attachments, 2026-11-24): V2 unchanged except that
+/// `StoredMessage` gains `attachmentsJSON`. Conversation is copied too, since
+/// its messages relationship names the message class. Migration V2 → V3 is
+/// lightweight (one optional attribute added). V1 and V2 stay frozen.
+public enum MferenceSchemaV3: VersionedSchema {
+    public static let versionIdentifier = Schema.Version(3, 0, 0)
+
+    public static var models: [any PersistentModel.Type] {
+        [Conversation.self, StoredMessage.self, MferenceSchemaV1.MemoryItem.self,
+         MferenceSchemaV1.ScanRecord.self, MferenceSchemaV1.MailBucket.self,
+         MferenceSchemaV1.MailBucketAssignment.self,
+         MferenceSchemaV2.NoteFolder.self, MferenceSchemaV2.Note.self, MferenceSchemaV2.NoteRecording.self]
+    }
+
+    /// One chat in the sidebar.
+    @Model
+    public final class Conversation {
+        @Attribute(.unique) public var id: UUID
+        public var title: String
+        public var createdAt: Date
+        public var updatedAt: Date
+        /// `AppModel.rawValue` the chat uses (the picker is per chat, L2).
+        public var modelRawValue: String
+        /// Web search on for this chat (L7: off until turned on).
+        public var webEnabled: Bool
+        /// Shown under "Private" in the sidebar: never used for memory.
+        public var isPrivate: Bool
+        public var isPinned: Bool
+        @Relationship(deleteRule: .cascade, inverse: \StoredMessage.conversation)
+        public var messages: [StoredMessage] = []
+
+        public init(id: UUID = UUID(), title: String = "New chat", createdAt: Date = .now,
+                    modelRawValue: String = AppModel.quick.rawValue, webEnabled: Bool = false,
+                    isPrivate: Bool = false, isPinned: Bool = false) {
+            self.id = id
+            self.title = title
+            self.createdAt = createdAt
+            self.updatedAt = createdAt
+            self.modelRawValue = modelRawValue
+            self.webEnabled = webEnabled
+            self.isPrivate = isPrivate
+            self.isPinned = isPinned
+        }
+    }
+
+    /// One message. Saved as soon as it is final, so a crash loses at most the
+    /// answer being streamed (spec 13).
+    @Model
+    public final class StoredMessage {
+        @Attribute(.unique) public var id: UUID
+        public var conversation: Conversation?
+        /// Order within the conversation.
+        public var index: Int
+        /// `ChatTurn.Role.rawValue`.
+        public var roleRawValue: String
+        public var content: String
+        /// Thinking text, replayed in history (engine contract).
+        public var reasoning: String?
+        /// JSON `[ToolCall]` the assistant made.
+        public var toolCallsJSON: Data?
+        /// For tool results: the call answered and the tool's name.
+        public var toolCallID: String?
+        public var toolName: String?
+        /// JSON citations shown as numbered sources (owned by Chat/Web, U3).
+        public var citationsJSON: Data?
+        /// JSON steps for the steps disclosure (owned by Chat, U3).
+        public var stepsJSON: Data?
+        /// `AppModel.rawValue` that wrote an assistant message.
+        public var modelRawValue: String?
+        /// `GenerationFinish.rawValue`, or "cancelled" / "failed".
+        public var finishRawValue: String?
+        public var promptTokens: Int?
+        public var completionTokens: Int?
+        public var createdAt: Date
+        /// JSON `[ChatAttachment]` on a user message: the files' names and
+        /// the text read from them (owned by Chat; added in V3).
+        @Attribute(.externalStorage) public var attachmentsJSON: Data?
+
+        public init(id: UUID = UUID(), index: Int, role: ChatTurn.Role, content: String,
+                    reasoning: String? = nil, modelRawValue: String? = nil, createdAt: Date = .now) {
+            self.id = id
+            self.index = index
+            self.roleRawValue = role.rawValue
+            self.content = content
+            self.reasoning = reasoning
+            self.modelRawValue = modelRawValue
+            self.createdAt = createdAt
+        }
+    }
+}
+
 /// What a note is, for the sidebar's Library rows and the list's kind marks.
 public enum NoteKind: String, Sendable, Hashable, Codable, CaseIterable {
     /// Typed (and maybe dictated).
@@ -348,8 +439,8 @@ public enum RecordingSummaryState: String, Sendable, Hashable, Codable, CaseIter
     case none, pending, written, failed
 }
 
-public typealias Conversation = MferenceSchemaV1.Conversation
-public typealias StoredMessage = MferenceSchemaV1.StoredMessage
+public typealias Conversation = MferenceSchemaV3.Conversation
+public typealias StoredMessage = MferenceSchemaV3.StoredMessage
 public typealias MemoryItem = MferenceSchemaV1.MemoryItem
 public typealias ScanRecord = MferenceSchemaV1.ScanRecord
 public typealias MailBucket = MferenceSchemaV1.MailBucket
@@ -359,15 +450,19 @@ public typealias Note = MferenceSchemaV2.Note
 public typealias NoteRecording = MferenceSchemaV2.NoteRecording
 
 public enum MferenceMigrationPlan: SchemaMigrationPlan {
-    public static var schemas: [any VersionedSchema.Type] { [MferenceSchemaV1.self, MferenceSchemaV2.self] }
-    /// V1 → V2 adds the note models only, so it is lightweight.
+    public static var schemas: [any VersionedSchema.Type] {
+        [MferenceSchemaV1.self, MferenceSchemaV2.self, MferenceSchemaV3.self]
+    }
+    /// V1 → V2 adds the note models only; V2 → V3 adds one optional
+    /// attribute. Both are lightweight.
     public static var stages: [MigrationStage] {
-        [.lightweight(fromVersion: MferenceSchemaV1.self, toVersion: MferenceSchemaV2.self)]
+        [.lightweight(fromVersion: MferenceSchemaV1.self, toVersion: MferenceSchemaV2.self),
+         .lightweight(fromVersion: MferenceSchemaV2.self, toVersion: MferenceSchemaV3.self)]
     }
 }
 
 /// The schema the app opens: always the newest version.
-public typealias MferenceCurrentSchema = MferenceSchemaV2
+public typealias MferenceCurrentSchema = MferenceSchemaV3
 
 /// Where the app keeps its data (spec 4.4).
 public enum AppStorageLocation {

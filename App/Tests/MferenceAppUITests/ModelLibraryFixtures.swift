@@ -45,6 +45,12 @@ final class FixtureModelLibrary: ModelLibraryModel {
         ]
     }
 
+    private(set) var imageDownloads: [String] = []
+    private(set) var imageRemovals: [String] = []
+
+    func downloadImageUnderstanding(_ id: String) { imageDownloads.append(id) }
+    func removeImageUnderstanding(_ id: String) { imageRemovals.append(id) }
+
     func download(_ id: String) {
         downloads.append(id)
         update(id) { $0.state = .downloading(TransferProgress(completedBytes: 0, totalBytes: $0.sizeBytes)) }

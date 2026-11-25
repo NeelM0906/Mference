@@ -28,9 +28,16 @@ public struct CalendarEvent: Sendable, Hashable, Identifiable {
     /// The calendar's color as 0xRRGGBB, if known.
     public var calendarColor: UInt32?
     public var location: String?
+    /// From a calendar the person adds events to, not a subscribed holiday or
+    /// birthdays calendar. Only these all-day events take a whole day.
+    public var isUserCalendar: Bool
+    /// Shown as Free in Calendar (`EKEvent.availability == .free`): listed,
+    /// but it never takes time ("WFH" all day, a tentative hold).
+    public var isFree: Bool
 
     public init(id: String, occurrenceDate: Date? = nil, title: String, start: Date, end: Date, isAllDay: Bool = false,
-                calendarName: String = "Calendar", calendarColor: UInt32? = nil, location: String? = nil) {
+                calendarName: String = "Calendar", calendarColor: UInt32? = nil, location: String? = nil,
+                isUserCalendar: Bool = true, isFree: Bool = false) {
         self.eventID = id
         self.occurrenceDate = occurrenceDate
         self.title = title
@@ -40,6 +47,8 @@ public struct CalendarEvent: Sendable, Hashable, Identifiable {
         self.calendarName = calendarName
         self.calendarColor = calendarColor
         self.location = location
+        self.isUserCalendar = isUserCalendar
+        self.isFree = isFree
     }
 
     public var reference: EventReference { EventReference(eventID: eventID, occurrenceDate: occurrenceDate) }

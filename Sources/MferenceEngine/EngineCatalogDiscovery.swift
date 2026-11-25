@@ -19,6 +19,21 @@ public enum EngineCatalogDiscovery {
         "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf": .deep,
     ]
 
+    /// The vision projector files of the GGUF product models, by the names
+    /// they are preferred under when a directory holds several that fit: the
+    /// name the app downloads to first, then the repository's own.
+    public static let productProjectorFiles: [EngineProductSlot: [String]] = [
+        .quick: ["Qwen3.5-4B-mmproj-F16.gguf", "mmproj-F16.gguf"],
+        .deep: ["mmproj-Qwen3.8-27B-BF16.gguf"],
+    ]
+
+    /// Whether a `.gguf` file name is a multimodal projector's, by
+    /// llama.cpp's naming convention (`mmproj` anywhere in it). Such a file is
+    /// never listed as a model; it is paired with one.
+    public static func isProjectorFileName(_ name: String) -> Bool {
+        name.lowercased().contains("mmproj")
+    }
+
     /// The directory label `MferenceRepack` gives each native product family.
     /// When several installs of one product model are found, the one in the
     /// earliest root wins, and within a root the one with this label.
@@ -259,6 +274,8 @@ public enum EngineCatalogDiscovery {
         var ggufWinners: [EngineProductSlot: URL] = [:]
         for (file, _) in files {
             let name = file.lastPathComponent
+            // A projector is paired with the model beside it below.
+            if isProjectorFileName(name), productGGUFFiles[name] == nil { continue }
             let slot = productGGUFFiles[name]
             let id = slot?.modelID ?? ggufModelID(fileName: name)
             if slot == nil, scope == .product {
@@ -318,6 +335,13 @@ public enum EngineCatalogDiscovery {
             if let slot { ggufWinners[slot] = file }
         }
 
+        var projectors = ProjectorSearch(fileSystem: fileSystem,
+                                         otherDirectories: ggufDirectories.map(\.standardizedFileURL))
+        models = models.map { descriptor in
+            guard case .gguf(let metadata) = descriptor.format else { return descriptor }
+            return descriptor.pairing(projectors.projector(for: descriptor, metadata: metadata))
+        }
+
         return EngineCatalog(models: models, skipped: skipped)
     }
 
@@ -333,6 +357,68 @@ public enum EngineCatalogDiscovery {
 
     // MARK: Helpers
 
+    /// Finds the vision projector for a GGUF model among the `mmproj` files
+    /// in its own directory: a projector with a vision encoder whose
+    /// projection width is the model's embedding width. A product model
+    /// prefers its `productProjectorFiles` names, then path order. When none
+    /// is beside it, a product model also takes its own pinned projector from
+    /// the other GGUF directories (the app downloads into
+    /// `~/llm-models/gguf` while the model may sit in another library root);
+    /// only those names, so another model's projector is never borrowed.
+    /// Headers are read once per file.
+    struct ProjectorSearch {
+        let fileSystem: FileSystem
+        let otherDirectories: [URL]
+        private var candidates: [String: [URL]] = [:]
+        private var headers: [String: EngineGGUFProjector?] = [:]
+
+        init(fileSystem: FileSystem, otherDirectories: [URL] = []) {
+            self.fileSystem = fileSystem
+            self.otherDirectories = otherDirectories
+        }
+
+        mutating func projector(for model: EngineModelDescriptor,
+                                metadata: EngineGGUFMetadata) -> EngineVisionProjector? {
+            let directory = model.location.deletingLastPathComponent().standardizedFileURL
+            let preferred = model.product.flatMap { productProjectorFiles[$0] } ?? []
+            let beside = projectorFiles(in: directory).sorted { left, right in
+                let leftRank = preferred.firstIndex(of: left.lastPathComponent) ?? preferred.count
+                let rightRank = preferred.firstIndex(of: right.lastPathComponent) ?? preferred.count
+                return (leftRank, left.path) < (rightRank, right.path)
+            }
+            if let found = firstFitting(beside, metadata: metadata) { return found }
+            guard !preferred.isEmpty else { return nil }
+            for other in otherDirectories where other.path != directory.path {
+                let pinned = projectorFiles(in: other).filter { preferred.contains($0.lastPathComponent) }
+                    .sorted { (preferred.firstIndex(of: $0.lastPathComponent) ?? 0)
+                        < (preferred.firstIndex(of: $1.lastPathComponent) ?? 0) }
+                if let found = firstFitting(pinned, metadata: metadata) { return found }
+            }
+            return nil
+        }
+
+        private mutating func projectorFiles(in directory: URL) -> [URL] {
+            if let known = candidates[directory.path] { return known }
+            let files = fileSystem.ggufFiles(directory)
+                .filter { EngineCatalogDiscovery.isProjectorFileName($0.lastPathComponent) }
+                .map(\.standardizedFileURL)
+            candidates[directory.path] = files
+            return files
+        }
+
+        private mutating func firstFitting(_ files: [URL], metadata: EngineGGUFMetadata) -> EngineVisionProjector? {
+            for file in files {
+                if headers[file.path] == nil {
+                    headers[file.path] = .some((try? fileSystem.readGGUF(file))?.projector)
+                }
+                guard let header = headers[file.path] ?? nil, header.hasVisionEncoder,
+                      let width = metadata.embeddingLength,
+                      header.projectionDimension == width else { continue }
+                return EngineVisionProjector(location: file, sizeBytes: fileSystem.size(file))
+            }
+            return nil
+        }
+    }
     struct NativeInstall {
         let directory: URL
         let rank: Int

@@ -128,6 +128,17 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     /// Shown with a Preview badge.
     public var isPreview: Bool { self == .maple || self == .inkling2Mini }
 
+    /// Whether the model can see images once its image-understanding add-on
+    /// (the vision projector, `DownloadSource.imageUnderstanding`) is
+    /// installed: Quick and Deep. Whether it is installed is
+    /// `ModelOption.seesImages`.
+    public var supportsImageUnderstanding: Bool {
+        switch self {
+        case .quick, .deep: true
+        case .inkling2Mini, .qwen36, .minicpm5, .maple, .apple: false
+        }
+    }
+
     /// Whether the model reasons before answering by default (steps disclosure).
     public var supportsThinking: Bool {
         switch self {
@@ -162,16 +173,30 @@ public struct ModelOption: Sendable, Hashable, Identifiable {
     public var contextLength: Int
     /// Install location, nil when not installed.
     public var location: URL?
+    /// The model is installed with its image-understanding add-on next to it,
+    /// so images reach it as pixels (`ChatTurn.images`).
+    public var seesImages: Bool
+    /// Size of that add-on on disk, 0 when not installed.
+    public var imageUnderstandingBytes: UInt64
+    /// The projector file the engine paired with the model (the app's
+    /// download, the repository's name, or one the person put beside the
+    /// model); nil when none.
+    public var imageUnderstandingLocation: URL?
 
     public var id: String { model.modelID }
 
     public init(model: AppModel, availability: ModelAvailability,
-                sizeBytes: UInt64 = 0, contextLength: Int = 0, location: URL? = nil) {
+                sizeBytes: UInt64 = 0, contextLength: Int = 0, location: URL? = nil,
+                seesImages: Bool = false, imageUnderstandingBytes: UInt64 = 0,
+                imageUnderstandingLocation: URL? = nil) {
         self.model = model
         self.availability = availability
         self.sizeBytes = sizeBytes
         self.contextLength = contextLength
         self.location = location
+        self.seesImages = seesImages
+        self.imageUnderstandingBytes = imageUnderstandingBytes
+        self.imageUnderstandingLocation = imageUnderstandingLocation
     }
 }
 
@@ -256,6 +281,17 @@ public struct ToolCall: Sendable, Hashable, Codable, Identifiable {
     }
 }
 
+/// A picture attached to a user turn: the encoded file (PNG, JPEG, HEIC, ...)
+/// as ImageIO reads it. A model that sees images gets its pixels; any other
+/// model never receives it (the turn's text carries what was read from it).
+public struct ChatImage: Sendable, Hashable, Codable {
+    public var data: Data
+
+    public init(data: Data) {
+        self.data = data
+    }
+}
+
 /// One turn of history sent to the model.
 public struct ChatTurn: Sendable, Hashable {
     public enum Role: String, Sendable, Hashable, Codable { case system, user, assistant, tool }
@@ -270,15 +306,19 @@ public struct ChatTurn: Sendable, Hashable {
     public var toolCallID: String?
     /// For `role == .tool`: the tool's name.
     public var toolName: String?
+    /// For `role == .user`: pictures, placed before the text. Sent only to a
+    /// model that sees images (`ModelOption.seesImages`); dropped otherwise.
+    public var images: [ChatImage]
 
     public init(role: Role, content: String?, reasoning: String? = nil, toolCalls: [ToolCall] = [],
-                toolCallID: String? = nil, toolName: String? = nil) {
+                toolCallID: String? = nil, toolName: String? = nil, images: [ChatImage] = []) {
         self.role = role
         self.content = content
         self.reasoning = reasoning
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.toolName = toolName
+        self.images = images
     }
 }
 

@@ -24,10 +24,18 @@ enum ChatMetrics {
     static let radioStroke: CGFloat = 1.5
     /// Keycap in the New chat button (`min-width: 20px`).
     static let keycap: CGFloat = 20
+    /// The round New private chat button beside New chat.
+    static let sidebarButton: CGFloat = 36
     /// The composer text area: two lines tall, at most eight.
     static let composerLines = 2...8
     /// The hover card on a source chip.
     static let hoverCardWidth: CGFloat = 300
+    /// An attached file's chip, at most this wide.
+    static let attachmentChipWidth: CGFloat = 240
+    /// The remove button and spinner in an attachment chip.
+    static let attachmentRemove: CGFloat = 18
+    /// Text shown in a sent attachment's popover.
+    static let attachmentPreviewCharacters = 4_000
     /// Reasoning shown inside the steps disclosure before it scrolls.
     static let reasoningMaxHeight: CGFloat = 220
 }

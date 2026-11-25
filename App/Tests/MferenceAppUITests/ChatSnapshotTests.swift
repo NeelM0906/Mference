@@ -135,6 +135,42 @@ import Testing
                                   name: "02c-chat-steps")
     }
 
+    /// A message sent with two files, and the composer holding a file being
+    /// read, a ready one and one that can't be attached.
+    @Test @MainActor func chatWithAttachments() async throws {
+        let container = try AppModelContainer.inMemory()
+        let store = ConversationStore(container: container)
+        let conversation = try store.createConversation(model: .quick, isPrivate: true)
+        try store.append(to: conversation, role: .user, content: "What does the lease say about pets?") {
+            $0.attachments = [
+                ChatAttachment(filename: "Lease agreement 2026.pdf", kind: .document, byteCount: 482_000,
+                               text: "14. ANIMALS. Tenant may keep one cat.", pageCount: 12),
+                ChatAttachment(filename: "IMG_2041.HEIC", kind: .image, byteCount: 2_100_000, text: ""),
+            ]
+        }
+        try store.append(to: conversation, role: .assistant, content: "One cat, with a deposit.", model: .quick) {
+            $0.finishRawValue = ChatFinish.stop.rawValue
+        }
+        let folder = FileManager.default.temporaryDirectory.appending(path: "chat-snapshot-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let notes = folder.appending(path: "Move-in checklist.md")
+        try Data("Keys, meter readings, photos of the walls.".utf8).write(to: notes)
+        let deck = folder.appending(path: "Budget.numbers")
+        try Data("zip".utf8).write(to: deck)
+
+        let model = ChatViewModel(service: ScriptedEngineService(), store: store)
+        model.select(conversation.id)
+        model.attach([notes, deck])
+        await model.waitForAttachments()
+        let pending = model.pendingAttachments
+        #expect(pending.count == 2)
+        #expect(pending.last?.state == .failed("Export it as PDF to attach it"))
+        let messages = model.messages
+        #expect(messages.first?.attachments.count == 2)
+        _ = try Self.render(ChatView(model: model), name: "02d-chat-attachments")
+    }
+
     @Test func emptyChatRendersWithImageRenderer() throws {
         let container = try AppModelContainer.inMemory()
         let model = ChatViewModel(service: ScriptedEngineService(), store: ConversationStore(container: container))
