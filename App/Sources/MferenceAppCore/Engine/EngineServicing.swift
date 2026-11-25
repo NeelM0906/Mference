@@ -135,7 +135,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     public var supportsImageUnderstanding: Bool {
         switch self {
         case .quick, .deep: true
-        case .inkling2Mini, .qwen36, .minicpm5, .maple, .apple: false
+        case .inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple, .apple: false
         }
     }
 
