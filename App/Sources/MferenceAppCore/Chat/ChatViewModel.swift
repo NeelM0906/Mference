@@ -341,6 +341,33 @@ public final class ChatViewModel {
         draft = question
     }
 
+    /// Continues questions answered elsewhere (Calendar's Ask about your
+    /// week) as a new Private chat: `context` is stored first as hidden
+    /// context (a system message the model reads and the chat does not
+    /// show), then each question and answer, titled `title`, then opened
+    /// with the box empty. Stored now because the person asked for it;
+    /// Private keeps it out of Memory.
+    /// Returns false, changing nothing, while a chat answer is running.
+    @discardableResult
+    public func continueChat(title: String, context: String, turns: [(question: String, answer: String)]) -> Bool {
+        guard !isGenerating, !turns.isEmpty else { return false }
+        newChat(isPrivate: true)
+        do {
+            let conversation = try store.createConversation(model: model, isPrivate: true, now: now())
+            try store.append(to: conversation, role: .system, content: context, now: now())
+            for turn in turns {
+                try store.append(to: conversation, role: .user, content: turn.question, now: now())
+                try store.append(to: conversation, role: .assistant, content: turn.answer, now: now())
+            }
+            try store.update(conversation) { $0.title = title }
+            reloadConversations()
+            select(conversation.id)
+        } catch {
+            errorMessage = "Mference could not start this chat. \(error.localizedDescription)"
+        }
+        return true
+    }
+
     /// "Turn on" in the web consent prompt.
     public func confirmWebConsent() {
         webConsentRequested = false
@@ -473,7 +500,11 @@ public final class ChatViewModel {
             let memory = ChatMemoryPrompt.text(facts: store.rememberedFacts())
             while true {
                 var turns = store.turns(for: conversation)
-                let system = [toolbox?.systemPrompt(now: now()), memory].compactMap { $0 }
+                // Hidden context stored with the chat (Calendar's week) joins
+                // the system prompt: one system turn, first.
+                let stored = turns.filter { $0.role == .system }.compactMap(\.content)
+                turns.removeAll { $0.role == .system }
+                let system = [toolbox?.systemPrompt(now: now()), memory].compactMap { $0 } + stored
                 if !system.isEmpty {
                     turns.insert(ChatTurn(role: .system, content: system.joined(separator: "\n\n")), at: 0)
                 }

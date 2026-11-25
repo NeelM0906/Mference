@@ -24,6 +24,7 @@ struct MferenceEnvironment: ViewModifier {
             base
                 .environment(apple.scan)
                 .environment(apple.calendar)
+                .environment(apple.weekAsk)
                 .environment(apple.mail)
         } else {
             base

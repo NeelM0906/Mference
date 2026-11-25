@@ -110,6 +110,21 @@ public final class CalendarWeekModel {
         return (0..<(weeks * 7)).compactMap { calendar.date(byAdding: .day, value: $0, to: first) }
     }
 
+    /// The seven days Ask about your week answers about: the week shown in
+    /// Week, the week holding the selected day in Day and Month.
+    public var askWeek: DateInterval {
+        var week = baseLayout
+        week.days = 7
+        return week.interval(from: week.weekStart(containing: selectedDate))
+    }
+
+    /// Events in any window, read straight from Calendar (Ask reads its
+    /// whole week even when Day shows one day). Empty without access.
+    public func events(in interval: DateInterval) async throws -> [CalendarEvent] {
+        guard access == .granted else { return [] }
+        return try await service.events(from: interval.start, to: interval.end)
+    }
+
     /// The window loaded from Calendar for the current view.
     public var fetchInterval: DateInterval {
         switch mode {
@@ -350,24 +365,31 @@ public final class CalendarWeekModel {
     /// added; `errorMessage` says why not.
     @discardableResult
     public func createEvent(title: String, start: Date, end: Date) async -> Bool {
+        await addEvent(title: title, start: start, end: end) != nil
+    }
+
+    /// Adds an event the person asked for and returns it (for an Undo), or
+    /// nil with `errorMessage` saying why not.
+    @discardableResult
+    public func addEvent(title: String, start: Date, end: Date) async -> CalendarEvent? {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, end > start else {
             errorMessage = "An event needs a title and an end after its start."
-            return false
+            return nil
         }
         if access == .notAsked { await requestAccess() }
-        guard access == .granted else { return false }
+        guard access == .granted else { return nil }
         do {
-            _ = try await service.add(ProposedEvent(title: trimmed, start: start, end: end,
-                                                    source: ItemSource(kind: .manual, label: "Added by you")))
+            let added = try await service.add(ProposedEvent(title: trimmed, start: start, end: end,
+                                                            source: ItemSource(kind: .manual, label: "Added by you")))
             await reload()
-            return true
+            return added
         } catch let error as CalendarServiceError {
             errorMessage = error.userMessage
         } catch {
             errorMessage = error.localizedDescription
         }
-        return false
+        return nil
     }
 
     /// Edit from the event's popover: this occurrence only.
