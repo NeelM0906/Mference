@@ -19,8 +19,11 @@ Run the release build, serial tests, and Markdown link check:
 ```bash
 swift build -c release
 Scripts/test.sh
-ruby Scripts/check_markdown_links.rb
+LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
 ```
+
+The full gate list for each kind of change is in
+[PR_Requirement.md](PR_Requirement.md#7-gates).
 
 These checks do not download or load the model. For a real-model change, also
 report the prompt, generated token count, output, timing footer, Mac model,
@@ -35,7 +38,9 @@ process details.
 ## Pull requests
 
 Keep each pull request narrow. Explain the behavior change, tests run, and any
-remaining limitation. By contributing, you agree that your work is licensed
+remaining limitation. [PR_Requirement.md](PR_Requirement.md) is the full bar a
+pull request must meet before review: scope, gates, independent review, and
+the description. By contributing, you agree that your work is licensed
 under the repository's [MIT License](LICENSE). Portions derived from
 TurboFieldfare remain under the [Apache License 2.0](LICENSE-APACHE); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
