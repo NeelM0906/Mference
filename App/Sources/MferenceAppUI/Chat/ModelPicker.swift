@@ -6,7 +6,7 @@ import SwiftUI
 /// (Quick, Deep, Auto "Coming later"), Built into macOS (Apple's on-device
 /// model, only while Settings > Models > Apple Intelligence model is on and
 /// this Mac can run it) and Also on this Mac (Inkling 2 Mini, Qwen 3.6,
-/// MiniCPM5, Maple), each with its live state and, small under it, the
+/// MiniCPM5 2B and 1B, Maple), each with its live state and, small under it, the
 /// engine.
 struct ModelPicker: View {
     @Bindable var model: ChatViewModel

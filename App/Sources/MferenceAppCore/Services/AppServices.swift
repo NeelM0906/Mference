@@ -305,6 +305,7 @@ public final class AppServices {
         case .inkling2Mini: 17_650_000_000
         case .qwen36: 19_800_000_000
         case .minicpm5: 1_400_000_000
+        case .minicpm5_1b: 620_000_000
         case .maple: 7_600_000_000
         case .apple: 0
         }
