@@ -18,7 +18,8 @@
 #   2  install verify     MferenceRepack --verify-install. Needs <gturbo-dir>.
 #   3  ladder smoke       three fresh-process greedy generations at 16 / 32 /
 #                         auto expert-cache slots; the three stdouts must be
-#                         byte-identical. Needs <gturbo-dir>.
+#                         byte-identical. Needs <gturbo-dir>. SKIPPED for
+#                         inkling2mini, which places its own experts.
 #   4  protocol scaffold  creates the results directory and prints the
 #                         run-benchmark.sh command to run next. It never runs
 #                         the benchmark: that stays a deliberate invocation.
@@ -94,7 +95,8 @@ Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 
   <family>      one of: qwen36 qwen38 maple minicpm5 minicpm5-1b inkling2mini
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
-                (install verify, ladder smoke) are SKIPPED.
+                (install verify, ladder smoke) are SKIPPED. Stage 3 is
+                also SKIPPED for inkling2mini (no slot cache to ladder).
   --dry-run     print every command each stage would execute and run nothing.
   --help, -h    this text.
 
