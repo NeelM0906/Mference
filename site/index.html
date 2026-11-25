@@ -6,7 +6,7 @@
 <title>Mference: personal AI that runs on your Mac</title>
 <meta name="description" content="A private assistant that runs entirely on your Mac. Chat, find files by what is in them, sort your mail and plan your week, with nothing leaving the machine.">
 <meta property="og:title" content="Mference: personal AI, kept personal">
-<meta property="og:description" content="A private assistant that runs entirely on your Mac, on six local models from Quick to Inkling 2 Mini. Open source, for Apple Silicon.">
+<meta property="og:description" content="A private assistant that runs entirely on your Mac, on eight local models, from MiniCPM5 1B to Inkling 2 Mini. Open source, for Apple Silicon.">
 <meta property="og:image" content="assets/shots/chat.jpg">
 <meta name="theme-color" content="#FBFBFC">
 <link rel="icon" href="assets/icon.png">
@@ -96,8 +96,8 @@
 <section class="wrap reveal" aria-label="At a glance">
   <div class="stats">
     <div><b>On device</b><span>The model, your index and your memory are files on your Mac</span></div>
-    <div><b>6 models</b><span>From a 1.4 GB quick helper to a 35B thinker</span></div>
-    <div><b>One switch</b><span>Offline mode turns off every network call the app makes</span></div>
+    <div><b>8 models</b><span>From a 0.6 GB MiniCPM5 to a 35B Qwen</span></div>
+    <div><b>One switch</b><span>Offline mode turns off web search and model downloads</span></div>
     <div><b>MIT</b><span>Read every line that touches your data</span></div>
   </div>
 </section>
@@ -159,12 +159,12 @@
     <div class="reveal">
       <p class="kicker">Privacy</p>
       <h2 class="h2" style="margin-top:12px">Private isn't a setting. It's where it runs.</h2>
-      <p class="lede" style="margin-top:24px;max-width:32em">There is no Mference account and no Mference server. Flip Offline mode and the app stops reaching the network; everything marked Mac only keeps working. Apple Mail and Calendar keep syncing your accounts on their own.</p>
+      <p class="lede" style="margin-top:24px;max-width:32em">There is no Mference account and no Mference server. Flip Offline mode and web search and chat and speech model downloads stop; everything marked Mac only keeps working. Apple Mail and Calendar keep syncing your accounts on their own.</p>
       <p style="margin-top:28px"><a class="link" href="privacy.html">What stays on your Mac →</a></p>
     </div>
     <div class="console reveal">
       <div class="switch-row">
-        <div><b id="off-l">Offline mode</b><span data-offline-sub data-on="On. The app makes no network calls." data-off="Off. Only what you ask for goes out."></span></div>
+        <div><b id="off-l">Offline mode</b><span data-offline-sub data-on="On. No web search, no model downloads." data-off="Off. Only what you ask for goes out."></span></div>
         <button class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="off-l"></button>
       </div>
       <ul class="flows">
@@ -172,7 +172,7 @@
         <li data-flow="local"><span>Find index and search model</span><span class="wire local"></span><span class="tag local">Mac only</span></li>
         <li data-flow="out" data-on-label="Bundled engine"><span>Web search</span><span class="wire"></span><span class="tag ask">Bundled engine</span></li>
         <li data-flow="system"><span>Mail and calendar sync</span><span class="wire"></span><span class="tag ask">Your providers</span></li>
-        <li data-flow="out" data-on-label="When you ask"><span>Model downloads</span><span class="wire"></span><span class="tag ask">When you ask</span></li>
+        <li data-flow="out" data-on-label="When you ask"><span>Chat and speech model downloads</span><span class="wire"></span><span class="tag ask">When you ask</span></li>
       </ul>
     </div>
   </div>
@@ -183,7 +183,7 @@
     <div class="sec-head reveal">
       <p class="kicker">Models</p>
       <h2 class="h2">Models on Mference.</h2>
-      <p class="lede">Six models that run on your Mac, from Quick for everyday chat and mail to Deep for longer reasoning. Quick and Deep download from inside the app, which shows how much memory each model needs before you load it.</p>
+      <p class="lede">Eight models that run on your Mac, from Quick for everyday chat and mail to Deep for longer reasoning. Quick, Deep and Bonsai download from inside the app, which shows how much memory each model needs before you load it.</p>
     </div>
     <div class="reveal" style="justify-self:end"><div class="seg" role="group" aria-label="Your Mac's memory"></div></div>
   </div>
@@ -215,8 +215,8 @@ App/Scripts/run.sh</pre>
   <h2 class="h2 reveal" style="text-align:center;font-size:clamp(32px,3.8vw,48px)">Questions</h2>
   <div class="faq reveal">
     <details open><summary>What stays on my Mac?</summary><p>Your chats, notes, files, mail, calendar, the Find index and the model itself. Mail and calendars keep syncing with your own providers through Apple Mail and Calendar, as they already do.</p></details>
-    <details><summary>Does it need the internet?</summary><p>Only for what you ask for: web search, model downloads, and syncing your own accounts. Offline mode turns off search and downloads, and chat, Find, Notes and Scan keep working; your accounts keep syncing through Apple Mail and Calendar.</p></details>
-    <details><summary>Which Macs does it run on?</summary><p>Apple Silicon Macs on macOS 26 or later. An 8 GB Mac runs Quick, MiniCPM5, Maple and Qwen 3.6; Deep wants more than 16 GB and Inkling 2 Mini 32 GB. The app shows how much memory each model needs before you load it.</p></details>
+    <details><summary>Does it need the internet?</summary><p>Only for what you ask for: web search, model downloads, and syncing your own accounts. Offline mode turns off web search and chat and speech model downloads, and chat, Find, Notes and Scan keep working; your accounts keep syncing through Apple Mail and Calendar.</p></details>
+    <details><summary>Which Macs does it run on?</summary><p>Apple Silicon Macs on macOS 26 or later. An 8 GB Mac runs Quick and both MiniCPM5 models; Maple and Qwen 3.6 want 16 GB, Deep and Bonsai more than 16 GB, and Inkling 2 Mini 32 GB. The app shows how much memory each model needs before you load it.</p></details>
     <details><summary>Will the app ask for access to my data?</summary><p>Only when you first use the feature that needs it. Calendar, Reminders, Mail and Full Disk Access are each requested at that moment, never at install.</p></details>
     <details><summary>What does it cost?</summary><p>Nothing. Mference is open source under the MIT license. It is pre-release, so today you build it from source.</p></details>
   </div>

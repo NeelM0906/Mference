@@ -31,7 +31,7 @@
 <section class="page-hero wrap">
   <p class="kicker" style="color:var(--ok)">Privacy</p>
   <h1 class="display">What stays on your Mac? All of it.</h1>
-  <p class="lede">There is no Mference account and no Mference server. The model, your index and your memory are files on your disk. Here is every way the app touches the network, and how to turn each one off.</p>
+  <p class="lede">There is no Mference account and no Mference server. The model, your index and your memory are files on your disk. Here is how the app touches the network, and what Offline mode turns off.</p>
 </section>
 
 <section class="wrap" style="padding-top:64px">
@@ -43,7 +43,7 @@
         <button class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="off-l2"></button>
       </div>
     </div>
-    <p class="small" style="margin-top:8px" data-offline-sub data-on="Offline mode is on: the app makes no network calls, and everything on this Mac keeps working. Apple Mail and Calendar keep syncing your accounts on their own." data-off="Offline mode is off: each outbound item runs only when you use that feature."></p>
+    <p class="small" style="margin-top:8px" data-offline-sub data-on="Offline mode is on: web search and chat and speech model downloads stop, and everything on this Mac keeps working. Apple Mail and Calendar keep syncing your accounts on their own." data-off="Offline mode is off: each outbound item runs only when you use that feature."></p>
     <div class="map-cols">
       <div class="zone mac">
         <h3>On this Mac, always</h3>
@@ -58,10 +58,11 @@
       <div class="zone out">
         <h3>Leaves only when you ask</h3>
         <ul>
-          <li data-flow="out" data-on-label="When asked"><span>Web search<small>Through the search engine bundled in the app</small></span><span class="tag ask">When asked</span></li>
+          <li data-flow="out" data-on-label="When asked"><span>Web search<small>Queries go through the search engine bundled in the app; the pages it reads come straight from their sites</small></span><span class="tag ask">When asked</span></li>
           <li data-flow="system"><span>Mail and calendar sync<small>Your own providers, through Apple Mail and Calendar; Offline mode does not pause it</small></span><span class="tag ask">Apple's sync</span></li>
           <li data-flow="out" data-on-label="When asked"><span>Model downloads<small>Pinned files from Hugging Face, checked by SHA-256</small></span><span class="tag ask">When asked</span></li>
           <li data-flow="out" data-on-label="Once"><span>Speech models<small>Downloaded when you set Notes up</small></span><span class="tag ask">Once</span></li>
+          <li data-flow="once"><span>Find's search model<small>Downloaded from Hugging Face when you turn Find on; Offline mode does not stop it</small></span><span class="tag ask">Once</span></li>
         </ul>
       </div>
     </div>
@@ -84,7 +85,7 @@
   <h2 class="h2 reveal" style="text-align:center;font-size:clamp(32px,3.8vw,48px)">Privacy questions</h2>
   <div class="faq reveal">
     <details open><summary>Does Mference send my chats anywhere?</summary><p>No. The model runs on your Mac and there is no Mference server to send them to. With web search on, the search query goes out through the bundled search engine; the conversation itself does not.</p></details>
-    <details><summary>Can I use it with no network at all?</summary><p>Yes. Turn on Offline mode and the app stops its own network use: web search and downloads. Chat, Find, Notes and Scan keep working with the models you already have. Apple Mail and Calendar sync your accounts on their own, so a reply you send or an event you add still goes out through them.</p></details>
+    <details><summary>Can I use it with no network at all?</summary><p>Yes. Turn on Offline mode and web search and chat and speech model downloads stop; Find downloads its small search model only when you turn Find on. Chat, Find, Notes and Scan keep working with the models you already have. Apple Mail and Calendar sync your accounts on their own, so a reply you send or an event you add still goes out through them.</p></details>
     <details><summary>Where are my files indexed?</summary><p>In a database on your Mac, built by a small search model that also runs on your Mac. Photos, video and audio are indexed only if you turn them on.</p></details>
     <details><summary>How do I report a privacy problem?</summary><p>Follow the <a href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">security policy</a> to report it privately.</p></details>
   </div>

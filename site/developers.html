@@ -40,7 +40,7 @@
       <p class="kicker">Get started</p>
       <h2 class="h2" style="margin-top:12px;font-size:clamp(32px,3.8vw,48px)">Build the app in four commands.</h2>
       <p class="lede" style="margin-top:20px;font-size:17px">Mference is pre-release, so there is no signed download yet. You need an Apple Silicon Mac with macOS 26 or later and Xcode 26 (or its Command Line Tools).</p>
-      <p class="muted" style="margin-top:16px;font-size:15px">On first run the app helps you pick a model. Quick and Deep download from inside the app.</p>
+      <p class="muted" style="margin-top:16px;font-size:15px">On first run the app helps you pick a model. Quick, Deep and Bonsai download from inside the app.</p>
     </div>
     <div class="copy-wrap reveal">
 <pre class="code" id="build"><span class="c"># clone, fetch the bundled search engine once, build and open</span>
@@ -57,11 +57,11 @@ App/Scripts/run.sh</pre>
   <div class="two" style="align-items:start">
     <div class="reveal">
       <p class="kicker">More models</p>
-      <h2 class="h2" style="margin-top:12px;font-size:clamp(32px,3.8vw,48px)">Install the other four.</h2>
-      <p class="lede" style="margin-top:20px;font-size:17px">Qwen 3.6, MiniCPM5, Maple and Inkling 2 Mini install from the terminal. The installer streams each pinned checkpoint without staging the whole source, and the app finds the result in <code>~/llm-models</code> on its own.</p>
+      <h2 class="h2" style="margin-top:12px;font-size:clamp(32px,3.8vw,48px)">Install the other five.</h2>
+      <p class="lede" style="margin-top:20px;font-size:17px">Qwen 3.6, MiniCPM5 (2B and 1B), Maple and Inkling 2 Mini install from the terminal. The installer streams each pinned checkpoint without staging the whole source, and the app finds the result in <code>~/llm-models</code> on its own.</p>
     </div>
     <div class="copy-wrap reveal">
-<pre class="code" id="repack"><span class="c"># or --model minicpm5 / maple / inkling2mini</span>
+<pre class="code" id="repack"><span class="c"># or --model minicpm5 / minicpm5-1b / maple / inkling2mini</span>
 swift run -c release MferenceRepack \
   --model qwen36 --output ~/llm-models/qwen36.gturbo
 <span class="c"># resume an interrupted install</span>
