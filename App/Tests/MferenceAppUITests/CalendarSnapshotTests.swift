@@ -43,6 +43,50 @@ import Testing
                 .environment(noPrompt), name: "04-calendar-todos-no-prompt")
     }
 
+    /// Ask about your week: idle chips, a free-time answer drawn on the
+    /// grid, a busiest-day answer, Month's bar, and an out-of-date answer.
+    @Test func askAboutYourWeek() async throws {
+        let fixedNow = AppleUIFixtures.now
+        let defaults = UserDefaults(suiteName: "mference-snapshots-\(UUID().uuidString)")!
+        let store = PlannerStore(url: nil, initial: .init(todos: AppleUIFixtures.todos, proposals: []))
+        let service = InMemoryCalendarService(events: AppleUIFixtures.events)
+        let model = CalendarWeekModel(service: service, store: store, defaults: defaults, now: { fixedNow },
+                                      syncsAutomatically: false)
+        await model.load()
+        // What ships: chips answered in Swift, typed questions as one JSON
+        // reply over the JSON schedule.
+        let engine = ScriptedEngineService(status: EngineServiceStatus(phase: .ready, residentModel: .quick), replies: [
+            .init(content: #"{"answer": "Your busiest day left is the one with the most booked time.", "refs": []}"#),
+        ])
+        let ask = WeekAskModel(calendar: model, answerer: WeekAnswerer(picker: WeekModelPicker(engine: engine)))
+        func render(_ name: String, _ scheme: ColorScheme = .light) throws {
+            try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
+                .environment(model).environment(ask), name: name, colorScheme: scheme)
+        }
+        try render("04-calendar-ask-idle")
+        await ask.ask(.freeFor(minutes: 120))
+        #expect(!ask.highlightedOpenTimes.isEmpty)
+        for scheme in [ColorScheme.light, .dark] { try render("04-calendar-ask-free", scheme) }
+        await ask.ask("Which day is busiest?")
+        #expect(ask.answers.count == 2)
+        try render("04-calendar-ask-busiest")
+        ask.clear()
+        await model.show(.month)
+        await ask.ask(.due)
+        try render("04-calendar-ask-month")
+        await model.show(.week)
+        _ = try await service.add(ProposedEvent(title: "Dentist", start: fixedNow.addingTimeInterval(26 * 3_600),
+                                                end: fixedNow.addingTimeInterval(27 * 3_600),
+                                                source: ItemSource(kind: .manual, label: "x")))
+        await ask.calendarChanged()
+        #expect(ask.isStale)
+        try render("04-calendar-ask-stale")
+        // Day view: the chips are about the selected day.
+        ask.clear()
+        await model.show(.day)
+        try render("04-calendar-ask-day")
+    }
+
     @Test func shellSlotBuildsWithoutServices() {
         let renderer = ImageRenderer(content: CalendarView().frame(width: 600, height: 600))
         #expect(renderer.nsImage != nil)

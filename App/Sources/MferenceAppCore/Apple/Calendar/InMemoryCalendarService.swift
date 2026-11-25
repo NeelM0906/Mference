@@ -16,6 +16,8 @@ public actor InMemoryCalendarService: CalendarServicing {
     private let promptShown: Bool
     public private(set) var requests: [AppPermission] = []
     private var nextID = 1
+    /// Tests: how long the next events read waits, like a slow EventKit read.
+    private var nextReadDelay: Duration?
 
     public init(events: [CalendarEvent] = [], calendarAccess: PermissionState = .granted,
                 remindersAccess: PermissionState = .notDetermined, grantOnRequest: Bool = true,
@@ -57,7 +59,17 @@ public actor InMemoryCalendarService: CalendarServicing {
         return remindersState
     }
 
+    /// Tests: the next events read waits `delay` before reading.
+    public func delayNextRead(by delay: Duration) { nextReadDelay = delay }
+
+    /// Tests: the delayed read has not started yet.
+    public var isNextReadDelayed: Bool { nextReadDelay != nil }
+
     public func events(from start: Date, to end: Date) async throws -> [CalendarEvent] {
+        if let delay = nextReadDelay {
+            nextReadDelay = nil
+            try await Task.sleep(for: delay)
+        }
         guard calendarState == .granted else { throw CalendarServiceError.noAccess(calendarState) }
         return storedEvents.filter { $0.end > start && $0.start < end }.sorted { $0.start < $1.start }
     }
