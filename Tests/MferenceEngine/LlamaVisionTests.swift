@@ -398,6 +398,36 @@ struct LlamaVisionTests {
         #expect(repositoryName.descriptor(for: "qwen3.5-4b")?.visionProjector?.location.path == generic)
     }
 
+    /// Quick in another library root (`~/llm-models`) still pairs with the
+    /// projector the app downloaded into `~/llm-models/gguf`; only its own
+    /// pinned names are taken from there.
+    @Test func aProductModelElsewhereFindsItsDownloadedProjector() {
+        let root = "/home/llm-models", gguf = "/home/llm-models/gguf"
+        let quick = "\(root)/Qwen3.5-4B-UD-Q4_K_XL.gguf"
+        let other = "\(root)/Some-Model.Q8_0.gguf"
+        let downloaded = "\(gguf)/Qwen3.5-4B-mmproj-F16.gguf"
+        let foreign = "\(gguf)/mmproj-Some-Model-F16.gguf"
+        let files = [root: [quick, other], gguf: [downloaded, foreign]]
+        let headers = [quick: Self.modelMeta(width: 2_560), other: Self.modelMeta(width: 2_560),
+                       downloaded: Self.projectorMeta(width: 2_560), foreign: Self.projectorMeta(width: 2_560)]
+        let fileSystem = EngineCatalogDiscovery.FileSystem(
+            childDirectories: { _ in [] },
+            ggufFiles: { (files[$0.path] ?? []).map { URL(fileURLWithPath: $0) } },
+            probe: { _ in .notAModelDirectory },
+            checkpointID: { _ in nil },
+            readGGUF: { url in
+                guard let header = headers[url.path] else { throw EngineGGUFReader.ReadError.notGGUF }
+                return header
+            },
+            size: { _ in 1 })
+        let catalog = EngineCatalogDiscovery.discover(
+            roots: [], ggufDirectories: [URL(fileURLWithPath: root), URL(fileURLWithPath: gguf)],
+            scope: .all, fileSystem: fileSystem)
+        #expect(catalog.descriptor(for: "qwen3.5-4b")?.visionProjector?.location.path == downloaded)
+        // A model that is not a product never borrows a projector from elsewhere.
+        #expect(catalog.descriptor(for: "some-model.q8_0")?.visionProjector == nil)
+    }
+
     @Test func theDeveloperScopeNeverListsAProjectorAsAModel() {
         let projector = "/lib/gguf/mmproj-Some-Model-F16.gguf"
         let model = "/lib/gguf/Some-Model.Q8_0.gguf"

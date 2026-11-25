@@ -271,7 +271,10 @@ a weight file or a tensor.
   `clip.vision.projection_dim` equal to the model's `embedding_length`; a
   product model prefers its own file names (Quick:
   `Qwen3.5-4B-mmproj-F16.gguf`, then `mmproj-F16.gguf`; Deep:
-  `mmproj-Qwen3.8-27B-BF16.gguf`), then path order. The pairing is
+  `mmproj-Qwen3.8-27B-BF16.gguf`), then path order. With none beside it, a
+  product model also takes one of those pinned files from the other GGUF
+  directories (the app downloads into `~/llm-models/gguf`, while the model
+  may sit in another library root). The pairing is
   `EngineModelDescriptor.visionProjector`.
 
 ### Product allowlist
