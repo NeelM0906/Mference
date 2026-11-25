@@ -106,6 +106,8 @@ public final class ChatViewModel {
     @ObservationIgnored private let defaultModel: @MainActor () -> AppModel
     /// Reads attached files into text on this Mac.
     @ObservationIgnored private let attachmentReader: ChatAttachmentReader
+    /// Where pictures pasted as data are kept until they are read.
+    @ObservationIgnored private var pastedDirectory: URL?
     /// Offers Quick's or Deep's image understanding on the first picture;
     /// nil where it cannot be downloaded (tests, previews).
     @ObservationIgnored private let imageUnderstanding: (any ImageUnderstandingOffering)?
@@ -492,6 +494,33 @@ public final class ChatViewModel {
                 }
             }
         }
+    }
+
+    /// ⌘V in the composer: files copied in Finder attach like dropped ones;
+    /// a picture copied as data is kept in a private temporary folder first.
+    public func paste(_ content: ChatPasteContent) {
+        switch content {
+        case .files(let urls):
+            attach(urls)
+        case .image(let data, let fileExtension):
+            guard canAttach else { return }
+            do {
+                attach([try keepPasted(data, fileExtension: fileExtension)])
+            } catch {
+                errorMessage = "Mference could not keep the pasted picture. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func keepPasted(_ data: Data, fileExtension: String) throws -> URL {
+        let directory = pastedDirectory ?? URL.temporaryDirectory.appending(path: "mference-pasted-\(UUID().uuidString)",
+                                                                            directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        pastedDirectory = directory
+        let url = directory.appending(path: "Pasted image \(UUID().uuidString.prefix(8)).\(fileExtension)")
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     public func removeAttachment(_ id: UUID) {

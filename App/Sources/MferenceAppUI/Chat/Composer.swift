@@ -1,3 +1,4 @@
+import AppKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
@@ -9,6 +10,7 @@ struct Composer: View {
     @Bindable var model: ChatViewModel
     @Binding var pickerOpen: Bool
     @FocusState private var focused: Bool
+    @State private var pasteMonitor: Any?
     /// The open panel being shown: files or images.
     @State private var importing: ChatAttachment.Kind?
     @State private var dropTargeted = false
@@ -56,7 +58,11 @@ struct Composer: View {
             if case .success(let urls) = result { model.attach(urls) }
         }
         .shadow(color: MFColor.ink.opacity(0.05), radius: MFSpacing.m, y: MFSpacing.xs)
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            installPasteMonitor()
+        }
+        .onDisappear(perform: removePasteMonitor)
         .confirmationDialog("Turn on web search?", isPresented: Binding(
             get: { model.webConsentRequested },
             set: { if !$0 { model.declineWebConsent() } })) {
@@ -133,6 +139,29 @@ struct Composer: View {
                                         : ChatAttachmentReader.documentExtensions
         var seen = Set<UTType>()
         return extensions.compactMap { UTType(filenameExtension: $0) }.filter { seen.insert($0).inserted }
+    }
+
+    /// ⌘V with a Finder file or a picture on the clipboard attaches it; text
+    /// still pastes into the field. A key monitor, because the field's own
+    /// editor takes paste: before a SwiftUI paste handler would see it.
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let isPaste = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+                && event.charactersIgnoringModifiers?.lowercased() == "v"
+            guard isPaste else { return event }
+            let attached = MainActor.assumeIsolated { () -> Bool in
+                guard focused, let content = ChatPasteContent.read(.general) else { return false }
+                model.paste(content)
+                return true
+            }
+            return attached ? nil : event
+        }
+    }
+
+    private func removePasteMonitor() {
+        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+        pasteMonitor = nil
     }
 
     private var webChip: some View {
