@@ -20,7 +20,7 @@ public final class AppServices {
     public let settings: AppSettings
     public let permissions: any PermissionBroker
     public let modelContainer: ModelContainer
-    /// GGUF product model downloads (Quick, Deep); nil where none are offered.
+    /// GGUF product model downloads (Quick, Deep, Bonsai); nil where none are offered.
     public let downloads: DownloadManager?
     /// The image-understanding add-ons of Quick and Deep (their vision
     /// projectors), into the same folder; nil where none are offered.
@@ -302,6 +302,7 @@ public final class AppServices {
         switch model {
         case .quick: 2_910_000_000
         case .deep: 12_100_000_000
+        case .bonsai27b: 7_910_000_000
         case .inkling2Mini: 17_650_000_000
         case .qwen36: 19_800_000_000
         case .minicpm5: 1_400_000_000

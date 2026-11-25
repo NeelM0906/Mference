@@ -168,11 +168,11 @@ nonisolated public struct ModelEntry: Sendable, Hashable, Identifiable {
     public var installsWithoutApproval: Bool { id == AppModel.quick.modelID }
 
     /// L4 in one place: whether this model may be offered for download on
-    /// `machine`. Deep only on Macs with more than 16 GB; nothing MemoryFit
+    /// `machine`. Deep and Bonsai only on Macs with more than 16 GB; nothing MemoryFit
     /// rules out.
     public func isOffered(on machine: MachineSummary) -> Bool {
         if case .tooLarge = fit { return false }
-        if id == AppModel.deep.modelID { return machine.canOfferDeep }
+        if id == AppModel.deep.modelID || id == AppModel.bonsai27b.modelID { return machine.canOfferDeep }
         return true
     }
 }

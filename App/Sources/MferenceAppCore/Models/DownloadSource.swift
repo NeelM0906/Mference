@@ -2,7 +2,7 @@ import Foundation
 
 /// Where a downloadable product model comes from: one pinned file with its
 /// size and SHA-256 (the Hugging Face LFS object id), as recorded in
-/// THIRD_PARTY_NOTICES.md. Only the two GGUF product models download from
+/// THIRD_PARTY_NOTICES.md. Only the GGUF product models download from
 /// the app; native installs come from `MferenceRepack`.
 public struct DownloadSource: Sendable, Hashable {
     public let model: AppModel
@@ -48,7 +48,16 @@ public struct DownloadSource: Sendable, Hashable {
         sha256: "58fd826723939933dc86f45b7fe04545cbc2de1c70f6fe2cdd3858c87a98c12f",
         licence: "Apache 2.0")
 
-    public static let product: [AppModel: DownloadSource] = [.quick: quick, .deep: deep]
+    /// Bonsai 2.5 27B: PrismML's ternary Qwen3.8-27B in llama.cpp's stock
+    /// `Q2_0`, with the MTP head.
+    public static let bonsai27b = DownloadSource(
+        model: .bonsai27b, repository: "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
+        revision: "28a7093cc25bc151cc2b284c5570f12ce343fdcf",
+        fileName: "Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf", sizeBytes: 7_912_178_944,
+        sha256: "b0f83de8481c3200c529aef5fb495dbfedf2a4a3f017f7a3ea0a69c67be1d306",
+        licence: "Apache 2.0")
+
+    public static let product: [AppModel: DownloadSource] = [.quick: quick, .deep: deep, .bonsai27b: bonsai27b]
 
     /// Quick's image understanding: the vision projector of the same
     /// revision (`mmproj-F16.gguf`), saved under a name of its own so it can
@@ -68,11 +77,21 @@ public struct DownloadSource: Sendable, Hashable {
         sha256: "13cb7bebccbd04afc8f4090cb949ecf8937cdf7377c5799b1a0c594e7c0d3e16",
         licence: "Apache 2.0")
 
+    /// Bonsai's image understanding: the Q8_0 vision projector of the same
+    /// revision.
+    public static let bonsai27bImageUnderstanding = DownloadSource(
+        model: .bonsai27b, repository: "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
+        revision: "28a7093cc25bc151cc2b284c5570f12ce343fdcf",
+        fileName: "Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf", sizeBytes: 629_246_976,
+        sha256: "6807ede61d570bb86ba34b756a0fa109edc33668604de867c6ea6d8f1d631903",
+        licence: "Apache 2.0")
+
     /// The optional image-understanding add-ons, by the model they extend.
     /// They download through their own `DownloadManager` into the same folder
     /// as the models.
     public static let imageUnderstanding: [AppModel: DownloadSource] = [
         .quick: quickImageUnderstanding, .deep: deepImageUnderstanding,
+        .bonsai27b: bonsai27bImageUnderstanding,
     ]
 
     /// Hosts a model download may reach (spec 4.4 (b)): Hugging Face and the
