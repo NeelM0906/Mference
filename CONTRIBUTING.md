@@ -19,8 +19,11 @@ Run the release build, serial tests, and Markdown link check:
 ```bash
 swift build -c release
 Scripts/test.sh
-ruby Scripts/check_markdown_links.rb
+LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
 ```
+
+The full gate list for each kind of change is in
+[PR_Requirement.md](PR_Requirement.md#7-gates).
 
 These checks do not download or load the model. For a real-model change, also
 report the prompt, generated token count, output, timing footer, Mac model,

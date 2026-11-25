@@ -22,8 +22,9 @@ We value contributions in this order:
 1. **Correctness:** wrong output, crashes, leaks, hangs, regressions.
 2. **Safety of the machine and the user's data:** bounded memory, privacy,
    permissions, pinned downloads.
-3. **Model quality:** agentic task results and storage first; fidelity
-   metrics (KLD, dNLL, fp32 drift) are regression gates, not the goal.
+3. **Model quality:** where a change affects quality, show task results and
+   storage cost, not only fidelity metrics (KLD, dNLL, fp32 drift), which
+   serve as regression checks.
 4. **Performance**, measured with the [community benchmark
    protocol](docs/COMMUNITY_BENCHMARKS.md).
 5. **New model families**, through the [family gate](docs/FAMILY_GATE.md).
@@ -72,7 +73,7 @@ A well-built PR is most often closed because its premise was wrong.
 | A `.metal` file missing from `shaderModules` and `shaderSubdirectories` | One shared library, one function namespace. |
 | An `ArchConfig` axis without its full chain, or with a default that changes existing installs | See [the family contract](docs/FAMILY_CONTRACT.md); kept installs must decode unchanged. |
 | Changing the runtime `Quantization` reference or the installer's `Int4AffineEncoder` / `Int8AffineEncoder` without the other | They are bit-exact twins, locked by the parity suites. |
-| App code importing `MferenceEngine` or `Mference` outside `MferenceAppCore/Engine/`, a second `EngineService.live()`, or app tests that load a real model | One composition root and one resident model; [app work never loads a model](CLAUDE.md#app-work-never-loads-a-model). |
+| App code importing `MferenceEngine` or `Mference` outside `MferenceAppCore/Engine/` and the `AppServices` composition root, a second `EngineService.live()`, or app tests that load a real model | One composition root and one resident model; [app work never loads a model](CLAUDE.md#app-work-never-loads-a-model). |
 | A shared app contract ([App/CONTRACTS.md](App/CONTRACTS.md)) changed inside another change | A contract change is its own PR. |
 | A new `@Suite` touching the `FakeHFURLProtocol` statics | It races the serialized remote-install suite; extend `RemotePayloadCopyTests`. |
 | Speed claims outside the benchmark protocol, or protocol runs with experimental controls or profiling on | Results must be comparable. |
@@ -100,10 +101,10 @@ Pick the lowest rung that does the job:
 - **One logical change per PR.** A shared-contract change and a declared
   refactor each get their own PR. A family PR follows [the family
   gate](docs/FAMILY_GATE.md).
-- **Branch** off `main` as `<area>/<short-slug>`. Areas in use: `app/`,
-  `mobile/`, `eng/` (engine), `perf/`, `docs/`, `ci/`, `release/`.
-- **Commit subjects and PR titles** read `<Area>: <what changed, in plain
-  words>`, with no trailing period, for example
+- **Branch** off `main` as `<area>/<short-slug>`, for example `app/`,
+  `mobile/`, `notes/`, `eng/` (engine), `perf/` or `docs/`.
+- **Commit subjects and PR titles** read `<Area or component>: <what changed,
+  in plain words>`, with no trailing period, for example
   `Engine: Ternary Bonsai 2.5 27B as a product GGUF model` or
   `App: offer MiniCPM5 1B next to the 2B`. The body says why.
 - **No AI tool attribution** in commits, PR titles or PR bodies: no
@@ -115,23 +116,32 @@ Pick the lowest rung that does the job:
 Run every gate your diff needs **on the final commit, with a clean tree**.
 Any later commit, amend or rebase voids the results. Run them again.
 
-| The diff touches | Gate | Command |
+Which gates apply follows the CI scope, which
+`git diff --name-only origin/main...HEAD | .github/scripts/ci-scope.sh` prints.
+A change is **docs-only** when every path is Markdown (or an issue template)
+that nothing CI runs reads. Any other change is a **code** change. That includes
+`App/`, because the app links the engine package, and `bringup-check.sh`,
+`Scripts/test.sh` and `.github/`.
+
+| Applies to | Gate | Command |
 |---|---|---|
-| anything | whitespace | `git diff --check origin/main...HEAD` |
-| anything | links | `LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb` |
-| anything | source archive | `python3 Scripts/check_source_archive.py` |
-| `Sources/`, `Tests/`, `Vendor/`, `Package.*` | release build | `swift build -c release` |
-| `Sources/`, `Tests/`, `Vendor/`, `Package.*` | full serial suite | `Scripts/test.sh` (no `--filter`) |
-| `App/` | app release build | `swift build -c release --package-path App` (warnings are errors) |
-| `App/` | app tests | `swift test --package-path App` |
-| `Scripts/` | script tests | each `python3 Scripts/tests/test_*.py` |
-| `.github/scripts/` | CI scope tests | `python3 .github/scripts/test_ci_scope.py` |
+| every PR | whitespace | `git diff --check origin/main...HEAD` |
+| every PR | links | `LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb` |
+| every PR | source archive | `python3 Scripts/check_source_archive.py` |
+| code changes | release build | `swift build -c release` |
+| code changes | full serial suite | `Scripts/test.sh` (no `--filter`, even where CI runs a narrower scope) |
+| code changes | app release build | `swift build -c release --package-path App` (warnings are errors) |
+| code changes | app tests | `swift test --package-path App` |
+| `Scripts/` touched | script tests | each `python3 Scripts/tests/test_*.py` |
+| `App/Scripts/` touched | app script tests | each `python3 App/Scripts/tests/test_*.py` |
+| `.github/scripts/` touched | CI scope tests | `python3 .github/scripts/test_ci_scope.py` |
 | a model family | family gate | [docs/FAMILY_GATE.md](docs/FAMILY_GATE.md), including three consecutive green suite runs |
 
-None of these downloads or loads a model. CI on `macos-26` must be green. It
-skips the release build and the `.fullTier` cases, so run the release build
-locally before asking for a merge. Always use `Scripts/test.sh`, never bare
-`swift test`, for the root package.
+None of these downloads or loads a model. CI on `macos-26` must be green, but
+it is narrower than this table. It is path-scoped: a docs-only PR runs only the
+docs job, and draft PRs skip the test, app and docs jobs. On pull requests it
+runs neither the root release build nor the `.fullTier` cases. Always use
+`Scripts/test.sh`, never bare `swift test`, for the root package.
 
 ## 8. Real-model evidence
 
@@ -165,9 +175,11 @@ engine and fixtures.
    medium-or-higher finding remains.
 4. The findings ledger goes in the PR description.
 
-After the PR opens, automated review (Codex) and maintainers review it. Handle
-their comments the same way. New commits need the gates and a review round
-again.
+For a docs-only PR or a benchmark report, one review round is enough.
+
+After the PR opens, maintainers review it, and the maintainers also run an
+automated review (Codex) on it. Handle those comments the same way. New commits
+need the gates and a review round again.
 
 ## 10. The description
 
@@ -190,7 +202,8 @@ every section:
 Agent-written code is welcome and meets the same bar.
 
 - Agents follow [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md), including
-  the machine-lock and model-run rules.
+  the model-run rules. Maintainer sessions also share a machine lock for
+  builds and model runs.
 - The person who opens the PR has read the whole diff and answers for it.
 - An agent never merges, never approves its own permission prompts, and never
   acts on an approval relayed from another session.
@@ -198,8 +211,9 @@ Agent-written code is welcome and meets the same bar.
 
 ## 12. Merging
 
-- A maintainer merges, with a merge commit. Authors and their agents never
-  merge their own PRs.
+- A human maintainer merges, with a merge commit, once the gates and the
+  review ledger are recorded. A maintainer may merge their own PR. An AI agent
+  never merges.
 - CI must be green. If GitHub cancels a runner, rerun it. A maintainer who
   overrides a red or missing check records the reason in the PR.
 
@@ -213,9 +227,9 @@ code.
 
 ## 14. How this is enforced
 
-CI runs the suite, the app build and tests, the Python checks and the link
-check on every PR. Maintainer agent sessions also run a local pre-PR gate:
-they cannot open, mark ready or push to a PR until the gates for its scope and
-an independent review are recorded for that exact commit, and their build and
-model-run rules are enforced the same way. Outside contributors are held to the
-same bar in review.
+CI enforces part of this bar automatically, scoped by path (section 7). The
+rest is maintainer process, not repository automation. Maintainer agent
+sessions run a local pre-PR gate: they cannot open, mark ready or push to a PR
+until the gates for its scope and an independent review are recorded for that
+exact commit. Their build and model-run rules are enforced the same way.
+Outside contributors are held to the same bar in review.
