@@ -46,6 +46,9 @@ public final class MailComposer {
     /// Bumped by every action, Stop and close: a superseded task that
     /// finishes late changes nothing.
     @ObservationIgnored private var generation = 0
+    /// Changes whenever a draft is dropped, so a send that finishes later
+    /// can only ever close the draft it sent.
+    @ObservationIgnored private var draftID = UUID()
 
     private let writer: MailComposeWriter?
     private let sender: any MailSending
@@ -73,8 +76,14 @@ public final class MailComposer {
         isMinimized = false
     }
 
-    /// Closes the card and drops the draft.
+    /// Close and Discard are off while the message sends.
+    public var canDiscard: Bool { sendState != .sending }
+
+    /// Closes the card and drops the draft. Not while it sends: the send's
+    /// own outcome decides whether the card closes.
     public func discard() {
+        guard canDiscard else { return }
+        draftID = UUID()
         cancelAssist()
         isOpen = false
         isMinimized = false
@@ -157,6 +166,7 @@ public final class MailComposer {
             case is CancellationError: assistState = .idle
             case let error as EngineServiceError: assistState = .failed(error.userMessage)
             case let error as AssistantModelError: assistState = .failed(error.userMessage)
+            case let error as MailComposeError: assistState = .failed(error.userMessage)
             default: assistState = .failed("Quick could not write this.")
             }
         }
@@ -195,11 +205,14 @@ public final class MailComposer {
     @discardableResult
     public func send() async -> String? {
         guard canSend else { return nil }
+        let sending = draftID
         sendState = .sending
         let error = await Self.send(to: to, subject: subject, body: body, via: sender)
+        guard sending == draftID else { return error }
         if let error {
             sendState = .failed(error)
         } else {
+            sendState = .idle
             discard()
         }
         return error
