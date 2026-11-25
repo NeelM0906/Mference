@@ -3,128 +3,244 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mference: run the models you couldn't before</title>
-<meta name="description" content="Models bigger than your Mac's memory now run on it. Pick your Mac and see which.">
-<meta property="og:title" content="Mference: run the models you couldn't before">
-<meta property="og:description" content="A 175 GB model in 2.36 GB of memory. Open source, for Apple Silicon.">
-<meta property="og:image" content="assets/icon.png">
+<title>Mference: personal AI that runs on your Mac</title>
+<meta name="description" content="A private assistant that runs entirely on your Mac. Chat, find files by what is in them, sort your mail and plan your week, with nothing leaving the machine.">
+<meta property="og:title" content="Mference: personal AI, kept personal">
+<meta property="og:description" content="A private assistant that runs entirely on your Mac, on six local models from Quick to Inkling 2 Mini. Open source, for Apple Silicon.">
+<meta property="og:image" content="assets/shots/chat.jpg">
+<meta name="theme-color" content="#FBFBFC">
 <link rel="icon" href="assets/icon.png">
-<style>
-:root{--bg:#fbfbf9;--ink:#0e0f12;--ink2:#5d6068;--hair:rgba(14,15,18,.13);--sig:#4f4ee0;--sig2:#4f4ee0;
-  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter","Helvetica Neue",Arial,sans-serif}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font:17px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
-a{color:inherit}
-.wrap{max-width:980px;margin:0 auto;padding:0 24px}
-nav{height:72px;display:flex;align-items:center;justify-content:space-between}
-.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:19px;letter-spacing:-.02em;text-decoration:none}
-.brand img{width:30px;height:30px;border-radius:8px}
-.btn{display:inline-block;background:var(--ink);color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 20px;border-radius:12px}
-.btn:focus-visible,a:focus-visible,button:focus-visible{outline:2px solid var(--sig2);outline-offset:3px}
-.hero{padding:48px 0 40px}
-h1{font-size:clamp(44px,8vw,100px);line-height:.98;letter-spacing:-.045em;font-weight:720;max-width:10em}
-.sub{margin-top:20px;font-size:clamp(18px,2vw,24px);color:var(--ink2)}
-.cmp{margin-top:36px;display:grid;grid-template-columns:1fr 1fr;gap:28px}
-.cmp figure canvas{display:block;width:100%}
-.cmp figcaption{display:flex;justify-content:space-between;align-items:baseline;margin-top:14px;font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--ink)}
-.cmp figcaption b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
-.cmp .v{font-size:32px;font-weight:700;letter-spacing:-.03em}
-.cmp .old{color:var(--ink2);text-decoration:line-through;text-decoration-color:rgba(14,15,18,.35)}.cmp .new{color:var(--sig2)}
-.il{margin-top:12px;font-size:12px;color:var(--ink2)}
-@media (max-width:700px){.cmp{grid-template-columns:1fr;gap:18px}}
-.ask{margin-top:72px;padding-top:36px;border-top:1px solid var(--hair);font-size:clamp(20px,2.2vw,26px);line-height:1.2;letter-spacing:-.02em;font-weight:600;color:var(--ink2);text-wrap:balance}
-.pick{margin-top:18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.pick .lab{font-size:13px;color:var(--ink2);min-width:56px}
-.seg{display:inline-flex;border:1.5px solid var(--ink);border-radius:12px;overflow:hidden}
-.seg button{font:inherit;font-size:16px;font-weight:650;background:transparent;color:var(--ink);border:0;padding:11px 18px;cursor:pointer;border-right:1.5px solid var(--ink)}
-.seg button:last-child{border-right:0}
-.seg button[aria-pressed=true]{background:var(--ink);color:#fff}
-.verdict{padding:28px 0 4px}
-.verdict .big{text-wrap:balance;font-size:clamp(34px,5.4vw,68px);font-weight:700;letter-spacing:-.035em;line-height:1.05}
-.verdict .big b{color:var(--sig)}
-.verdict .big,.row,.seg button{font-variant-numeric:tabular-nums}
-.btn{transition:transform .15s}.btn:hover{transform:translateY(-1px)}
-.seg button{transition:background .15s,color .15s}.seg button:not([aria-pressed=true]):hover{background:rgba(14,15,18,.06)}
-.cols{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;padding:28px 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
-.cols span:last-child{text-align:right}
-.row{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;align-items:center;padding:15px 0;border-top:1px solid var(--hair);transition:opacity .3s}
-.row.need{opacity:.36}
-.row:not(.unlocked) .a,.row:not(.unlocked) .arr{display:none}
-.row:not(.unlocked) .b{color:var(--ink)}
-.row.need .b{color:var(--ink2)}
-.row .n{font-size:20px;font-weight:650;letter-spacing:-.02em}
-.row .n small{display:block;font-size:13px;color:var(--ink2);font-weight:400;letter-spacing:0}
-.flow{display:flex;align-items:center;gap:12px;font-size:19px;font-weight:600;letter-spacing:-.02em}
-.flow .a{color:var(--ink2);text-decoration:line-through;text-decoration-color:rgba(14,15,18,.35)}
-.flow .b{color:var(--sig2)}
-.flow .arr{font-style:normal;color:var(--ink2);font-weight:300}
-.row .s{text-align:right;font-size:20px;font-weight:700;letter-spacing:-.02em}
-.row .s small{display:block;font-size:12px;font-weight:500;color:var(--ink2);letter-spacing:0}
-.row .s.no{font-size:15px;font-weight:500;color:var(--ink2)}
-.act{padding:36px 0 0}
-footer{border-top:1px solid var(--hair);margin-top:48px;padding:24px 0 40px;font-size:13px;color:var(--ink2);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
-@media (max-width:700px){.cols{display:none}.row{grid-template-columns:1fr auto}.row .flow{grid-row:2;grid-column:1/-1}.row .s{grid-row:1;grid-column:2}}
-</style>
+<link rel="preload" href="assets/fonts/Geist-SemiBold.otf" as="font" type="font/otf" crossorigin>
+<link rel="stylesheet" href="assets/css/site.css">
 </head>
 <body>
-<div class="wrap">
-  <nav><a class="brand" href="#"><img src="assets/icon.png" alt="" width="30" height="30">Mference</a><a class="btn" href="https://github.com/NeelM0906/Mference/releases">Get the source release</a></nav>
-  <header class="hero">
-    <h1>Run the models you couldn't before.</h1>
-    <p class="sub">Frontier models, on your Mac.</p>
-    <div class="cmp">
-      <figure><canvas id="g1" role="img" aria-label="All 256 experts loaded in memory"></canvas><figcaption><span class="k">All 256 experts loaded</span><span class="v old">19.6 GB</span></figcaption></figure>
-      <figure><canvas id="g2" role="img" aria-label="Only the 8 experts a token calls are in memory"></canvas><figcaption><span class="k">Only the 8 it calls</span><span class="v new">1.45 GB</span></figcaption></figure>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <nav class="wrap" aria-label="Main">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="28" height="28">Mference</a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="links" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <div class="links" id="links">
+      <a href="features.html">Features</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="models.html">Models</a>
+      <a href="developers.html">Developers</a>
+      <a href="https://github.com/NeelM0906/Mference">GitHub</a>
     </div>
-    <h2 class="ask">See what your Mac can run now that it couldn't before.</h2>
-    <div class="pick"><span class="lab" id="lab">Memory</span><div class="seg" id="seg" role="group" aria-labelledby="lab"></div></div>
-  </header>
-  <section class="verdict" aria-live="polite"><div class="big" id="verdict"></div></section>
-  <div class="cols"><span>Model</span><span>Memory, before → now</span><span>Speed</span></div>
-  <div id="rows" role="list"></div>
-  <footer><span>Apple Silicon · macOS 26+ · MIT license</span><span><a href="https://github.com/NeelM0906/Mference">GitHub</a></span></footer>
+    <a class="btn btn-ink nav-cta" href="developers.html#get-started">Get Mference</a>
+  </nav>
+</header>
+
+<main id="main">
+<section class="hero wrap">
+  <p class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Runs entirely on your Mac</p>
+  <h1 class="display">Personal AI, kept personal.</h1>
+  <p class="lede">Mference chats, finds your files by what is in them, sorts your mail and plans your week, on a model that runs on the Mac itself. Your notes, mail and calendar never leave it.</p>
+  <div class="cta-row">
+    <a class="btn btn-ink btn-lg" href="developers.html#get-started"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Get it for Mac</a>
+    <a class="btn btn-line btn-lg" href="#tour">Take the tour</a>
+  </div>
+  <p class="small">Apple Silicon · macOS 26 or later · Free and open source</p>
+</section>
+
+<section class="tour wrap" id="tour" data-tour aria-label="Product tour">
+  <div class="tabs" role="tablist" aria-label="Screens">
+    <button class="tab" role="tab" id="t-chat" aria-controls="p-chat" data-caption="Chat searches the web through a search engine bundled in the app and cites every claim. The model answering is on your Mac."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat<span class="bar"></span></button>
+    <button class="tab" role="tab" id="t-find" aria-controls="p-find" data-caption="Find searches what is inside your files, photos, videos and voice memos. Press ⌥Space from any app."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Find<span class="bar"></span></button>
+    <button class="tab" role="tab" id="t-mail" aria-controls="p-mail" data-caption="Mail sorts what matters, removes trackers, proposes the calendar change and drafts the reply in your voice. You press Send."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Mail<span class="bar"></span></button>
+    <button class="tab" role="tab" id="t-cal" aria-controls="p-cal" data-caption="Your calendars and Reminders in one week, with events proposed from your mail."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>Calendar<span class="bar"></span></button>
+    <button class="tab" role="tab" id="t-notes" aria-controls="p-notes" data-caption="Record a meeting: speakers are labelled as they talk, and the decisions and action items are waiting when it ends."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg>Notes<span class="bar"></span></button>
+    <button class="tab" role="tab" id="t-scan" aria-controls="p-scan" data-caption="Scan a receipt. On-device text recognition reads it and the model fills in the fields for you to check."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></svg>Scan<span class="bar"></span></button>
+  </div>
+  <div class="stage">
+    <div class="frame">
+      <div class="panel" role="tabpanel" id="p-chat" aria-labelledby="t-chat"><img src="assets/shots/chat.jpg" alt="Mference chat comparing three standing desks, with prices and numbered web citations" width="1600" height="1025"></div>
+      <div class="panel" role="tabpanel" id="p-find" aria-labelledby="t-find" data-play="find">
+        <div class="app">
+          <div class="app-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="app-title">Find</span><span class="app-badge">Index on this Mac</span></div>
+          <div class="app-body">
+            <div class="app-side"><p>Looking in</p><span class="sel">Everything</span><span>Documents</span><span>Photos</span><span>Voice memos</span><span>Videos</span></div>
+            <div class="app-main">
+              <div class="spot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span><span class="q"></span><span class="caret"></span></span></div>
+              <p class="group-label">Best matches</p>
+              <div class="hits"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel" role="tabpanel" id="p-mail" aria-labelledby="t-mail"><img src="assets/shots/mail.jpg" alt="Mail showing an important message, a proposed calendar change and a reply drafted in your voice" width="1600" height="1025" loading="lazy"></div>
+      <div class="panel" role="tabpanel" id="p-cal" aria-labelledby="t-cal"><img src="assets/shots/calendar.jpg" alt="Week view with events, to-dos and an event proposed from mail" width="1600" height="1025" loading="lazy"></div>
+      <div class="panel" role="tabpanel" id="p-notes" aria-labelledby="t-notes" data-play="notes">
+        <div class="app">
+          <div class="app-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="app-title">Product sync, Tuesday</span><span class="rec"><i></i>Recording</span><span class="app-badge">Speech on this Mac</span></div>
+          <div class="app-body">
+            <div class="app-side"><p>Notes</p><span class="sel">Product sync, Tuesday</span><span>Lisbon packing list</span><span>Kitchen quotes</span><span>Reading list</span></div>
+            <div class="app-main">
+              <div class="transcript">
+                <div class="line"><span class="who a">Priya</span><span>Can we ship the onboarding screens next Wednesday?</span></div>
+                <div class="line"><span class="who b">Tom</span><span>Yes, if the copy is settled by Monday. I'll take the contract redlines.</span></div>
+                <div class="line"><span class="who a">Priya</span><span>Then I'll book the review for Wednesday at eleven.</span></div>
+                <div class="line"><span class="who b">Tom</span><span>And let's drop the tutorial video from this release.</span></div>
+              </div>
+              <div class="summary"><p>Decisions and action items</p><ul><li>Ship onboarding screens Wednesday; tutorial video moves to next release</li><li>Tom: contract redlines and final copy by Monday</li><li>Priya: book the design review, Wed 11:00</li></ul></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel" role="tabpanel" id="p-scan" aria-labelledby="t-scan"><img src="assets/shots/scan.jpg" alt="A scanned receipt with merchant, date, total and tax filled in" width="1600" height="1025" loading="lazy"></div>
+    </div>
+  </div>
+  <p class="caption" aria-live="polite"></p>
+  <p class="small renders-note">Screens are design renders; the shipped app may differ in detail.</p>
+</section>
+
+<section class="wrap reveal" aria-label="At a glance">
+  <div class="stats">
+    <div><b>On device</b><span>The model, your index and your memory are files on your Mac</span></div>
+    <div><b>6 models</b><span>From a 1.4 GB quick helper to a 35B thinker</span></div>
+    <div><b>One switch</b><span>Offline mode turns off every network call</span></div>
+    <div><b>MIT</b><span>Read every line that touches your data</span></div>
+  </div>
+</section>
+
+<section class="wrap" id="features">
+  <div class="sec-head reveal">
+    <p class="kicker">One assistant</p>
+    <h2 class="h2">Everything you'd hand to a helper you trust.</h2>
+  </div>
+  <div class="bento">
+    <article class="card span2 reveal">
+      <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Find</p>
+      <h3 class="h3">Find files by what's in them, not what you named them.</h3>
+      <div class="finder" data-finder>
+        <label for="findq">Try it: this searches a sample index in your browser</label>
+        <input id="findq" type="search" value="lease clause about pets" autocomplete="off">
+        <div class="hits" aria-live="polite"></div>
+        <div class="try"><button type="button">the zebra photo</button><button type="button">voice memo about the plumber</button><button type="button">wifi password</button><button type="button">when does my passport expire</button></div>
+      </div>
+    </article>
+    <article class="card reveal">
+      <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat</p>
+      <h3 class="h3">Answers from the web, with sources.</h3>
+      <p class="body">A search engine is bundled inside the app. Answers carry numbered citations, and your question never reaches an AI company.</p>
+      <div class="chips"><span class="chip">1 stride-desks</span><span class="chip">2 oakline/sale</span><span class="chip">3 deskreviews</span></div>
+    </article>
+    <article class="card reveal">
+      <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Mail</p>
+      <h3 class="h3">Replies drafted in your voice.</h3>
+      <p class="body">Reads your Apple Mail, sorts what matters and removes trackers. Nothing is sent until you press Send.</p>
+      <a class="more" href="features.html#mail">More on Mail →</a>
+    </article>
+    <article class="card reveal">
+      <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>Calendar and to-dos</p>
+      <h3 class="h3">Your week, planned from your inbox.</h3>
+      <p class="body">Events proposed from mail, to-dos kept in sync with Reminders, and a plain answer to "what's my week like?"</p>
+      <a class="more" href="features.html#calendar">More on Calendar →</a>
+    </article>
+    <article class="card reveal">
+      <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg>Notes and meetings</p>
+      <h3 class="h3">Record a meeting. Get the decisions.</h3>
+      <p class="body">Speaker labels, a summary of decisions and action items, and dictation into any note. Speech recognition runs on your Mac.</p>
+      <a class="more" href="features.html#notes">More on Notes →</a>
+    </article>
+    <article class="card dark split span2 reveal">
+      <div>
+        <p class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></svg>Scan</p>
+        <h3 class="h3">Receipts read themselves.</h3>
+        <p class="body">On-device text recognition reads the receipt; the model fills in merchant, date, total and tax for you to check.</p>
+        <a class="more" href="features.html#scan">More on Scan →</a>
+      </div>
+      <img src="assets/shots/scan.jpg" alt="A scanned receipt with its fields filled in" width="1600" height="1025" loading="lazy">
+    </article>
+  </div>
+</section>
+
+<div class="night" data-offline>
+  <div class="wrap two">
+    <div class="reveal">
+      <p class="kicker">Privacy</p>
+      <h2 class="h2" style="margin-top:12px">Private isn't a setting. It's where it runs.</h2>
+      <p class="lede" style="margin-top:24px;max-width:32em">There is no Mference account and no Mference server. Flip Offline mode and the app stops reaching the network at all; everything marked Mac only keeps working.</p>
+      <p style="margin-top:28px"><a class="link" href="privacy.html">What stays on your Mac →</a></p>
+    </div>
+    <div class="console reveal">
+      <div class="switch-row">
+        <div><b id="off-l">Offline mode</b><span data-offline-sub data-on="On. Nothing leaves this Mac." data-off="Off. Only what you ask for goes out."></span></div>
+        <button class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="off-l"></button>
+      </div>
+      <ul class="flows">
+        <li data-flow="local"><span>Chats and memory</span><span class="wire local"></span><span class="tag local">Mac only</span></li>
+        <li data-flow="local"><span>Find index and search model</span><span class="wire local"></span><span class="tag local">Mac only</span></li>
+        <li data-flow="out" data-on-label="Bundled engine"><span>Web search</span><span class="wire"></span><span class="tag ask">Bundled engine</span></li>
+        <li data-flow="out" data-on-label="Your providers" data-off-label="Paused"><span>Mail and calendar sync</span><span class="wire"></span><span class="tag ask">Your providers</span></li>
+        <li data-flow="out" data-on-label="When you ask"><span>Model downloads</span><span class="wire"></span><span class="tag ask">When you ask</span></li>
+      </ul>
+    </div>
+  </div>
 </div>
+
+<section class="wrap" data-models>
+  <div class="two" style="align-items:end">
+    <div class="sec-head reveal">
+      <p class="kicker">Models</p>
+      <h2 class="h2">Models on Mference.</h2>
+      <p class="lede">Six models that run on your Mac, from Quick for everyday chat and mail to Deep for longer reasoning. Quick and Deep download from inside the app, which shows how much memory each model needs before you load it.</p>
+    </div>
+    <div class="reveal" style="justify-self:end"><div class="seg" role="group" aria-label="Your Mac's memory"></div></div>
+  </div>
+  <p class="verdict reveal" aria-live="polite"></p>
+  <div class="model-grid"></div>
+  <p style="margin-top:24px"><a href="models.html" style="font-weight:600">See all supported models →</a></p>
+</section>
+
+<section class="wrap" id="dev">
+  <div class="two">
+    <div class="reveal">
+      <p class="kicker">Open source</p>
+      <h2 class="h2" style="margin-top:12px;font-size:clamp(32px,3.8vw,48px)">Its own engine, in Swift and Metal.</h2>
+      <p class="lede" style="margin-top:20px;font-size:17px">MferenceEngine serves every model through one API, with a local OpenAI-compatible server for your own tools. MIT licensed.</p>
+      <p style="margin-top:24px;display:flex;gap:20px;flex-wrap:wrap"><a href="developers.html" style="font-weight:600">For developers →</a><a href="https://github.com/NeelM0906/Mference" style="font-weight:600">GitHub →</a></p>
+    </div>
+    <div class="copy-wrap reveal">
+<pre class="code" id="quick-build"><span class="c"># build and open the app</span>
+git clone https://github.com/NeelM0906/Mference.git
+cd Mference
+App/Scripts/searxng/prepare.sh --fetch
+App/Scripts/run.sh</pre>
+      <button class="copy-btn" type="button" data-copy="quick-build">Copy</button>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2 class="h2 reveal" style="text-align:center;font-size:clamp(32px,3.8vw,48px)">Questions</h2>
+  <div class="faq reveal">
+    <details open><summary>What stays on my Mac?</summary><p>Your chats, notes, files, mail, calendar, the Find index and the model itself. Mail and calendars keep syncing with your own providers through Apple Mail and Calendar, as they already do.</p></details>
+    <details><summary>Does it need the internet?</summary><p>Only for what you ask for: web search, model downloads, and syncing your own accounts. Offline mode turns all of it off, and chat, Find, Notes and Scan keep working.</p></details>
+    <details><summary>Which Macs does it run on?</summary><p>Apple Silicon Macs on macOS 26 or later. An 8 GB Mac runs Quick, MiniCPM5, Maple and Qwen 3.6; Deep wants more than 16 GB and Inkling 2 Mini 32 GB. The app shows how much memory each model needs before you load it.</p></details>
+    <details><summary>Will the app ask for access to my data?</summary><p>Only when you first use the feature that needs it. Calendar, Reminders, Mail and Full Disk Access are each requested at that moment, never at install.</p></details>
+    <details><summary>What does it cost?</summary><p>Nothing. Mference is open source under the MIT license. It is pre-release, so today you build it from source.</p></details>
+  </div>
+</section>
+
+<section class="wrap" id="get">
+  <div class="cta reveal">
+    <img src="assets/icon.png" alt="" width="72" height="72">
+    <h2 class="h2">Bring your AI home.</h2>
+    <p class="lede">Mference is pre-release. Build it from source today; a signed download comes with the first release.</p>
+    <div class="cta-row"><a class="btn btn-ink btn-lg" href="developers.html#get-started">Build from source</a><a class="btn btn-line btn-lg" href="https://github.com/NeelM0906/Mference/releases">Watch for releases</a></div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div><a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="28" height="28">Mference</a><p>A private AI assistant that runs entirely on your Mac. Apple Silicon, macOS 26 or later.</p></div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="privacy.html">Privacy</a></li><li><a href="models.html">Models</a></li></ul></div>
+    <div><h4>Developers</h4><ul><li><a href="developers.html">Engine and server</a></li><li><a href="developers.html#get-started">Build from source</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/docs/COMMUNITY_BENCHMARKS.md">Benchmark your Mac</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/NeelM0906/Mference">GitHub</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/LICENSE">MIT license</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">Security</a></li></ul></div>
+  </div>
+</footer>
 <script src="data.js"></script>
-<script src="flux.js"></script>
-<script>
-(function(){
-  window.MFlux.mount(document.getElementById("g1"),{cols:32,rows:8,gap:2,mode:"full",on:"#9a9ca4",off:"rgba(14,15,18,.12)"});
-  window.MFlux.mount(document.getElementById("g2"),{cols:32,rows:8,gap:2,on:"#4f4ee0",off:"rgba(14,15,18,.12)",every:1500});
-  var M=window.MF, cur=M.pickHost(), seg=document.getElementById("seg");
-  M.HOSTS.forEach(function(h){
-    var b=document.createElement("button");b.type="button";b.dataset.id=h.id;b.textContent=h.label;b.title=h.mac;
-    b.addEventListener("click",function(){choose(h);});
-    b.addEventListener("keydown",function(e){var d=e.key==="ArrowRight"?1:e.key==="ArrowLeft"?-1:0;if(!d)return;e.preventDefault();var i=(M.HOSTS.indexOf(h)+d+M.HOSTS.length)%M.HOSTS.length;choose(M.HOSTS[i]);seg.children[i].focus();});
-    seg.appendChild(b);
-  });
-  function choose(h){cur=h;M.setHash(h.id);update();}
-  /* every model is always listed, in a fixed order; update() only changes text and state in place */
-  var rowsEl=document.getElementById("rows"),refs=[];
-  M.FAMS.slice().sort(function(a,b){return b.disk-a.disk;}).forEach(function(f){
-    var r=document.createElement("div");r.className="row";r.setAttribute("role","listitem");
-    r.innerHTML='<span class="n">'+f.name+'<small>'+f.p+'B</small></span><span class="flow"><span class="a"></span><i class="arr">→</i><span class="b"></span></span><span class="s"></span>';
-    rowsEl.appendChild(r);
-    refs.push({f:f,r:r,a:r.querySelector(".a"),b:r.querySelector(".b"),s:r.querySelector(".s")});
-  });
-  function update(){
-    [].forEach.call(seg.children,function(b){b.setAttribute("aria-pressed",b.dataset.id===cur.id?"true":"false");});
-    var unlocked=0;
-    refs.forEach(function(x){
-      var f=x.f,st=M.status(f,cur),need=st==="need",un=!need&&f.disk>cur.ram,sp=f.sp[cur.id];
-      if(un)unlocked++;
-      x.r.classList.toggle("need",need);x.r.classList.toggle("unlocked",un);
-      x.r.setAttribute("aria-disabled",need?"true":"false");
-      x.a.textContent=M.fmtGB(f.disk)+" GB";
-      x.b.textContent=need?M.fmtGB(f.disk)+" GB":M.fmtGB(M.memFor(f,cur))+" GB";
-      x.s.className="s"+(need||!sp?" no":"");
-      x.s.textContent=need?"needs a bigger Mac":(sp?M.fmtSp(sp)+" tok/s":"not measured");
-    });
-    document.getElementById("verdict").innerHTML=unlocked?
-      '<b>'+unlocked+'</b> model'+(unlocked>1?'s':'')+' now '+(unlocked>1?'run':'runs')+' in '+cur.label+'.':
-      'Every model fits. The largest run in <b>a fraction</b> of the memory.';
-  }
-  update();
-})();
-</script>
+<script src="assets/js/site.js"></script>
 </body>
 </html>

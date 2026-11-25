@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Models · Mference</title>
+<meta name="description" content="The six models Mference supports, all running on your Mac. Pick your Mac's memory to see which ones it can run.">
+<meta property="og:title" content="Models supported by Mference">
+<meta property="og:image" content="assets/icon.png">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <nav class="wrap" aria-label="Main">
+    <a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="28" height="28">Mference</a>
+    <button class="menu-btn" type="button" aria-expanded="false" aria-controls="links" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <div class="links" id="links">
+      <a href="features.html">Features</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="models.html" aria-current="page">Models</a>
+      <a href="developers.html">Developers</a>
+      <a href="https://github.com/NeelM0906/Mference">GitHub</a>
+    </div>
+    <a class="btn btn-ink nav-cta" href="developers.html#get-started">Get Mference</a>
+  </nav>
+</header>
+
+<main id="main">
+<section class="page-hero wrap">
+  <p class="kicker">Models supported</p>
+  <h1 class="display">Six models, all on your Mac.</h1>
+  <p class="lede">Every model runs locally. Pick your Mac's memory to see which ones it can run.</p>
+</section>
+
+<section class="wrap" style="padding-top:56px" data-models>
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+    <span id="memlab" style="font-size:14px;font-weight:600;color:var(--ink2)">Your Mac's memory</span>
+    <div class="seg" role="group" aria-labelledby="memlab"></div>
+  </div>
+  <p class="verdict" aria-live="polite"></p>
+  <div class="table-box">
+    <table>
+      <thead><tr><th scope="col">Model</th><th scope="col">Made by</th><th scope="col">Size</th><th scope="col">Download</th><th scope="col">Install</th><th scope="col">On this Mac</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="sec-head reveal">
+    <p class="kicker">Getting a model</p>
+    <h2 class="h2">Pick it, download it, switch any time.</h2>
+  </div>
+  <ol class="steps">
+    <li class="tile reveal"><span class="num">1</span><h3>Pick one on first run</h3><p>The app helps you choose a model when you first open it, and recommends Quick for every Mac.</p></li>
+    <li class="tile reveal"><span class="num">2</span><h3>Download in the app</h3><p>Quick and Deep download from inside the app, which shows their size and the memory they need before you load them. The other four <a href="developers.html#models">install from the terminal</a>, and the app finds them on its own.</p></li>
+    <li class="tile reveal"><span class="num">3</span><h3>Switch any time</h3><p>Choose the model for each chat from the composer.</p><span class="picker-chip" aria-hidden="true">Quick 4B <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span></li>
+  </ol>
+</section>
+
+<section class="wrap">
+  <div class="cta reveal">
+    <img src="assets/icon.png" alt="" width="72" height="72">
+    <h2 class="h2">See what your Mac can do.</h2>
+    <div class="cta-row"><a class="btn btn-ink btn-lg" href="developers.html#get-started">Get Mference</a><a class="btn btn-line btn-lg" href="https://github.com/NeelM0906/Mference#models">Model details on GitHub</a></div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div><a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="28" height="28">Mference</a><p>A private AI assistant that runs entirely on your Mac. Apple Silicon, macOS 26 or later.</p></div>
+    <div><h4>Product</h4><ul><li><a href="features.html">Features</a></li><li><a href="privacy.html">Privacy</a></li><li><a href="models.html">Models</a></li></ul></div>
+    <div><h4>Developers</h4><ul><li><a href="developers.html">Engine and server</a></li><li><a href="developers.html#get-started">Build from source</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/docs/COMMUNITY_BENCHMARKS.md">Benchmark your Mac</a></li></ul></div>
+    <div><h4>Project</h4><ul><li><a href="https://github.com/NeelM0906/Mference">GitHub</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/LICENSE">MIT license</a></li><li><a href="https://github.com/NeelM0906/Mference/blob/main/SECURITY.md">Security</a></li></ul></div>
+  </div>
+</footer>
+<script src="data.js"></script>
+<script src="assets/js/site.js"></script>
+</body>
+</html>

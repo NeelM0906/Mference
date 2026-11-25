@@ -30,12 +30,16 @@
   Nothing is sent until you press Send.
 - **Calendar and to-dos.** Day, week, month and year views of your calendars,
   events proposed from your mail, and to-dos kept in sync with Reminders.
+- **Notes** with checklists, headings and attachments. Dictate into any
+  note, record a meeting with speaker labels and get a summary of decisions
+  and action items, or transcribe an audio file. Speech recognition runs on
+  your Mac; its models download only when you set Notes up.
 - **Scan** a receipt or document. On-device text recognition reads it, and
   the model fills in merchant, date, total and tax for you to check.
 - **Models** download from inside the app, and the app shows how much memory
   each one needs on your Mac before you load it.
 
-Your chats, files, mail and calendar stay on the Mac. The app asks for
+Your chats, notes, files, mail and calendar stay on the Mac. The app asks for
 Calendar, Reminders, Mail or Full Disk Access only when you first use the
 feature that needs it.
 
@@ -48,7 +52,7 @@ feature that needs it.
 </table>
 
 <sub>Images are design renders. The shipped app may differ in detail, and the
-Notes and Errands tabs they show are not built yet.</sub>
+Errands tab they show is not built yet.</sub>
 
 ## Models
 
