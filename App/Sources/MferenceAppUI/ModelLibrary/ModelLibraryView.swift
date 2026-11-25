@@ -16,6 +16,8 @@ public struct ModelLibraryView: View {
     /// A download waiting for the person's approval (the one dialog every
     /// Deep download goes through, L4).
     @State private var pendingDownload: ModelEntry?
+    /// An image-understanding download waiting for approval.
+    @State private var pendingImageDownload: ModelEntry?
     @State private var importing = false
     @State private var importFailure: ImportFailure?
 
@@ -51,6 +53,17 @@ public struct ModelLibraryView: View {
             Button("Not now", role: .cancel) {}
         } message: { entry in
             Text(Self.approvalMessage(for: entry))
+        }
+        .confirmationDialog(
+            pendingImageDownload.map { "Download image understanding for \($0.productName)?" } ?? "",
+            isPresented: Binding(get: { pendingImageDownload != nil },
+                                 set: { if !$0 { pendingImageDownload = nil } }),
+            presenting: pendingImageDownload
+        ) { entry in
+            Button("Download") { Self.approveImageUnderstanding(entry, in: library) }
+            Button("Not now", role: .cancel) {}
+        } message: { entry in
+            Text(Self.imageUnderstandingApprovalMessage(for: entry))
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: Self.modelFileTypes) { result in
             guard case .success(let url) = result else { return }
@@ -96,6 +109,27 @@ public struct ModelLibraryView: View {
               library.machine.hasRoom(for: entry.sizeBytes) else { return false }
         library.download(entry.id)
         return true
+    }
+
+    /// The image-understanding dialog's "Download" (here and in the chat's
+    /// offer): the only way that download starts or restarts. Checks the
+    /// disk margin. Returns whether it started.
+    @discardableResult
+    static func approveImageUnderstanding(_ entry: ModelEntry, in library: any ModelLibraryModel) -> Bool {
+        guard let addOn = entry.imageUnderstanding, entry.state.isInstalled else { return false }
+        switch addOn.state {
+        case .notInstalled, .downloadFailed, .paused: break
+        default: return false
+        }
+        guard library.machine.hasRoom(for: addOn.sizeBytes) else { return false }
+        library.downloadImageUnderstanding(entry.id)
+        return true
+    }
+
+    static func imageUnderstandingApprovalMessage(for entry: ModelEntry) -> String {
+        let size = entry.imageUnderstanding.map { " (\(ModelFormat.bytes($0.sizeBytes)))" } ?? ""
+        return "\(entry.productName)’s image understanding downloads\(size) to this Mac and runs here. "
+            + "Pictures you attach are then seen by the model. Nothing is sent anywhere."
     }
 
     static func approvalMessage(for entry: ModelEntry) -> String {
@@ -173,6 +207,14 @@ public struct ModelLibraryView: View {
                                       pendingDownload = entry
                                   }
                               })
+                if entry.state.isInstalled, let addOn = entry.imageUnderstanding {
+                    ImageUnderstandingLine(
+                        entry: entry, addOn: addOn,
+                        canDownload: downloadsAllowed && library.machine.hasRoom(for: addOn.sizeBytes),
+                        onDownload: { pendingImageDownload = entry },
+                        onPause: { library.pauseImageUnderstanding(entry.id) },
+                        onRemove: { library.removeImageUnderstanding(entry.id) })
+                }
             }
         }
     }
@@ -332,6 +374,106 @@ extension ModelTableRow {
         case .loadFailed(let message): "Didn't load: \(message)"
         case .downloadFailed(let message): "Download failed: \(message)"
         default: nil
+        }
+    }
+}
+
+/// "Image understanding" under Quick or Deep: download (after approval),
+/// pause, resume or remove the model's vision projector.
+struct ImageUnderstandingLine: View {
+    let entry: ModelEntry
+    let addOn: ImageUnderstandingEntry
+    /// Downloads are allowed (not offline) and the disk has room.
+    let canDownload: Bool
+    let onDownload: () -> Void
+    let onPause: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: MFSpacing.m) {
+            VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+                Text(ImageUnderstandingEntry.title)
+                    .font(MFFont.callout)
+                    .foregroundStyle(MFColor.ink)
+                Text(ImageUnderstandingEntry.summary)
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let external = addOn.externalLocation {
+                    Text("Added outside Mference: \(external). Remove that file to turn it off.")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                if case .downloadFailed(let message) = addOn.state {
+                    Text("Download failed: \(message)")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.preview)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let progress = addOn.state.transfer {
+                    MFProgressBar(progress.fraction, label: "Downloading image understanding for \(entry.productName)")
+                        .padding(.top, MFSpacing.xs)
+                }
+            }
+            .padding(.leading, MFSpacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(ModelFormat.bytes(addOn.sizeBytes))
+                .font(MFFont.callout)
+                .foregroundStyle(MFColor.ink)
+                .lineLimit(1)
+                .frame(width: LibraryMetrics.sizeColumn, alignment: .leading)
+            HStack {
+                MFBadge(Self.badge(addOn.state))
+            }
+            .frame(width: LibraryMetrics.statusColumn, alignment: .leading)
+            action
+                .frame(width: LibraryMetrics.actionColumn, alignment: .trailing)
+        }
+        .padding(.horizontal, MFSpacing.l)
+        .padding(.bottom, MFSpacing.m)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(ImageUnderstandingEntry.title) for \(entry.productName)")
+    }
+
+    @ViewBuilder private var action: some View {
+        switch addOn.state {
+        case .ready, .loaded, .loading, .loadFailed:
+            if addOn.externalLocation == nil {
+                Button("Remove", action: onRemove)
+                    .buttonStyle(.mfQuiet)
+                    .accessibilityLabel("Remove image understanding for \(entry.productName)")
+            }
+        case .downloading:
+            Button("Pause", action: onPause)
+                .buttonStyle(.mfSecondary)
+                .accessibilityLabel("Pause downloading image understanding for \(entry.productName)")
+        case .paused, .notInstalled, .downloadFailed:
+            Button(Self.downloadTitle(addOn.state), action: onDownload)
+                .buttonStyle(.mfSecondary)
+                .disabled(!canDownload)
+                .help(canDownload ? "Download image understanding, after you approve"
+                                  : "Offline mode is on, or the disk needs more free space.")
+                .accessibilityLabel("\(Self.downloadTitle(addOn.state)) image understanding for \(entry.productName)")
+        }
+    }
+
+    static func downloadTitle(_ state: ModelEntryState) -> String {
+        switch state {
+        case .paused: "Resume…"
+        case .downloadFailed: "Retry…"
+        default: "Download…"
+        }
+    }
+
+    static func badge(_ state: ModelEntryState) -> MFBadge.Kind {
+        switch state {
+        case .ready, .loaded, .loading, .loadFailed: .custom("Installed", .success)
+        case .downloading: .custom("Downloading", .accent)
+        case .paused: .custom("Paused", .neutral)
+        case .notInstalled: .custom("Not installed", .neutral)
+        case .downloadFailed: .custom("Download failed", .preview)
         }
     }
 }

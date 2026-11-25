@@ -116,9 +116,10 @@ import Testing
             let v1 = Schema(versionedSchema: MferenceSchemaV1.self)
             let container = try ModelContainer(for: v1, configurations: ModelConfiguration(schema: v1, url: url))
             let context = container.mainContext
-            let conversation = Conversation(title: "Before notes")
+            // V1's own classes: the `Conversation` alias now names V3's.
+            let conversation = MferenceSchemaV1.Conversation(title: "Before notes")
             context.insert(conversation)
-            conversation.messages.append(StoredMessage(index: 0, role: .user, content: "Hello"))
+            conversation.messages.append(MferenceSchemaV1.StoredMessage(index: 0, role: .user, content: "Hello"))
             context.insert(MemoryItem(text: "Likes tea"))
             try context.save()
         }
@@ -132,5 +133,39 @@ import Testing
         context.insert(Note(title: "First note"))
         try context.save()
         #expect(try context.fetchCount(FetchDescriptor<Note>()) == 1)
+    }
+
+    /// A store written by the V2 app opens with V3: chats kept, and messages
+    /// can now carry attachments.
+    @Test @MainActor func aVersion2StoreOpensWithVersion3() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "schema-v2-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Mference.store")
+
+        do {
+            let v2 = Schema(versionedSchema: MferenceSchemaV2.self)
+            let container = try ModelContainer(for: v2, configurations: ModelConfiguration(schema: v2, url: url))
+            let context = container.mainContext
+            let conversation = MferenceSchemaV1.Conversation(title: "Before attachments")
+            context.insert(conversation)
+            conversation.messages.append(MferenceSchemaV1.StoredMessage(index: 0, role: .user, content: "Hello"))
+            context.insert(Note(title: "A note"))
+            try context.save()
+        }
+
+        let container = try AppModelContainer.make(at: url)
+        let context = container.mainContext
+        let conversations = try context.fetch(FetchDescriptor<Conversation>())
+        #expect(conversations.map(\.title) == ["Before attachments"])
+        let message = try #require(conversations.first?.messages.first)
+        #expect(message.content == "Hello")
+        #expect(message.attachments.isEmpty)
+        #expect(try context.fetchCount(FetchDescriptor<Note>()) == 1)
+
+        message.attachments = [ChatAttachment(filename: "a.txt", kind: .document, byteCount: 1, text: "a")]
+        try context.save()
+        let reread = try ModelContext(container).fetch(FetchDescriptor<StoredMessage>())
+        #expect(reread.first?.attachments.map(\.filename) == ["a.txt"])
     }
 }

@@ -1,15 +1,25 @@
+import AppKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// The message box: text, +, Web on/off, model button, send / stop.
+/// The message box: attached files, text, + (attach), Web on/off, model
+/// button, send / stop.
 struct Composer: View {
     @Bindable var model: ChatViewModel
     @Binding var pickerOpen: Bool
     @FocusState private var focused: Bool
+    @State private var pasteMonitor: Any?
+    /// The open panel being shown: files or images.
+    @State private var importing: ChatAttachment.Kind?
+    @State private var dropTargeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s) {
+            if !model.pendingAttachments.isEmpty {
+                attachmentRow
+            }
             TextField(model.webEnabled && model.webBlockedReason == nil ? "Ask anything. Web searches go out through SearXNG."
                                         : "Ask anything. It stays on this Mac.",
                       text: $model.draft, axis: .vertical)
@@ -34,9 +44,25 @@ struct Composer: View {
         .padding(.top, MFSpacing.m)
         .padding(.bottom, MFSpacing.s + MFSpacing.xxs)
         .background(MFColor.surface, in: RoundedRectangle(cornerRadius: MFRadius.xl))
-        .overlay(RoundedRectangle(cornerRadius: MFRadius.xl).strokeBorder(MFColor.hairlineStrong))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.xl)
+            .strokeBorder(dropTargeted ? MFColor.accent : MFColor.hairlineStrong))
+        .dropDestination(for: URL.self) { urls, _ in
+            let files = urls.filter(\.isFileURL)
+            guard !files.isEmpty else { return false }
+            model.attach(files)
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .fileImporter(isPresented: Binding(get: { importing != nil }, set: { if !$0 { importing = nil } }),
+                      allowedContentTypes: Self.contentTypes(for: importing ?? .document),
+                      allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result { model.attach(urls) }
+        }
         .shadow(color: MFColor.ink.opacity(0.05), radius: MFSpacing.m, y: MFSpacing.xs)
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            installPasteMonitor()
+        }
+        .onDisappear(perform: removePasteMonitor)
         .confirmationDialog("Turn on web search?", isPresented: Binding(
             get: { model.webConsentRequested },
             set: { if !$0 { model.declineWebConsent() } })) {
@@ -45,6 +71,15 @@ struct Composer: View {
         } message: {
             Text("The model still runs on this Mac. When it searches, its queries, which can include words from your chat, go to search engines through SearXNG on this Mac, and the pages it reads are fetched from this Mac. You can turn this off in Settings > Privacy.")
         }
+        .confirmationDialog(model.imageUnderstandingOffer?.title ?? "", isPresented: Binding(
+            get: { model.imageUnderstandingOffer != nil },
+            set: { if !$0 { model.declineImageUnderstandingOffer() } }),
+            presenting: model.imageUnderstandingOffer) { _ in
+            Button("Download") { model.acceptImageUnderstandingOffer() }
+            Button("Not now", role: .cancel) { model.declineImageUnderstandingOffer() }
+        } message: { offer in
+            Text(offer.message)
+        }
         .onKeyPress(.escape) {
             guard pickerOpen else { return .ignored }
             pickerOpen = false
@@ -52,10 +87,22 @@ struct Composer: View {
         }
     }
 
+    /// "+": attach files or images to the next message.
     private var moreMenu: some View {
         Menu {
-            Toggle("Private chat", isOn: Binding(get: { model.isPrivate }, set: { model.setPrivate($0) }))
-            Button("New private chat") { model.newChat(isPrivate: true) }
+            Button {
+                importing = .document
+            } label: {
+                Label("Add files…", systemImage: "doc")
+            }
+            Button {
+                importing = .image
+            } label: {
+                Label("Add images…", systemImage: "photo")
+            }
+            Section {
+                Text("PDFs, documents and text are read on this Mac. \(model.imageCaption).")
+            }
         } label: {
             Image(systemName: "plus")
                 .font(MFFont.calloutEmphasis)
@@ -67,7 +114,54 @@ struct Composer: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .accessibilityLabel("More options")
+        .disabled(!model.canAttach)
+        .help("Attach files or images")
+        .accessibilityLabel("Attach files")
+    }
+
+    /// The files waiting to be sent, one chip each.
+    private var attachmentRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: MFSpacing.xs + MFSpacing.xxs) {
+                ForEach(model.pendingAttachments) { pending in
+                    AttachmentChip(pending: pending) { model.removeAttachment(pending.id) }
+                }
+            }
+        }
+        .scrollIndicators(.never)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Attached files")
+    }
+
+    /// The open panel's file types for files or images.
+    static func contentTypes(for kind: ChatAttachment.Kind) -> [UTType] {
+        let extensions = kind == .image ? ChatAttachmentReader.imageExtensions
+                                        : ChatAttachmentReader.documentExtensions
+        var seen = Set<UTType>()
+        return extensions.compactMap { UTType(filenameExtension: $0) }.filter { seen.insert($0).inserted }
+    }
+
+    /// ⌘V with a Finder file or a picture on the clipboard attaches it; text
+    /// still pastes into the field. A key monitor, because the field's own
+    /// editor takes paste: before a SwiftUI paste handler would see it.
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let isPaste = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+                && event.charactersIgnoringModifiers?.lowercased() == "v"
+            guard isPaste else { return event }
+            let attached = MainActor.assumeIsolated { () -> Bool in
+                guard focused, let content = ChatPasteContent.read(.general) else { return false }
+                model.paste(content)
+                return true
+            }
+            return attached ? nil : event
+        }
+    }
+
+    private func removePasteMonitor() {
+        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+        pasteMonitor = nil
     }
 
     private var webChip: some View {

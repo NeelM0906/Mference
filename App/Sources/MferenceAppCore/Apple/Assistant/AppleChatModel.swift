@@ -19,10 +19,14 @@ public struct AppleModelInfo: Sendable, Hashable {
 
     public var state: State
     public var labels: AppleModelLabels
+    /// The model reads pictures (FoundationModels' `.vision` capability,
+    /// macOS 27): chat then sends a message's pictures as pixels.
+    public var seesImages: Bool
 
-    public init(state: State, labels: AppleModelLabels = .fallback) {
+    public init(state: State, labels: AppleModelLabels = .fallback, seesImages: Bool = false) {
         self.state = state
         self.labels = labels
+        self.seesImages = seesImages
     }
 }
 
@@ -129,7 +133,8 @@ public final class AppleChatRouting: EngineServicing, @unchecked Sendable {
         case .notEligible:
             return nil
         case .ready:
-            return ModelOption(model: .apple, availability: .ready, contextLength: info.labels.contextSize)
+            return ModelOption(model: .apple, availability: .ready, contextLength: info.labels.contextSize,
+                               seesImages: info.seesImages)
         case .turnedOff:
             return ModelOption(model: .apple, availability: .notInstalled(reason: Self.turnedOffReason))
         case .gettingReady:
@@ -214,6 +219,8 @@ enum AppleChatContext {
         /// The person's last message.
         var prompt: String
         var trimmed: Bool
+        /// The pictures of the last message, placed before its text.
+        var promptImages: [ChatImage] = []
     }
 
     /// Splits `turns` into instructions, history and the last user message.
@@ -232,7 +239,7 @@ enum AppleChatContext {
         guard let last = dialogue.last, last.role == .user, let prompt = last.content else { return nil }
         dialogue.removeLast()
         return Plan(instructions: instructions.isEmpty ? nil : instructions, history: dialogue, prompt: prompt,
-                    trimmed: false)
+                    trimmed: false, promptImages: last.images)
     }
 
     /// Drops the oldest history until `cost` of the plan fits `budget`.

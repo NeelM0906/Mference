@@ -22,6 +22,9 @@ public final class AppServices {
     public let modelContainer: ModelContainer
     /// GGUF product model downloads (Quick, Deep); nil where none are offered.
     public let downloads: DownloadManager?
+    /// The image-understanding add-ons of Quick and Deep (their vision
+    /// projectors), into the same folder; nil where none are offered.
+    public let imageDownloads: DownloadManager?
     /// U4's Apple surfaces (Scan, Calendar, Mail, Connections); nil only in
     /// tests that build `AppServices` by hand.
     public let apple: AppleServices?
@@ -63,6 +66,7 @@ public final class AppServices {
                 permissions: any PermissionBroker,
                 modelContainer: ModelContainer,
                 downloads: DownloadManager? = nil,
+                imageDownloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
                 speech: (any SpeechServicing)? = nil,
                 speechPreferences: SpeechPreferences? = nil,
@@ -82,6 +86,7 @@ public final class AppServices {
             chatEngine = engine
         }
         self.downloads = downloads
+        self.imageDownloads = imageDownloads
         self.apple = apple
         let speech = speech ?? UnavailableSpeechService()
         self.speech = speech
@@ -122,13 +127,14 @@ public final class AppServices {
             settings.onIdleUnloadChange = { idleUnload.setDelay($0) }
         }
         let speechService = self.speech as? SpeechService
-        if downloads != nil || speechService != nil {
+        if downloads != nil || imageDownloads != nil || speechService != nil {
             // Offline mode stops downloads already running, not only new
             // ones: the GGUF models and the speech packages.
             settings.onOfflineModeChange = { offline in
                 guard offline else { return }
                 Task {
                     await downloads?.pauseAll()
+                    await imageDownloads?.pauseAll()
                     await speechService?.pauseAllInstalls()
                 }
             }
@@ -159,6 +165,10 @@ public final class AppServices {
         let downloads = DownloadManager(
             policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
             onInstalled: { _ in await engine.refreshCatalog() })
+        let imageDownloads = DownloadManager(
+            sources: DownloadSource.imageUnderstanding,
+            policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
+            onInstalled: { _ in await engine.refreshCatalog() })
         // Speech (Notes spec 6.2): the call-audio permission is remembered in
         // the app's defaults; models load from the verified install on first use.
         let systemAudio = SystemAudioPermission()
@@ -171,6 +181,7 @@ public final class AppServices {
                                    permissions: permissions,
                                    modelContainer: container,
                                    downloads: downloads,
+                                   imageDownloads: imageDownloads,
                                    apple: AppleServices.live(engine: engine, broker: permissions, container: container,
                                                              useAppleModel: { await MainActor.run { settings.useAppleModel } }),
                                    speech: speech,
@@ -226,19 +237,25 @@ public final class AppServices {
                                settings: AppSettings? = nil,
                                permissions: any PermissionBroker = FakePermissionBroker(),
                                speech: any SpeechServicing = FakeSpeechService(),
+                               seeing: [AppModel] = [],
                                idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil)) -> AppServices {
         let settings = settings ?? AppSettings(store: InMemorySettingsStore())
-        let engine = fakeEngine(installed: installed, scripts: scripts, journal: journal, idleUnload: idleUnload)
+        let engine = fakeEngine(installed: installed, seeing: seeing, scripts: scripts, journal: journal,
+                                idleUnload: idleUnload)
         // Downloads that can never reach the network: no host is allowed.
         let downloads = DownloadManager(
             destination: FileManager.default.temporaryDirectory.appending(path: "mference-preview-downloads"),
             allowedHosts: [])
+        let imageDownloads = DownloadManager(
+            destination: FileManager.default.temporaryDirectory.appending(path: "mference-preview-downloads"),
+            sources: DownloadSource.imageUnderstanding, allowedHosts: [])
         let container = try! AppModelContainer.inMemory()
         return AppServices(engine: engine,
                            settings: settings,
                            permissions: permissions,
                            modelContainer: container,
                            downloads: downloads,
+                           imageDownloads: imageDownloads,
                            apple: AppleServices.preview(engine: engine, container: container),
                            speech: speech,
                            find: FindService.preview(settings: FindSettings(store: InMemorySettingsStore())),
@@ -247,13 +264,14 @@ public final class AppServices {
 
     /// An `EngineService` over fake backends, for previews and tests.
     public nonisolated static func fakeEngine(installed: [AppModel] = AppModel.engineModels,
+                                              seeing: [AppModel] = [],
                                               scripts: [String: FakeEngineScript] = [:],
                                               journal: FakeEngineJournal = FakeEngineJournal(),
                                               idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil))
         -> EngineService {
         let native = FakeEngineBackend(engine: .mference, journal: journal, scripts: scripts)
         let llama = FakeEngineBackend(engine: .llamaCpp, journal: journal, scripts: scripts)
-        let catalog = fakeCatalog(installed)
+        let catalog = fakeCatalog(installed, seeing: seeing)
         return EngineService(discover: { catalog }) { catalog, observer in
             EngineHost(catalog: catalog, backends: [native, llama],
                        idleUnloadAfter: EngineService.defaultIdleUnload,
@@ -261,8 +279,10 @@ public final class AppServices {
         }
     }
 
-    /// A catalog in which `installed` are discovered, with plausible sizes.
-    public nonisolated static func fakeCatalog(_ installed: [AppModel]) -> EngineCatalog {
+    /// A catalog in which `installed` are discovered, with plausible sizes;
+    /// those also in `seeing` have their image-understanding add-on paired.
+    public nonisolated static func fakeCatalog(_ installed: [AppModel],
+                                               seeing: [AppModel] = []) -> EngineCatalog {
         EngineCatalog(models: installed.map { model in
             let slot = EngineProductSlot(modelID: model.modelID)
             let fake = FakeEngineBackend.descriptor(id: model.modelID, engine: slot?.engine ?? .mference,
@@ -270,7 +290,11 @@ public final class AppServices {
             return EngineModelDescriptor(id: fake.id, displayName: slot?.displayName ?? fake.displayName,
                                          engine: fake.engine, format: fake.format, location: fake.location,
                                          sizeBytes: previewSize(model), contextLength: fake.contextLength,
-                                         product: slot)
+                                         product: slot,
+                                         visionProjector: seeing.contains(model) ? EngineVisionProjector(
+                                             location: fake.location.appendingPathExtension("mmproj"),
+                                             sizeBytes: DownloadSource.imageUnderstanding[model]?.sizeBytes ?? 1)
+                                             : nil)
         })
     }
 

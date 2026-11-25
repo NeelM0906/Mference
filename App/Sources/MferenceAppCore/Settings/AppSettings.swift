@@ -54,6 +54,7 @@ public final class AppSettings {
         public static let thinkingByDefault = "thinkingByDefault"
         public static let blockRemoteMailContent = "blockRemoteMailContent"
         public static let hasCompletedFirstRun = "hasCompletedFirstRun"
+        public static let hasOfferedImageUnderstanding = "hasOfferedImageUnderstanding"
         public static let useAppleModel = "useAppleModel"
     }
 
@@ -129,6 +130,12 @@ public final class AppSettings {
         didSet { store.set(hasCompletedFirstRun, forKey: Key.hasCompletedFirstRun) }
     }
 
+    /// The chat already offered image understanding once (the first picture
+    /// attached on Quick or Deep without it); later it is only in the library.
+    public var hasOfferedImageUnderstanding: Bool {
+        didSet { store.set(hasOfferedImageUnderstanding, forKey: Key.hasOfferedImageUnderstanding) }
+    }
+
     public init(store: any SettingsStore = UserDefaults.standard) {
         self.store = store
         idleUnloadMinutes = max(0, store.object(forKey: Key.idleUnloadMinutes) as? Int
@@ -141,6 +148,7 @@ public final class AppSettings {
         thinkingByDefault = store.object(forKey: Key.thinkingByDefault) as? Bool ?? true
         blockRemoteMailContent = store.object(forKey: Key.blockRemoteMailContent) as? Bool ?? true
         hasCompletedFirstRun = store.object(forKey: Key.hasCompletedFirstRun) as? Bool ?? false
+        hasOfferedImageUnderstanding = store.object(forKey: Key.hasOfferedImageUnderstanding) as? Bool ?? false
         useAppleModel = store.object(forKey: Key.useAppleModel) as? Bool ?? true
     }
 

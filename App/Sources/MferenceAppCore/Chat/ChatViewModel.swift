@@ -16,11 +16,14 @@ public struct ChatMessageItem: Sendable, Hashable, Identifiable {
     public var model: AppModel?
     public var finish: ChatFinish?
     public var isStreaming: Bool
+    /// Files sent with a user message.
+    public var attachments: [ChatAttachment]
 
     public init(id: UUID = UUID(), role: Role, content: String, reasoning: String? = nil,
                 steps: [ChatStep] = [], citations: [ChatCitation] = [], model: AppModel? = nil,
-                finish: ChatFinish? = nil, isStreaming: Bool = false) {
+                finish: ChatFinish? = nil, isStreaming: Bool = false, attachments: [ChatAttachment] = []) {
         self.id = id
+        self.attachments = attachments
         self.role = role
         self.content = content
         self.reasoning = reasoning
@@ -41,7 +44,8 @@ public struct ChatMessageItem: Sendable, Hashable, Identifiable {
         messages.compactMap { message in
             switch message.role {
             case .user:
-                return ChatMessageItem(id: message.id, role: .user, content: message.content)
+                return ChatMessageItem(id: message.id, role: .user, content: message.content,
+                                       attachments: message.attachments)
             case .assistant where message.toolCalls.isEmpty || message.finish == .cancelled
                 || message.finish == .failed:
                 return ChatMessageItem(id: message.id, role: .assistant, content: message.content,
@@ -53,6 +57,35 @@ public struct ChatMessageItem: Sendable, Hashable, Identifiable {
             }
         }
     }
+}
+
+/// A file in the composer, before it is sent: being read, ready, or not
+/// readable (its chip says why).
+public struct PendingAttachment: Sendable, Hashable, Identifiable {
+    public enum State: Sendable, Hashable {
+        case reading
+        case ready(ChatAttachment)
+        case failed(String)
+    }
+
+    public var id: UUID
+    public var filename: String
+    public var kind: ChatAttachment.Kind
+    public var state: State
+
+    public init(id: UUID = UUID(), filename: String, kind: ChatAttachment.Kind, state: State = .reading) {
+        self.id = id
+        self.filename = filename
+        self.kind = kind
+        self.state = state
+    }
+
+    public var attachment: ChatAttachment? {
+        if case .ready(let attachment) = state { return attachment }
+        return nil
+    }
+
+    public var isReading: Bool { state == .reading }
 }
 
 /// The chat screen's state and actions (spec 4.3). Streams through
@@ -71,6 +104,15 @@ public final class ChatViewModel {
     /// The model a new chat starts with (Settings' default model), read each
     /// time a chat is started so a change applies to the next one.
     @ObservationIgnored private let defaultModel: @MainActor () -> AppModel
+    /// Reads attached files into text on this Mac.
+    @ObservationIgnored private let attachmentReader: ChatAttachmentReader
+    /// Where pictures pasted as data are kept until they are read.
+    @ObservationIgnored private var pastedDirectory: URL?
+    /// Files this model wrote for pasted pictures, deleted once read.
+    @ObservationIgnored private var pastedFiles: Set<URL> = []
+    /// Offers Quick's or Deep's image understanding on the first picture;
+    /// nil where it cannot be downloaded (tests, previews).
+    @ObservationIgnored private let imageUnderstanding: (any ImageUnderstandingOffering)?
     /// How often streamed text reaches the view.
     @ObservationIgnored public var flushInterval: Duration = .milliseconds(30)
     /// Tool rounds per answer before the model must answer without tools.
@@ -92,6 +134,8 @@ public final class ChatViewModel {
         return streaming
     }
     public var draft = ""
+    /// Files in the composer, waiting to be sent with the next message.
+    public private(set) var pendingAttachments: [PendingAttachment] = []
     public private(set) var isGenerating = false
     public var errorMessage: String? {
         didSet { if errorMessage == nil { canRetryAfterError = false } }
@@ -115,6 +159,9 @@ public final class ChatViewModel {
     public private(set) var title = Conversation.defaultTitle
     /// The person turned web on for the first time: ask before enabling (L7).
     public private(set) var webConsentRequested = false
+    /// A picture was attached on a model that could see it with its image
+    /// understanding, which is not installed: offer the download (once).
+    public private(set) var imageUnderstandingOffer: ImageUnderstandingOffer?
     /// How many times streamed text was pushed to the view (tests check the
     /// batching with it).
     @ObservationIgnored public private(set) var flushCount = 0
@@ -130,8 +177,12 @@ public final class ChatViewModel {
     public init(service: any EngineServicing, store: ConversationStore,
                 tools: (any ChatToolboxProvider)? = nil,
                 files: (any ChatFilesProviding)? = nil,
-                defaultModel: @escaping @MainActor () -> AppModel = { .quick }) {
+                defaultModel: @escaping @MainActor () -> AppModel = { .quick },
+                attachmentReader: ChatAttachmentReader = ChatAttachmentReader(),
+                imageUnderstanding: (any ImageUnderstandingOffering)? = nil) {
         self.service = service
+        self.attachmentReader = attachmentReader
+        self.imageUnderstanding = imageUnderstanding
         self.store = store
         self.tools = tools
         self.files = files
@@ -194,10 +245,12 @@ public final class ChatViewModel {
         filesEnabled = false
         self.isPrivate = isPrivate
         title = Conversation.defaultTitle
+        pendingAttachments = []
     }
 
     public func select(_ id: UUID) {
         guard let conversation = try? store.conversation(id: id) else { return }
+        let previous = selectedID
         selectedID = id
         errorMessage = nil
         historyTrimmed = false
@@ -207,6 +260,7 @@ public final class ChatViewModel {
         filesEnabled = files?.filesEnabled(for: id) ?? false
         isPrivate = conversation.isPrivate
         title = conversation.title
+        if selectedID != previous { pendingAttachments = [] }
         messages = ChatMessageItem.items(from: conversation.orderedMessages)
         warmUp(model)
     }
@@ -228,6 +282,37 @@ public final class ChatViewModel {
 
     public func option(for model: AppModel) -> ModelOption? {
         modelOptions.first { $0.model == model }
+    }
+
+    /// The chosen model sees pictures: Quick or Deep with image understanding.
+    public var seesImages: Bool { option(for: model)?.seesImages ?? false }
+
+    /// What the "+" menu says about pictures for the chosen model.
+    public var imageCaption: String {
+        seesImages ? "\(model.shortName) can see images" : "Images are read as text on this Mac"
+    }
+
+    /// The person chose Download in the offer: that is their approval.
+    public func acceptImageUnderstandingOffer() {
+        guard let offer = imageUnderstandingOffer else { return }
+        imageUnderstandingOffer = nil
+        imageUnderstanding?.download(offer.model)
+    }
+
+    public func declineImageUnderstandingOffer() {
+        imageUnderstandingOffer = nil
+    }
+
+    /// Offers image understanding when a picture is attached on Quick or
+    /// Deep without it, once ever; the Model Library offers it after that.
+    private func offerImageUnderstandingIfNeeded() {
+        guard let offering = imageUnderstanding, !offering.hasOffered, imageUnderstandingOffer == nil,
+              model.supportsImageUnderstanding, !seesImages,
+              let option = option(for: model) else { return }
+        if case .notInstalled = option.availability { return }
+        guard let size = offering.downloadBytes(for: model) else { return }
+        offering.hasOffered = true
+        imageUnderstandingOffer = ImageUnderstandingOffer(model: model, sizeBytes: size)
     }
 
     public func selectModel(_ model: AppModel) {
@@ -402,12 +487,92 @@ public final class ChatViewModel {
     // MARK: Sending
 
     public var canSend: Bool {
-        !isGenerating && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !isGenerating, !pendingAttachments.contains(where: \.isReading) else { return false }
+        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || pendingAttachments.contains { $0.attachment != nil }
+    }
+
+    // MARK: Attachments
+
+    /// Whether another file can be added to this message.
+    public var canAttach: Bool { pendingAttachments.count < ChatAttachmentReader.maxAttachments }
+
+    /// Adds files to the next message and reads them into text on this Mac.
+    /// Files that cannot be attached show why on their chip.
+    public func attach(_ urls: [URL]) {
+        for url in urls {
+            guard canAttach else { break }
+            guard let kind = ChatAttachmentReader.kind(of: url) else {
+                pendingAttachments.append(PendingAttachment(
+                    filename: url.lastPathComponent, kind: .document,
+                    state: .failed(ChatAttachmentReader.isAppleFormat(url) ? "Export it as PDF to attach it"
+                                                                           : "This kind of file can’t be read")))
+                continue
+            }
+            let pending = PendingAttachment(filename: url.lastPathComponent, kind: kind)
+            pendingAttachments.append(pending)
+            if kind == .image { offerImageUnderstandingIfNeeded() }
+            let reader = attachmentReader
+            // A picture pasted as data is only needed until it is read (the
+            // attachment keeps its text and a scaled copy): delete it then,
+            // read or not, removed or not. Other files are never touched.
+            let pasted = pastedFiles.remove(url.standardizedFileURL) != nil
+            Task { [weak self] in
+                let result = await reader.read(url)
+                if pasted { try? FileManager.default.removeItem(at: url) }
+                guard let self, let index = self.pendingAttachments.firstIndex(where: { $0.id == pending.id })
+                else { return }
+                switch result {
+                case .success(let attachment): self.pendingAttachments[index].state = .ready(attachment)
+                case .failure(let error): self.pendingAttachments[index].state = .failed(error.message)
+                }
+            }
+        }
+    }
+
+    /// ⌘V in the composer: files copied in Finder attach like dropped ones;
+    /// a picture copied as data is kept in a private temporary folder first.
+    public func paste(_ content: ChatPasteContent) {
+        switch content {
+        case .files(let urls):
+            attach(urls)
+        case .image(let data, let fileExtension):
+            guard canAttach else { return }
+            do {
+                attach([try keepPasted(data, fileExtension: fileExtension)])
+            } catch {
+                errorMessage = "Mference could not keep the pasted picture. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func keepPasted(_ data: Data, fileExtension: String) throws -> URL {
+        let directory = pastedDirectory ?? URL.temporaryDirectory.appending(path: "mference-pasted-\(UUID().uuidString)",
+                                                                            directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        pastedDirectory = directory
+        let url = directory.appending(path: "Pasted image \(UUID().uuidString.prefix(8)).\(fileExtension)")
+        try data.write(to: url, options: .atomic)
+        pastedFiles.insert(url.standardizedFileURL)
+        return url
+    }
+
+    public func removeAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    /// Waits until every pending file has been read (tests).
+    public func waitForAttachments() async {
+        while pendingAttachments.contains(where: \.isReading) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     public func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isGenerating, !text.isEmpty else { return }
+        let attachments = pendingAttachments.compactMap(\.attachment)
+        guard canSend, !text.isEmpty || !attachments.isEmpty else { return }
         errorMessage = nil
         do {
             let conversation = try selectedConversation
@@ -416,10 +581,13 @@ public final class ChatViewModel {
                 selectedID = conversation.id
             }
             if filesEnabled { files?.setFilesEnabled(true, for: conversation.id) }
-            let message = try store.append(to: conversation, role: .user, content: text, now: now())
+            let message = try store.append(to: conversation, role: .user, content: text, now: now()) {
+                $0.attachments = attachments
+            }
             draft = ""
+            pendingAttachments = []
             title = conversation.title
-            messages.append(ChatMessageItem(id: message.id, role: .user, content: text))
+            messages.append(ChatMessageItem(id: message.id, role: .user, content: text, attachments: attachments))
             reloadConversations()
             answer(in: conversation)
         } catch {
@@ -499,7 +667,7 @@ public final class ChatViewModel {
             // read once per answer.
             let memory = ChatMemoryPrompt.text(facts: store.rememberedFacts())
             while true {
-                var turns = store.turns(for: conversation)
+                var turns = store.turns(for: conversation, seesImages: option(for: model)?.seesImages ?? false)
                 // Hidden context stored with the chat (Calendar's week) joins
                 // the system prompt: one system turn, first.
                 let stored = turns.filter { $0.role == .system }.compactMap(\.content)
@@ -715,5 +883,69 @@ public enum ChatMemoryPrompt {
         guard !lines.isEmpty else { return nil }
         return "Things the person asked you to remember about them. Use them when they are relevant; "
             + "do not mention this list unless asked.\n" + lines.joined(separator: "\n")
+    }
+}
+
+/// The chat's one-time offer of image understanding.
+public struct ImageUnderstandingOffer: Sendable, Hashable {
+    public var model: AppModel
+    /// The download's size.
+    public var sizeBytes: UInt64
+
+    public init(model: AppModel, sizeBytes: UInt64) {
+        self.model = model
+        self.sizeBytes = sizeBytes
+    }
+
+    public var title: String { "Let \(model.name) see images?" }
+
+    public var message: String {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(clamping: sizeBytes), countStyle: .file)
+        return "\(model.name)’s image understanding downloads (\(size)) to this Mac and runs here. "
+            + "Until it is installed, pictures are read as text. You can add or remove it later in Settings › Models."
+    }
+}
+
+/// Where the chat's offer of image understanding goes: whether it was made
+/// already, the download's size, and starting the download the person just
+/// approved. `ImageUnderstandingDownloads` is the live one.
+@MainActor
+public protocol ImageUnderstandingOffering: AnyObject {
+    var hasOffered: Bool { get set }
+    /// The add-on's download size, or nil when this Mac cannot get it.
+    func downloadBytes(for model: AppModel) -> UInt64?
+    /// Starts the approved download (the offer's Download button).
+    func download(_ model: AppModel)
+}
+
+/// The live offering: remembered in Settings, downloads through
+/// `AppServices.imageDownloads` (offline mode and the memory gate still
+/// refuse there).
+@MainActor
+public final class ImageUnderstandingDownloads: ImageUnderstandingOffering {
+    private let settings: AppSettings
+    private let downloads: DownloadManager
+    private let memoryFit: MemoryFit
+
+    public init(settings: AppSettings, downloads: DownloadManager, memoryFit: MemoryFit = MemoryFit()) {
+        self.settings = settings
+        self.downloads = downloads
+        self.memoryFit = memoryFit
+    }
+
+    public var hasOffered: Bool {
+        get { settings.hasOfferedImageUnderstanding }
+        set { settings.hasOfferedImageUnderstanding = newValue }
+    }
+
+    public func downloadBytes(for model: AppModel) -> UInt64? {
+        guard memoryFit.isOffered(model) else { return nil }
+        return downloads.source(for: model)?.sizeBytes
+    }
+
+    public func download(_ model: AppModel) {
+        guard memoryFit.isOffered(model), let source = downloads.source(for: model) else { return }
+        let downloads = self.downloads
+        Task { try? await downloads.download(DownloadApproval(confirming: source)) }
     }
 }
