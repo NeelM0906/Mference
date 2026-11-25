@@ -119,8 +119,9 @@ imported for this family: its architecture was read from
 `transformers` v5.6.2 (Apache-2.0) and nothing was copied from it.
 
 GGUF models run through the `LlamaCpp` target are not installed by
-`MferenceRepack`; they are single files read in place. Two are product models,
-checked against the Hugging Face LFS object ids (SHA-256) on 2026-11-18:
+`MferenceRepack`; they are single files read in place. Three are product
+models, checked against the Hugging Face LFS object ids (SHA-256) on
+2026-11-18 (Bonsai on 2026-11-25):
 
 - Quick: `Qwen3.5-4B-UD-Q4_K_XL.gguf` from revision
   `e87f176479d0855a907a41277aca2f8ee7a09523` of
@@ -136,6 +137,14 @@ checked against the Hugging Face LFS object ids (SHA-256) on 2026-11-18:
   `58fd826723939933dc86f45b7fe04545cbc2de1c70f6fe2cdd3858c87a98c12f`. Its
   model card declares `license: apache-2.0`, a quantization of Alibaba's
   [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
+- Bonsai: `Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf` from revision
+  `28a7093cc25bc151cc2b284c5570f12ce343fdcf` of
+  [`prism-ml/Ternary-Bonsai-2.5-27B-GGUF`](https://huggingface.co/prism-ml/Ternary-Bonsai-2.5-27B-GGUF),
+  7,912,178,944 bytes, SHA-256
+  `b0f83de8481c3200c529aef5fb495dbfedf2a4a3f017f7a3ea0a69c67be1d306`. Its
+  model card declares `license: apache-2.0` (with a `NOTICE.txt` on the
+  provenance of its draft head), PrismML's ternary model built from Alibaba's
+  [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
 
 Each has an optional vision projector, downloaded only when the person adds
 image understanding, read by llama.cpp's `mtmd` from the same revision of the
@@ -148,6 +157,9 @@ same repository and checked the same way on 2026-11-24:
 - Deep's: `mmproj-Qwen3.8-27B-BF16.gguf`, 931,146,528 bytes, SHA-256
   `13cb7bebccbd04afc8f4090cb949ecf8937cdf7377c5799b1a0c594e7c0d3e16`, the
   vision tower of Qwen3.8-27B under the same licence.
+- Bonsai's: `Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf`, 629,246,976 bytes,
+  SHA-256 `6807ede61d570bb86ba34b756a0fa109edc33668604de867c6ea6d8f1d631903`
+  (checked 2026-11-25), its vision tower under the same licence.
 
 The Mac app's Find (content search) downloads one more GGUF when the person
 turns Find on, and a second when they turn on Settings › Find › Photos, video

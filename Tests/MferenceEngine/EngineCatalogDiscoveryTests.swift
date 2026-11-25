@@ -13,6 +13,7 @@ struct EngineCatalogDiscoveryTests {
 
     static let quickFile = file("/lib/gguf/Qwen3.5-4B-UD-Q4_K_XL.gguf")
     static let deepFile = file("/lib/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf")
+    static let bonsaiFile = file("/lib/gguf/Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf")
 
     static func meta(mtp: Bool, context: Int? = 262_144) -> EngineGGUFMetadata {
         EngineGGUFMetadata(architecture: "qwen35", name: "x", contextLength: context,
@@ -48,9 +49,11 @@ struct EngineCatalogDiscoveryTests {
                  "/lib/maple.gturbo": .complete(family: .maple),
                  "/lib/qwen38.gturbo": .complete(family: .qwen38),
                  "/lib/half.gturbo": .partial("receipt missing")],
-        ggufFiles: ["/lib/gguf": [quickFile.path, deepFile.path, "/lib/gguf/Other-Model.Q8_0.gguf"]],
+        ggufFiles: ["/lib/gguf": [quickFile.path, deepFile.path, bonsaiFile.path,
+                                  "/lib/gguf/Other-Model.Q8_0.gguf"]],
         headers: [quickFile.path: .success(meta(mtp: false)),
                   deepFile.path: .success(meta(mtp: true)),
+                  bonsaiFile.path: .success(meta(mtp: true)),
                   "/lib/gguf/Other-Model.Q8_0.gguf": .success(meta(mtp: false, context: 8_192))])
 
     /// A Mac above every product model's memory floor.
@@ -60,8 +63,8 @@ struct EngineCatalogDiscoveryTests {
         let catalog = EngineCatalogDiscovery.discover(roots: [Self.library], ggufDirectories: [Self.gguf],
                                                       fileSystem: Self.standardDisk, physicalMemory: Self.roomy)
         #expect(catalog.models.map(\.id) == [
-            "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b",
-            "qwen3.6-35b-a3b", "qwen3.8-27b",
+            "bonsai-2.5-27b-q2_0", "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64",
+            "qwen3.5-4b", "qwen3.6-35b-a3b", "qwen3.8-27b",
         ])
         #expect(Set(catalog.models.compactMap(\.product)) == Set(EngineProductSlot.allCases))
         let deep = try #require(catalog.descriptor(for: "qwen3.8-27b"))
@@ -69,6 +72,9 @@ struct EngineCatalogDiscoveryTests {
         #expect(deep.location == Self.deepFile)
         #expect(deep.contextLength == 262_144)
         #expect(deep.displayName == EngineProductSlot.deep.displayName)
+        let bonsai = try #require(catalog.descriptor(for: "bonsai-2.5-27b-q2_0"))
+        #expect(bonsai.product == .bonsai27b && bonsai.engine == .llamaCpp)
+        #expect(bonsai.location == Self.bonsaiFile)
         let qwen36 = try #require(catalog.descriptor(for: "qwen3.6-35b-a3b"))
         #expect(qwen36.engine == .mference)
         #expect(qwen36.format == .gturbo(family: .qwen36, checkpointID: nil))
@@ -107,8 +113,8 @@ struct EngineCatalogDiscoveryTests {
                                                       scope: .all, fileSystem: Self.standardDisk,
                                                       physicalMemory: Self.roomy)
         #expect(catalog.models.map(\.id) == [
-            "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "other-model.q8_0", "qwen3.5-4b",
-            "qwen3.6-35b-a3b", "qwen3.8-27b", "qwen3.8-27b-4bit",
+            "bonsai-2.5-27b-q2_0", "inkling-2-mini-ud-q4_k_xl", "maple-preview-2bit-mlx", "minicpm5-2b-int4g64",
+            "other-model.q8_0", "qwen3.5-4b", "qwen3.6-35b-a3b", "qwen3.8-27b", "qwen3.8-27b-4bit",
         ])
         let other = try #require(catalog.descriptor(for: "other-model.q8_0"))
         #expect(other.product == nil)
@@ -135,17 +141,21 @@ struct EngineCatalogDiscoveryTests {
         #expect(all.models.map(\.id) == ["qwen3.6-35b-a3b", "qwen3.6-35b-a3b@0", "qwen3.6-35b-a3b@aaa"])
     }
 
-    @Test func productGGUFFilesMustBeReadableAndDeepMustCarryMTP() {
+    @Test func productGGUFFilesMustBeReadableAndMTPSlotsMustCarryMTP() {
         let disk = Self.fileSystem(
             children: [:], probes: [:],
-            ggufFiles: ["/g": ["/g/Qwen3.5-4B-UD-Q4_K_XL.gguf", "/g/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"]],
+            ggufFiles: ["/g": ["/g/Qwen3.5-4B-UD-Q4_K_XL.gguf", "/g/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+                               "/g/Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf"]],
             headers: ["/g/Qwen3.5-4B-UD-Q4_K_XL.gguf": .failure(.truncated),
-                      "/g/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf": .success(Self.meta(mtp: false))])
+                      "/g/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf": .success(Self.meta(mtp: false)),
+                      "/g/Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf": .success(Self.meta(mtp: false))])
         let catalog = EngineCatalogDiscovery.discover(roots: [], ggufDirectories: [Self.dir("/g")],
                                                       fileSystem: disk)
         #expect(catalog.models.isEmpty)
         #expect(catalog.unavailableReason(for: "qwen3.5-4b")?.contains("unreadable GGUF") == true)
         #expect(catalog.unavailableReason(for: "qwen3.8-27b")?.contains("MTP") == true)
+        #expect(catalog.unavailableReason(for: "bonsai-2.5-27b-q2_0")?.contains("MTP") == true)
+        #expect(EngineProductSlot.allCases.filter(\.requiresMTP) == [.deep, .bonsai27b])
     }
 
     @Test func aGGUFWithoutContextLengthOrSplitIntoShardsIsSkipped() {

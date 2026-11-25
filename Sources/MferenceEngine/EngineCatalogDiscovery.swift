@@ -17,6 +17,7 @@ public enum EngineCatalogDiscovery {
     public static let productGGUFFiles: [String: EngineProductSlot] = [
         "Qwen3.5-4B-UD-Q4_K_XL.gguf": .quick,
         "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf": .deep,
+        "Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf": .bonsai27b,
     ]
 
     /// The vision projector files of the GGUF product models, by the names
@@ -25,6 +26,7 @@ public enum EngineCatalogDiscovery {
     public static let productProjectorFiles: [EngineProductSlot: [String]] = [
         .quick: ["Qwen3.5-4B-mmproj-F16.gguf", "mmproj-F16.gguf"],
         .deep: ["mmproj-Qwen3.8-27B-BF16.gguf"],
+        .bonsai27b: ["Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf", "Ternary-Bonsai-2.5-27B-mmproj-BF16.gguf"],
     ]
 
     /// Whether a `.gguf` file name is a multimodal projector's, by
@@ -43,7 +45,7 @@ public enum EngineCatalogDiscovery {
         case .minicpm5: "minicpm5"
         case .maple: "maple"
         case .inkling2Mini: "inkling2mini"
-        case .quick, .deep: nil
+        case .quick, .deep, .bonsai27b: nil
         }
     }
 
@@ -316,9 +318,10 @@ public enum EngineCatalogDiscovery {
                                                  reason: "GGUF header has no context length", modelID: id))
                 continue
             }
-            if slot == .deep, !metadata.hasMTP {
+            if let slot, slot.requiresMTP, !metadata.hasMTP {
                 skipped.append(EngineCatalogSkip(
-                    location: file, reason: "no MTP (nextn) tensors; Deep needs the -mtp file", modelID: id))
+                    location: file, reason: "no MTP (nextn) tensors; \(slot.displayName) needs the -mtp file",
+                    modelID: id))
                 continue
             }
             models.append(EngineModelDescriptor(

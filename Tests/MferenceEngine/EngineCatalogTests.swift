@@ -34,11 +34,11 @@ struct EngineCatalogTests {
 
     @Test func productSlotsHaveStableIdentifiersAndEngines() {
         #expect(EngineProductSlot.allCases.map(\.modelID) == [
-            "qwen3.5-4b", "qwen3.8-27b", "qwen3.6-35b-a3b", "minicpm5-2b-int4g64", "maple-preview-2bit-mlx",
+            "qwen3.5-4b", "qwen3.8-27b", "bonsai-2.5-27b-q2_0", "qwen3.6-35b-a3b", "minicpm5-2b-int4g64", "maple-preview-2bit-mlx",
             "inkling-2-mini-ud-q4_k_xl",
         ])
         #expect(Set(EngineProductSlot.allCases.map(\.modelID)).count == EngineProductSlot.allCases.count)
-        #expect(EngineProductSlot.allCases.filter { $0.engine == .llamaCpp } == [.quick, .deep])
+        #expect(EngineProductSlot.allCases.filter { $0.engine == .llamaCpp } == [.quick, .deep, .bonsai27b])
         for slot in EngineProductSlot.allCases {
             #expect(EngineProductSlot(modelID: slot.modelID) == slot)
         }

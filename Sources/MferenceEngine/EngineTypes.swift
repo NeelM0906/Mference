@@ -30,6 +30,10 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     /// Deep: `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF`,
     /// `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf`, decoded with MTP.
     case deep
+    /// Ternary Bonsai 2.5 27B: `prism-ml/Ternary-Bonsai-2.5-27B-GGUF`,
+    /// `Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf` (ternary Qwen3.8-27B in
+    /// llama.cpp's stock `Q2_0`, Hadamard-rotated), decoded with MTP.
+    case bonsai27b
     /// Native Qwen 3.6 35B-A3B install.
     case qwen36
     /// Native MiniCPM5-2B install.
@@ -45,6 +49,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         switch self {
         case .quick: "qwen3.5-4b"
         case .deep: "qwen3.8-27b"
+        case .bonsai27b: "bonsai-2.5-27b-q2_0"
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
         case .maple: "maple-preview-2bit-mlx"
@@ -56,6 +61,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         switch self {
         case .quick: "Quick (Qwen3.5 4B)"
         case .deep: "Deep (Qwen3.8 27B)"
+        case .bonsai27b: "Bonsai 2.5 27B (ternary Qwen3.8 27B)"
         case .qwen36: "Qwen 3.6 35B-A3B"
         case .minicpm5: "MiniCPM5 2B"
         case .maple: "Maple Preview"
@@ -65,7 +71,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
 
     public var engine: EngineKind {
         switch self {
-        case .quick, .deep: .llamaCpp
+        case .quick, .deep, .bonsai27b: .llamaCpp
         case .qwen36, .minicpm5, .maple, .inkling2Mini: .mference
         }
     }
@@ -77,7 +83,16 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
     public var minimumPhysicalMemory: UInt64? {
         switch self {
         case .inkling2Mini: 32 << 30
-        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        case .quick, .deep, .bonsai27b, .qwen36, .minicpm5, .maple: nil
+        }
+    }
+
+    /// Whether the slot is served only from a file with an MTP (nextn) head:
+    /// the GGUF models whose product file is an `-mtp` file.
+    public var requiresMTP: Bool {
+        switch self {
+        case .deep, .bonsai27b: true
+        case .quick, .qwen36, .minicpm5, .maple, .inkling2Mini: false
         }
     }
 
@@ -95,7 +110,7 @@ public enum EngineProductSlot: String, Sendable, Hashable, Codable, CaseIterable
         case .inkling2Mini:
             Inkling2MemoryFootprint.estimate(installBytes: installBytes, physicalMemory: physicalMemory)?
                 .bytes(contextTokens: contextTokens)
-        case .quick, .deep, .qwen36, .minicpm5, .maple: nil
+        case .quick, .deep, .bonsai27b, .qwen36, .minicpm5, .maple: nil
         }
     }
 

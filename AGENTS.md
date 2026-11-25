@@ -9,9 +9,10 @@ and MiniCPM5-2B are dense and fully resident. Inkling 2 Mini keeps its looped
 core's experts resident and stages the rest on 32 to 47 GB Macs, and holds
 every layer from 48 GB; it is offered on Macs with 32 GB or more. Through the `MferenceEngine` library, the app and `MferenceServer --library`
 run GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
-UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
-GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers six models: Quick,
-Deep, Qwen 3.6, MiniCPM5, Maple and Inkling 2 Mini (32 GB and up); see
+UD-Q4_K_XL, the product's Quick model), Qwen3.8-27B (ISTA-DASLab
+GSQ-RCO IQ3_S, Deep) and Ternary Bonsai 2.5 27B (PrismML, stock `Q2_0`), the
+last two with MTP draft decoding. The product offers seven models: Quick,
+Deep, Bonsai, Qwen 3.6, MiniCPM5, Maple and Inkling 2 Mini (32 GB and up); see
 [the engine](docs/ENGINE.md).
 
 ## Scope
