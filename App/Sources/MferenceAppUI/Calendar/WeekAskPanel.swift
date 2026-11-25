@@ -5,8 +5,6 @@ import SwiftUI
 
 /// Named sizes for Ask about your week.
 enum WeekAskMetrics {
-    /// Month's card and bar.
-    static let monthWidth: CGFloat = 560
     /// The answer card's height before it scrolls inside, so "Show all"
     /// never pushes the to-dos or the box off screen.
     static let cardMaxHeight: CGFloat = 340
@@ -14,21 +12,18 @@ enum WeekAskMetrics {
 }
 
 /// Ask about your week: the suggestion chips, the answer card and the box.
-/// Under the to-dos in Day and Week; in Month, a slim bar under the grid
-/// with the card floating over the grid.
+/// Under the to-dos in Day and Week only.
 struct WeekAskPanel: View {
     @Bindable var ask: WeekAskModel
     var calendar: CalendarWeekModel
-    /// Month's slim bar: the card floats over the grid instead.
-    var compact = false
     /// Opens a Private chat with these answers; nil hides the button.
     var continueInChat: (() -> Void)?
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s) {
-            if !compact { header }
-            if ask.isIdle && !compact {
+            header
+            if ask.isIdle {
                 FlowLayout(spacing: MFSpacing.xs) {
                     ForEach(ask.chips, id: \.self) { chip in
                         Button(chip.title(ask.text)) { Task { await ask.ask(chip) } }
@@ -40,7 +35,7 @@ struct WeekAskPanel: View {
                     .foregroundStyle(MFColor.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if !ask.isIdle && !compact { WeekAskCard(ask: ask, continueInChat: continueInChat) }
+            if !ask.isIdle { WeekAskCard(ask: ask, continueInChat: continueInChat) }
             if let notice = ask.notice { noticeBar(notice) }
             composer
         }
@@ -108,7 +103,6 @@ struct WeekAskPanel: View {
 
     private var composer: some View {
         HStack(spacing: MFSpacing.s) {
-            if compact { scopePill }
             AppleTextField(title: placeholder, text: $ask.draft)
                 .font(MFFont.body)
                 .focused($focused)
@@ -137,7 +131,7 @@ struct WeekAskPanel: View {
                 .disabled(!ask.canAsk)
             }
         }
-        .padding(.leading, compact ? MFSpacing.xs : MFSpacing.l)
+        .padding(.leading, MFSpacing.l)
         .padding(.trailing, MFSpacing.xs)
         .padding(.vertical, MFSpacing.xs)
         .background(Capsule().fill(MFColor.surface))
@@ -146,7 +140,6 @@ struct WeekAskPanel: View {
 
     private var placeholder: String {
         if ask.isFull { return "Continue in Chat to ask more" }
-        if compact { return "Ask about this week" }
         guard ask.answers.isEmpty else { return "Ask a follow-up" }
         return calendar.mode == .day ? "Ask about this day or week" : "When am I free for 2 hours?"
     }

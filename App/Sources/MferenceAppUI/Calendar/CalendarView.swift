@@ -68,19 +68,6 @@ struct CalendarContent: View {
                 switch model.access {
                 case .granted:
                     period
-                        // Month: the answer card floats over the grid, so the
-                        // grid keeps its size.
-                        .overlay(alignment: .bottomLeading) {
-                            if model.mode == .month, !showsTodos, let weekAsk, !weekAsk.isIdle {
-                                WeekAskCard(ask: weekAsk, continueInChat: continueInChat)
-                                    .frame(maxWidth: WeekAskMetrics.monthWidth, alignment: .leading)
-                                    .padding(MFSpacing.m)
-                            }
-                        }
-                    if model.mode == .month, !showsTodos, let weekAsk {
-                        WeekAskPanel(ask: weekAsk, calendar: model, compact: true, continueInChat: continueInChat)
-                            .frame(maxWidth: WeekAskMetrics.monthWidth, alignment: .leading)
-                    }
                     if model.mode == .day || model.mode == .week, let proposal = model.proposalsThisWeek.first {
                         ProposalCard(proposal: proposal, model: model)
                     }
@@ -111,7 +98,9 @@ struct CalendarContent: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             if showsTodos {
                 Rectangle().fill(MFColor.hairline).frame(width: 1)
-                TodoList(model: model, weekAsk: model.mode == .year ? nil : weekAsk, continueInChat: continueInChat)
+                // Ask about your week belongs to Day and Week only.
+                TodoList(model: model, weekAsk: model.mode == .day || model.mode == .week ? weekAsk : nil,
+                         continueInChat: continueInChat)
                     .frame(width: 315)
                     .background(MFColor.canvas)
             }

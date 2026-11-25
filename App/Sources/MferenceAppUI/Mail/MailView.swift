@@ -57,6 +57,14 @@ struct MailContent: View {
                         MailReader(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
+                // Compose docks over the bottom left, not modal: the list
+                // and the reader stay usable. Only once Mail can be read.
+                .overlay(alignment: .bottomLeading) {
+                    if case .available = model.status, model.composer.isOpen {
+                        MailComposeCard(composer: model.composer)
+                            .padding(MFSpacing.m)
+                    }
+                }
             case .needsFullDiskAccess:
                 MailAccessState(model: model)
             case .notFound:
@@ -91,6 +99,15 @@ enum MailMetrics {
     static let iconWidth: CGFloat = 16
     /// The unread dot in the sidebar's sync note and the message list.
     static let dot: CGFloat = 7
+    /// The docked compose card, sized to fit the minimum window (960×640).
+    static let composeWidth: CGFloat = 480
+    static let composeMaxHeight: CGFloat = 460
+    static let composeBodyMinHeight: CGFloat = 96
+    static let composeMinimizedWidth: CGFloat = 280
+    static let composeLabelWidth: CGFloat = 52
+    static let composeShadowOpacity: Double = 0.14
+    static let composeShadowRadius: CGFloat = 20
+    static let composeShadowY: CGFloat = 10
 }
 
 struct MailSidebar: View {
@@ -332,6 +349,9 @@ struct MailList: View {
         HStack(spacing: MFSpacing.m) {
             shortcut("⌘J", "Draft") { Task { await model.writeDraft() } }
                 .keyboardShortcut("j", modifiers: .command)
+                // Not while the compose card is up: ⌘J drafts a reply to the
+                // selected message, not the new one.
+                .disabled(model.composer.isOpen && !model.composer.isMinimized)
             Spacer()
         }
         .padding(.horizontal, MFSpacing.l)
@@ -631,52 +651,6 @@ struct DraftCard: View {
     }
 }
 
-/// Compose (C): a new message, sent through Mail only on Send.
-struct ComposeSheet: View {
-    var model: MailInboxModel
-    @State private var to = ""
-    @State private var subject = ""
-    @State private var message = ""
-    @State private var error: String?
-    @State private var isSending = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: MFSpacing.m) {
-            Text("New message")
-                .font(MFFont.headline)
-                .foregroundStyle(MFColor.ink)
-            TextField("To", text: $to).textFieldStyle(.roundedBorder)
-            TextField("Subject", text: $subject).textFieldStyle(.roundedBorder)
-            TextEditor(text: $message)
-                .font(MFFont.body)
-                .frame(minHeight: 160)
-                .overlay(RoundedRectangle(cornerRadius: MFRadius.s).strokeBorder(MFColor.hairlineStrong))
-                .accessibilityLabel("Message")
-            HStack(spacing: MFSpacing.m) {
-                Text(error ?? "Not sent until you press Send.")
-                    .font(MFFont.callout)
-                    .foregroundStyle(error == nil ? MFColor.secondary : MFColor.danger)
-                Spacer()
-                Button("Cancel") { model.isComposing = false }
-                    .buttonStyle(.appleSecondary)
-                    .keyboardShortcut(.cancelAction)
-                Button(isSending ? "Sending…" : "Send") {
-                    isSending = true
-                    Task {
-                        error = await model.sendNewMessage(to: to, subject: subject, body: message)
-                        isSending = false
-                        if error == nil { model.isComposing = false }
-                    }
-                }
-                .buttonStyle(.applePrimary)
-                .disabled(isSending)
-            }
-        }
-        .padding(MFSpacing.l)
-        .frame(width: 520)
-    }
-}
-
 /// Compose (C) in the shell toolbar. The shell keeps a toolbar item by id,
 /// so this view reads the model live in its own body.
 struct ComposeToolbarButton: View {
@@ -688,7 +662,7 @@ struct ComposeToolbarButton: View {
     }
 
     var body: some View {
-        Button { model.isComposing = true } label: {
+        Button { model.composer.open() } label: {
             HStack(spacing: MFSpacing.s) {
                 Text("Compose")
                 Text("C")
@@ -701,9 +675,10 @@ struct ComposeToolbarButton: View {
         }
         .buttonStyle(.applePrimary)
         .keyboardShortcut("c", modifiers: [])
+        // Off while the card is expanded (C types a letter there); a
+        // minimized card comes back with C.
         .disabled(model.isEditingText || !isMailAvailable)
-        .sheet(isPresented: $model.isComposing) { ComposeSheet(model: model) }
-        .accessibilityLabel("Compose a new message")
+        .accessibilityLabel(model.composer.isMinimized ? "Show the message being written" : "Compose a new message")
     }
 }
 

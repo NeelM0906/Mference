@@ -35,7 +35,8 @@ public final class ScanSession {
     private var readTask: Task<Void, Never>?
     /// Every read started and not yet awaited, so tests can wait for a
     /// replaced read to finish too.
-    @ObservationIgnored private var pendingReads: [Task<Void, Never>] = []
+    /// A read leaves the list when it finishes, so the list stays small.
+    @ObservationIgnored private var pendingReads: [(id: UUID, task: Task<Void, Never>)] = []
     @ObservationIgnored private var pastedDirectory: URL?
 
     /// `imageDirectory` keeps copies of scanned images (default: the app's
@@ -80,9 +81,13 @@ public final class ScanSession {
         savedRecordID = nil
         fields = ScanFields(fields: [])
         phase = .reading
-        let task = Task { await read(url) }
+        let id = UUID()
+        let task = Task { [weak self] in
+            await self?.read(url)
+            self?.pendingReads.removeAll { $0.id == id }
+        }
         readTask = task
-        pendingReads.append(task)
+        pendingReads.append((id, task))
     }
 
     /// An image pasted from the clipboard (PNG or TIFF data): kept as a file
@@ -100,8 +105,9 @@ public final class ScanSession {
 
     /// Waits for every read started so far, replaced ones included (tests).
     public func waitForReading() async {
-        while !pendingReads.isEmpty {
-            await pendingReads.removeFirst().value
+        while let first = pendingReads.first {
+            await first.task.value
+            pendingReads.removeAll { $0.id == first.id }
         }
     }
 
@@ -152,7 +158,10 @@ public final class ScanSession {
         return record
     }
 
-    /// Clears the screen for the next scan.
+    /// Clears the screen for the next scan, at any point: while reading (the
+    /// read is cancelled and never reaches the screen), in review (unsaved
+    /// edits are dropped), after a failure or after saving. Pasted images
+    /// are deleted; a saved scan keeps its own copy.
     public func reset() {
         readTask?.cancel()
         readTask = nil
@@ -161,6 +170,10 @@ public final class ScanSession {
         reading = nil
         savedRecordID = nil
         fields = ScanFields(fields: [])
+        if let pastedDirectory {
+            try? FileManager.default.removeItem(at: pastedDirectory)
+            self.pastedDirectory = nil
+        }
     }
 
     /// The CSV file of every confirmed receipt (UTF-8 with BOM). A scan

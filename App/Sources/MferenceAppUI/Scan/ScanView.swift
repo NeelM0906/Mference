@@ -45,6 +45,10 @@ struct ScanContent: View {
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: session.imageURL) { loadPreview() }
+        // Cleared: no export or paste message is left on the empty screen.
+        .onChange(of: session.phase) { _, phase in
+            if phase == .empty { exportMessage = nil }
+        }
         .shellToolbar(id: "scan.actions") { ScanToolbarActions(session: session) }
     }
 
@@ -172,8 +176,14 @@ struct ScanContent: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityElement(children: .combine)
         case .failed(let message):
-            AppleEmptyState(systemImage: "exclamationmark.triangle", title: "This scan could not be read",
-                            message: message, actionTitle: "Open another file", action: openFile)
+            VStack(spacing: MFSpacing.m) {
+                AppleEmptyState(systemImage: "exclamationmark.triangle", title: "This scan could not be read",
+                                message: message, actionTitle: "Open another file", action: openFile)
+                    .frame(maxHeight: .infinity)
+                Button("Clear") { session.reset() }
+                    .buttonStyle(.appleQuiet)
+                    .padding(.bottom, MFSpacing.xl)
+            }
         case .review, .saved:
             MFScroll { review.padding(.horizontal, MFSpacing.xl + MFSpacing.s).padding(.vertical, MFSpacing.xl) }
         }
@@ -322,6 +332,11 @@ struct ScanToolbarActions: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Capture screen area, coming later")
+            Button("Clear") { session.reset() }
+                .buttonStyle(.appleSecondary)
+                .disabled(session.phase == .empty)
+                .help("Clear this scan and start again")
+                .accessibilityLabel("Clear this scan")
             Button("Open file") { ScanToolbarActions.chooseFile(for: session) }
                 .buttonStyle(.applePrimary)
                 .keyboardShortcut("o", modifiers: .command)

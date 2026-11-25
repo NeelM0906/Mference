@@ -63,7 +63,11 @@ public final class MailInboxModel {
     public var collapsedAccounts: Set<String> = []
     /// A text field is being edited: bare-letter shortcuts type letters then.
     public var isEditingDraft = false
-    public var isEditingText: Bool { isEditingDraft || isComposing }
+    /// Bare letters type text while a field is edited or the compose card is
+    /// expanded; a minimized card leaves C free to bring it back.
+    public var isEditingText: Bool { isEditingDraft || (composer.isOpen && !composer.isMinimized) }
+    /// Compose (C): the one new message, kept across sections.
+    public let composer: MailComposer
     public private(set) var errorMessage: String?
 
     @ObservationIgnored private var changeToken: String?
@@ -85,7 +89,8 @@ public final class MailInboxModel {
     private let now: @MainActor () -> Date
 
     public init(source: any MailSource, assistant: any AppleModelServicing,
-                drafter: MailReplyDrafter?, sender: any MailSending, broker: any PermissionBroker,
+                drafter: MailReplyDrafter?, composeWriter: MailComposeWriter? = nil, sender: any MailSending,
+                broker: any PermissionBroker,
                 mailApp: any MailAppControlling = SystemMailApp(), timeZone: TimeZone = .current, limit: Int = 300,
                 pollInterval: Duration = .seconds(3), now: @escaping @MainActor () -> Date = { .now },
                 onEventSuggested: @escaping @MainActor (ProposedEvent) -> Void = { _ in }) {
@@ -100,6 +105,7 @@ public final class MailInboxModel {
         self.pollInterval = pollInterval
         self.now = now
         self.onEventSuggested = onEventSuggested
+        composer = MailComposer(writer: composeWriter, sender: sender)
     }
 
     // MARK: Loading and following Mail
@@ -419,23 +425,8 @@ public final class MailInboxModel {
     /// Compose (C): a new message, sent through Mail only when the person
     /// clicks Send. Returns nil when sent, else the reason it was not.
     public func sendNewMessage(to: String, subject: String, body: String) async -> String? {
-        let recipient = to.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard AppleMailSender.isPlausibleAddress(recipient) else { return MailSendError.invalidRecipient.userMessage }
-        let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return "Write the message first." }
-        do {
-            try await sender.send(MailDraft(to: recipient, subject: subject.trimmingCharacters(in: .whitespaces),
-                                            body: text))
-            return nil
-        } catch let error as MailSendError {
-            return error.userMessage
-        } catch {
-            return "Mail could not send the message."
-        }
+        await MailComposer.send(to: to, subject: subject, body: body, via: sender)
     }
-
-    /// A compose window is open: C and E/Z type letters.
-    public var isComposing = false
 
     /// Only the Send button calls this.
     public func send() async {
