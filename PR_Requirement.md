@@ -123,10 +123,9 @@ prints it, the same way CI computes it. A change is **docs-only** when every
 path is Markdown or an issue template that nothing CI runs reads. Markdown
 under `.github/` and `App/` counts too, but any file under `Sources/`,
 `Tests/`, `Vendor/` or `Scripts/` is code, Markdown included. Every other path
-makes it a **code**
-change. That includes Swift and scripts under `App/` (the app links the engine
-package), `bringup-check.sh`, `Scripts/test.sh`, and the workflows and scripts
-under `.github/`.
+makes it a **code** change. That includes Swift and scripts under `App/` (the
+app links the engine package), `bringup-check.sh`, `Scripts/test.sh`, and the
+workflows and scripts under `.github/`.
 
 | Applies to | Gate | Command |
 |---|---|---|
