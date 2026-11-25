@@ -875,9 +875,9 @@ public enum ManifestReader {
     /// Families `MferenceRepack` can install but no forward runner can execute,
     /// mapped to the axes whose kernels are missing.
     ///
-    /// Holds `inkling2Loop` while `Inkling2ForwardRunner` is built. Remove an
-    /// entry only when `ForwardRunnerFactory` actually dispatches to the
-    /// family's runner.
+    /// Empty now that every installable family has a runner
+    /// (`inkling2Loop` runs on `Inkling2ForwardRunner`). Remove an entry only
+    /// when `ForwardRunnerFactory` actually dispatches to the family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
     /// keyed by its `manifest.arch.family` string and valued with the axis
