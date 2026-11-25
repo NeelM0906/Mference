@@ -236,11 +236,17 @@ public actor DownloadManager {
 
     /// Deletes an installed file (an image-understanding add-on the person
     /// removed), then tells `onInstalled` so the engine's catalog drops it.
-    /// A running download of it is discarded first.
-    public func remove(_ model: AppModel) async throws {
+    /// A running download of it is discarded first. `file` is the file the
+    /// engine actually paired, when known (it may carry the repository's name
+    /// rather than the download's); it must be in `destination`, since the
+    /// app never deletes a file it does not keep.
+    public func remove(_ model: AppModel, file paired: URL? = nil) async throws {
         await discard(model)
         guard let source = sources[model] else { throw DownloadError.noSource(model) }
-        let file = finalURL(source)
+        if let paired, !isInDestination(paired) {
+            throw DownloadError.file("\(paired.lastPathComponent) is outside the Mference models folder")
+        }
+        let file = paired ?? finalURL(source)
         if FileManager.default.fileExists(atPath: file.path) {
             do {
                 try FileManager.default.removeItem(at: file)
@@ -251,6 +257,12 @@ public actor DownloadManager {
         states[model] = nil
         await onInstalled(model)
         setState(state(of: model), for: model)
+    }
+
+    /// Whether `file` sits directly in the folder downloads go to.
+    public nonisolated func isInDestination(_ file: URL) -> Bool {
+        file.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent().path
+            == destination.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     // MARK: Download

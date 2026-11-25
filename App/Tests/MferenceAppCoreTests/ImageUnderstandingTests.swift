@@ -306,6 +306,62 @@ import UniformTypeIdentifiers
         #expect(small.imageUnderstandingSource(for: .deep) == nil)
     }
 
+    /// An engine whose catalog pairs Quick with `projector`.
+    static func engine(pairing projector: URL) -> EngineService {
+        let base = AppServices.fakeCatalog([.quick]).models[0]
+        let catalog = EngineCatalog(models: [base.pairing(EngineVisionProjector(location: projector, sizeBytes: 5))])
+        return EngineService(discover: { catalog }, makeHost: { catalog, observer in
+            EngineHost(catalog: catalog, backends: [FakeEngineBackend(engine: .llamaCpp)], observer: observer)
+        })
+    }
+
+    @Test @MainActor func removeDeletesTheProjectorTheEnginePaired() async throws {
+        let destination = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destination) }
+        // The repository's own name, not the name the app downloads to.
+        let paired = destination.appending(path: "mmproj-F16.gguf")
+        try Data([1, 2, 3, 4, 5]).write(to: paired)
+        let engine = Self.engine(pairing: paired)
+        #expect(await engine.models().first { $0.model == .quick }?.imageUnderstandingLocation == paired)
+        let images = DownloadManager(destination: destination, sources: DownloadSource.imageUnderstanding,
+                                     allowedHosts: [])
+        let library = ModelLibrary(engine: engine, downloads: DownloadManager(destination: destination, allowedHosts: []),
+                                   imageDownloads: images, settings: AppSettings(store: InMemorySettingsStore()),
+                                   memoryFit: MemoryFit(physicalMemory: 32 << 30), chipName: nil)
+        await library.refresh()
+        let addOn = try #require(library.row(for: .quick)?.imageUnderstanding)
+        #expect(addOn.isInstalled && addOn.isRemovable)
+        #expect(addOn.location == paired)
+        library.removeImageUnderstanding(.quick)
+        await waitUntil { !FileManager.default.fileExists(atPath: paired.path) }
+        #expect(!FileManager.default.fileExists(atPath: paired.path))
+        await engine.shutdown()
+    }
+
+    @Test @MainActor func aProjectorOutsideTheModelsFolderIsNeverDeleted() async throws {
+        let destination = temporaryDirectory(), elsewhere = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: destination)
+            try? FileManager.default.removeItem(at: elsewhere)
+        }
+        let external = elsewhere.appending(path: "mmproj-F16.gguf")
+        try Data([1, 2, 3]).write(to: external)
+        let engine = Self.engine(pairing: external)
+        let images = DownloadManager(destination: destination, sources: DownloadSource.imageUnderstanding,
+                                     allowedHosts: [])
+        let library = ModelLibrary(engine: engine, downloads: DownloadManager(destination: destination, allowedHosts: []),
+                                   imageDownloads: images, settings: AppSettings(store: InMemorySettingsStore()),
+                                   memoryFit: MemoryFit(physicalMemory: 32 << 30), chipName: nil)
+        await library.refresh()
+        let addOn = try #require(library.row(for: .quick)?.imageUnderstanding)
+        #expect(addOn.isInstalled && !addOn.isRemovable)
+        library.removeImageUnderstanding(.quick)
+        await #expect(throws: DownloadError.self) { try await images.remove(.quick, file: external) }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(FileManager.default.fileExists(atPath: external.path))
+        await engine.shutdown()
+    }
+
     @Test @MainActor func theOfflineSwitchStopsAddOnDownloadsAndTheLiveOfferingRemembers() async throws {
         let settings = AppSettings(store: InMemorySettingsStore())
         let downloads = DownloadManager(destination: temporaryDirectory(), sources: DownloadSource.imageUnderstanding,

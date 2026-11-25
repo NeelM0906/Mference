@@ -173,12 +173,17 @@ public struct ModelOption: Sendable, Hashable, Identifiable {
     public var seesImages: Bool
     /// Size of that add-on on disk, 0 when not installed.
     public var imageUnderstandingBytes: UInt64
+    /// The projector file the engine paired with the model (the app's
+    /// download, the repository's name, or one the person put beside the
+    /// model); nil when none.
+    public var imageUnderstandingLocation: URL?
 
     public var id: String { model.modelID }
 
     public init(model: AppModel, availability: ModelAvailability,
                 sizeBytes: UInt64 = 0, contextLength: Int = 0, location: URL? = nil,
-                seesImages: Bool = false, imageUnderstandingBytes: UInt64 = 0) {
+                seesImages: Bool = false, imageUnderstandingBytes: UInt64 = 0,
+                imageUnderstandingLocation: URL? = nil) {
         self.model = model
         self.availability = availability
         self.sizeBytes = sizeBytes
@@ -186,6 +191,7 @@ public struct ModelOption: Sendable, Hashable, Identifiable {
         self.location = location
         self.seesImages = seesImages
         self.imageUnderstandingBytes = imageUnderstandingBytes
+        self.imageUnderstandingLocation = imageUnderstandingLocation
     }
 }
 

@@ -53,6 +53,13 @@ import Testing
             state: .downloading(TransferProgress(completedBytes: 336, totalBytes: 672)), sizeBytes: 672))
         row.imageUnderstanding = ImageUnderstandingRow(state: .installed, sizeBytes: 672)
         #expect(LiveModelLibraryModel.entry(row).imageUnderstanding?.state == .ready)
+        row.imageUnderstanding = ImageUnderstandingRow(state: .installed, sizeBytes: 672,
+                                                       location: URL(fileURLWithPath: "/elsewhere/mmproj.gguf"),
+                                                       isRemovable: false)
+        #expect(LiveModelLibraryModel.entry(row).imageUnderstanding?.externalLocation == "/elsewhere/mmproj.gguf")
+        row.imageUnderstanding = ImageUnderstandingRow(state: .installed, sizeBytes: 672,
+                                                       location: URL(fileURLWithPath: "/models/mmproj.gguf"))
+        #expect(LiveModelLibraryModel.entry(row).imageUnderstanding?.externalLocation == nil)
         row.imageUnderstanding = nil
         #expect(LiveModelLibraryModel.entry(row).imageUnderstanding == nil)
     }

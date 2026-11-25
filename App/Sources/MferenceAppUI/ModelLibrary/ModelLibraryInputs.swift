@@ -97,10 +97,14 @@ nonisolated public struct ImageUnderstandingEntry: Sendable, Hashable {
     public var state: ModelEntryState
     /// Installed size, or the download size before install.
     public var sizeBytes: Int64
+    /// Where an installed projector the person added outside Mference's
+    /// models folder is; the library shows it instead of Remove.
+    public var externalLocation: String?
 
-    public init(state: ModelEntryState, sizeBytes: Int64) {
+    public init(state: ModelEntryState, sizeBytes: Int64, externalLocation: String? = nil) {
         self.state = state
         self.sizeBytes = sizeBytes
+        self.externalLocation = externalLocation
     }
 
     public static let title = "Image understanding"

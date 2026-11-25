@@ -90,10 +90,17 @@ public struct ImageUnderstandingRow: Sendable, Hashable {
     public var state: ModelLibraryRow.State
     /// On disk when installed, the download's size otherwise.
     public var sizeBytes: UInt64
+    /// The installed projector the engine paired, when installed.
+    public var location: URL?
+    /// The library may delete it: it is in the Mference models folder. One
+    /// the person put elsewhere stays theirs to remove.
+    public var isRemovable: Bool
 
-    public init(state: ModelLibraryRow.State, sizeBytes: UInt64) {
+    public init(state: ModelLibraryRow.State, sizeBytes: UInt64, location: URL? = nil, isRemovable: Bool = true) {
         self.state = state
         self.sizeBytes = sizeBytes
+        self.location = location
+        self.isRemovable = isRemovable
     }
 
     public static let title = "Image understanding"
@@ -244,7 +251,11 @@ public final class ModelLibrary {
         guard model.supportsImageUnderstanding, memoryFit.isOffered(model),
               let source = imageDownloads?.source(for: model) else { return nil }
         if option?.seesImages == true {
-            return ImageUnderstandingRow(state: .installed, sizeBytes: option?.imageUnderstandingBytes ?? source.sizeBytes)
+            let location = option?.imageUnderstandingLocation
+            return ImageUnderstandingRow(state: .installed,
+                                         sizeBytes: option?.imageUnderstandingBytes ?? source.sizeBytes,
+                                         location: location,
+                                         isRemovable: location.map { imageDownloads?.isInDestination($0) ?? false } ?? true)
         }
         let download = imageDownloadStates[model] ?? .notStarted
         if case .installed = download {
@@ -331,12 +342,16 @@ public final class ModelLibrary {
         Task { await imageDownloads.pause(model) }
     }
 
-    /// Removes the add-on (or its partial download). Pictures then reach the
-    /// model as text again. A model already loaded keeps seeing until it is
-    /// unloaded.
+    /// Removes the add-on the engine paired (or the partial download).
+    /// Pictures then reach the model as text again. A model already loaded
+    /// keeps seeing until it is unloaded. A projector outside the Mference
+    /// models folder is never deleted (`isRemovable` is false).
     public func removeImageUnderstanding(_ model: AppModel) {
         guard let imageDownloads else { return }
-        Task { try? await imageDownloads.remove(model) }
+        let addOn = row(for: model)?.imageUnderstanding
+        guard addOn?.isRemovable ?? true else { return }
+        let paired = addOn?.location
+        Task { try? await imageDownloads.remove(model, file: paired) }
     }
 
     public func pauseDownload(_ model: AppModel) {

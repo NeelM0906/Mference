@@ -127,7 +127,8 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
     static func imageUnderstanding(_ addOn: ImageUnderstandingRow) -> ImageUnderstandingEntry {
         let row = ModelLibraryRow(model: .quick, state: addOn.state, sizeBytes: addOn.sizeBytes,
                                   isDefault: false, fit: .fits)
-        return ImageUnderstandingEntry(state: state(row), sizeBytes: Int64(clamping: addOn.sizeBytes))
+        return ImageUnderstandingEntry(state: state(row), sizeBytes: Int64(clamping: addOn.sizeBytes),
+                                       externalLocation: addOn.isRemovable ? nil : addOn.location?.path)
     }
 
     static func state(_ row: ModelLibraryRow) -> ModelEntryState {

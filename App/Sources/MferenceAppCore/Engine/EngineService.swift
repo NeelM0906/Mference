@@ -157,7 +157,9 @@ public actor EngineService: EngineServicing {
                                contextLength: descriptor.contextLength,
                                location: descriptor.location,
                                seesImages: model.supportsImageUnderstanding && descriptor.visionProjector != nil,
-                               imageUnderstandingBytes: descriptor.visionProjector?.sizeBytes ?? 0)
+                               imageUnderstandingBytes: descriptor.visionProjector?.sizeBytes ?? 0,
+                               imageUnderstandingLocation: model.supportsImageUnderstanding
+                                   ? descriptor.visionProjector?.location : nil)
         }
     }
 

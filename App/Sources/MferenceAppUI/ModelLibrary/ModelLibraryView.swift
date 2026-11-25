@@ -399,6 +399,13 @@ struct ImageUnderstandingLine: View {
                     .font(MFFont.caption)
                     .foregroundStyle(MFColor.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let external = addOn.externalLocation {
+                    Text("Added outside Mference: \(external). Remove that file to turn it off.")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
                 if case .downloadFailed(let message) = addOn.state {
                     Text("Download failed: \(message)")
                         .font(MFFont.caption)
@@ -433,9 +440,11 @@ struct ImageUnderstandingLine: View {
     @ViewBuilder private var action: some View {
         switch addOn.state {
         case .ready, .loaded, .loading, .loadFailed:
-            Button("Remove", action: onRemove)
-                .buttonStyle(.mfQuiet)
-                .accessibilityLabel("Remove image understanding for \(entry.productName)")
+            if addOn.externalLocation == nil {
+                Button("Remove", action: onRemove)
+                    .buttonStyle(.mfQuiet)
+                    .accessibilityLabel("Remove image understanding for \(entry.productName)")
+            }
         case .downloading:
             Button("Pause", action: onPause)
                 .buttonStyle(.mfSecondary)
