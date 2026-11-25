@@ -123,16 +123,17 @@
     show(0);
   });
 
-  /* offline switch: flips every [data-flow] row in the same scope */
+  /* offline switch: flips every data-flow="out" row in the same scope; "local"
+     rows stay on the Mac and "system" rows (Apple Mail and Calendar sync) are
+     not the app's to pause */
   $$("[data-offline]").forEach(function (scope) {
     var sw = $(".switch", scope), sub = $("[data-offline-sub]", scope);
     function set(on) {
       sw.setAttribute("aria-checked", on ? "true" : "false");
       if (sub) sub.textContent = on ? sub.getAttribute("data-on") : sub.getAttribute("data-off");
       $$("[data-flow]", scope).forEach(function (row) {
-        var local = row.getAttribute("data-flow") === "local";
+        if (row.getAttribute("data-flow") !== "out") return;
         var tag = $(".tag", row), wire = $(".wire", row);
-        if (local) return;
         tag.textContent = on ? (row.getAttribute("data-off-label") || "Off") : row.getAttribute("data-on-label");
         tag.className = "tag " + (on ? "off" : "ask");
         if (wire) wire.className = "wire" + (on ? " cut" : "");
