@@ -4,8 +4,10 @@ import MferenceDesign
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Scan (mockup 07): drop or open a receipt, check the fields Apple's text
-/// recognition and the on-device model filled, save it, export CSV.
+/// Scan (mockup 07): drop, paste or open an image or PDF. Apple's text
+/// recognition reads it on this Mac; the full text shows for any scan, and
+/// what it is decides the rest: a receipt's fields (Add row, CSV), an event
+/// for Calendar, a business card for Contacts, a table as CSV.
 public struct ScanView: View {
     @Environment(ScanSession.self) private var environmentSession: ScanSession?
     private let injected: ScanSession?
@@ -30,13 +32,14 @@ struct ScanContent: View {
     @Bindable var session: ScanSession
     @State private var isDropTargeted = false
     @State private var exportMessage: String?
-    /// The image decoded once per file (bounded), not on every keystroke.
-    @State private var preview: (url: URL, image: CGImage)?
+    /// The page shown, decoded once per file and page (bounded), not on
+    /// every keystroke.
+    @State private var preview: (url: URL, page: Int, image: CGImage)?
 
     var body: some View {
         HStack(spacing: 0) {
             imagePane
-                .frame(width: 380)
+                .frame(width: ScanMetrics.imagePaneWidth)
                 .clipped()
             Rectangle().fill(MFColor.hairline).frame(width: 1)
             detailPane
@@ -44,7 +47,7 @@ struct ScanContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: session.imageURL) { loadPreview() }
+        .task(id: PreviewKey(url: session.imageURL, page: session.page)) { loadPreview() }
         // Cleared: no export or paste message is left on the empty screen.
         .onChange(of: session.phase) { _, phase in
             if phase == .empty { exportMessage = nil }
@@ -54,9 +57,11 @@ struct ScanContent: View {
 
     private func loadPreview() {
         guard let url = session.imageURL else { preview = nil; return }
-        if preview?.url == url { return }
-        // Decoded once per file and bounded to 2048 px, so it is cheap here.
-        if let image = VisionScanner.loadImage(at: url, maximumPixelSize: 2_048) { preview = (url, image) }
+        if preview?.url == url, preview?.page == session.page { return }
+        // Decoded once per page and bounded to 2048 px, so it is cheap here.
+        if let image = VisionScanner.loadImage(at: url, page: session.page, maximumPixelSize: 2_048) {
+            preview = (url, session.page, image)
+        }
     }
 
     // MARK: Image
@@ -64,7 +69,7 @@ struct ScanContent: View {
     private var imagePane: some View {
         ZStack {
             StripedBackground()
-            if let preview, preview.url == session.imageURL {
+            if let preview, preview.url == session.imageURL, preview.page == session.page {
                 Image(decorative: preview.image, scale: 1)
                     .resizable()
                     .interpolation(.high)
@@ -79,10 +84,11 @@ struct ScanContent: View {
                         .font(MFFont.largeTitle)
                         .foregroundStyle(MFColor.tertiary)
                         .accessibilityHidden(true)
-                    Text("Drop a receipt or document here")
+                    Text("Drop a document or photo here")
                         .font(MFFont.bodyEmphasis)
                         .foregroundStyle(MFColor.ink)
-                    Text("PNG, JPEG, HEIC or PDF. Read on this Mac.")
+                    Text("Receipts, letters, flyers, business cards, tables. PNG, JPEG, HEIC or PDF, read on this Mac.")
+                        .multilineTextAlignment(.center)
                         .font(MFFont.callout)
                         .foregroundStyle(MFColor.secondary)
                     Button("Open file", action: openFile)
@@ -93,6 +99,7 @@ struct ScanContent: View {
                 }
                 .padding(MFSpacing.xl)
             }
+            if session.pageCount > 1, session.imageURL != nil { pageControl }
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: MFRadius.l)
                     .strokeBorder(MFColor.accent, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
@@ -112,7 +119,32 @@ struct ScanContent: View {
             return true
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Drop area for receipts and documents")
+        .accessibilityLabel("Drop area for documents and photos")
+    }
+
+    /// "Page 2 of 5" under a PDF's page.
+    private var pageControl: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: MFSpacing.s) {
+                Button { session.showPage(session.page - 1) } label: { Image(systemName: "chevron.left") }
+                    .disabled(session.page == 0)
+                    .accessibilityLabel("Previous page")
+                Text("Page \(session.page + 1) of \(session.pageCount)")
+                    .font(MFFont.callout)
+                    .foregroundStyle(MFColor.ink)
+                    .monospacedDigit()
+                Button { session.showPage(session.page + 1) } label: { Image(systemName: "chevron.right") }
+                    .disabled(session.page >= session.pageCount - 1)
+                    .accessibilityLabel("Next page")
+            }
+            .buttonStyle(.appleQuiet)
+            .padding(.horizontal, MFSpacing.s)
+            .padding(.vertical, MFSpacing.xxs)
+            .background(Capsule().fill(MFColor.surface))
+            .overlay(Capsule().strokeBorder(MFColor.hairlineStrong))
+            .padding(.bottom, MFSpacing.m)
+        }
     }
 
     /// ⌘V: an image file's URL, or image data, from the clipboard.
@@ -163,9 +195,10 @@ struct ScanContent: View {
     private var detailPane: some View {
         switch session.phase {
         case .empty:
-            AppleEmptyState(systemImage: "receipt", title: "Scan a receipt",
-                            message: "Apple's built-in text recognition reads it on this Mac and fills the fields. "
-                                + "You check them before anything is saved.")
+            AppleEmptyState(systemImage: "doc.text.viewfinder", title: "Scan a document",
+                            message: "Apple's built-in text recognition reads it on this Mac and shows all of its text. "
+                                + "Receipts, events, business cards and tables get their own next step; "
+                                + "you check everything first.")
         case .reading:
             VStack(spacing: MFSpacing.m) {
                 ProgressView().controlSize(.regular)
@@ -195,34 +228,62 @@ struct ScanContent: View {
                 Text(session.title)
                     .font(MFFont.title)
                     .foregroundStyle(MFColor.ink)
+                    .lineLimit(2)
                     .accessibilityAddTraits(.isHeader)
                 AppleChip(text: "Read on this Mac", tone: .success)
+                if session.isPreparing { ProgressView().controlSize(.small) }
+                Spacer(minLength: MFSpacing.s)
+                ScanReadAsMenu(session: session)
             }
             Text(explanation)
                 .font(MFFont.body)
                 .foregroundStyle(MFColor.secondary)
                 .lineSpacing(MFLineSpacing.normal)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(spacing: 0) {
-                ForEach(ScanFieldKey.allCases) { key in
-                    fieldRow(key)
-                    Rectangle().fill(MFColor.hairlineFaint).frame(height: 1)
+            switch session.kind {
+            case .receipt:
+                VStack(spacing: 0) {
+                    ForEach(ScanFieldKey.allCases) { key in
+                        fieldRow(key)
+                        Rectangle().fill(MFColor.hairlineFaint).frame(height: 1)
+                    }
                 }
+                saveCard
+            case .event:
+                ScanEventCard(session: session)
+            case .contact:
+                ScanContactCard(session: session)
+            case .table:
+                ScanTablesCard(session: session) { exportMessage = $0 }
+            case .document:
+                EmptyView()
             }
-            saveCard
-            if let exportMessage {
-                Text(exportMessage)
+            ForEach([exportMessage, session.notice].compactMap { $0 }, id: \.self) { message in
+                Text(message)
                     .font(MFFont.callout)
                     .foregroundStyle(MFColor.secondary)
             }
+            ScanFullTextCard(session: session) { exportMessage = $0 }
         }
     }
 
     private var explanation: String {
-        let reader = "Apple’s built-in text recognition read the receipt"
-        let filler = session.filledByLabel.map { "; \($0 == "Apple on-device" ? "the on-device model" : $0) filled the fields" }
-            ?? "; the fields come from the printed text"
-        return reader + filler + ". Check them, then save the row. Fields marked Check need a look."
+        let read = "Apple’s built-in text recognition read it on this Mac"
+        switch session.kind {
+        case .receipt:
+            let filler = session.filledByLabel.map { "; \($0 == "Apple on-device" ? "the on-device model" : $0) filled the fields" }
+                ?? "; the fields come from the printed text"
+            return "Apple’s built-in text recognition read the receipt" + filler
+                + ". Check them, then save the row. Fields marked Check need a look."
+        case .event:
+            return read + " and found an event. Check it, then send it to Calendar, where you add it."
+        case .contact:
+            return read + " and found a business card. Check the details, then open it in Contacts."
+        case .table:
+            return read + " and found a table. Export it as CSV for Numbers or Excel."
+        case .document:
+            return read + ". Copy the text, save it to Notes or export it."
+        }
     }
 
     private func fieldRow(_ key: ScanFieldKey) -> some View {
@@ -232,7 +293,7 @@ struct ScanContent: View {
             Text(key.label)
                 .font(MFFont.body)
                 .foregroundStyle(MFColor.secondary)
-                .frame(width: 140, alignment: .leading)
+                .frame(width: ScanMetrics.fieldLabelWidth, alignment: .leading)
             AppleTextField(title: key.label, text: Binding(
                 get: { session.fields[key]?.value ?? "" },
                 set: { session.setValue($0, for: key) }))
@@ -249,7 +310,7 @@ struct ScanContent: View {
                 .accessibilityHint(needsCheck ? "Needs checking" : "Read with confidence")
             AppleChip(text: needsCheck ? ScanFieldConfidence.check.label : ScanFieldConfidence.sure.label,
                       tone: needsCheck ? .preview : .success)
-                .frame(width: 84, alignment: .leading)
+                .frame(width: ScanMetrics.chipWidth, alignment: .leading)
                 .accessibilityHidden(true)
         }
         .padding(.vertical, MFSpacing.s + MFSpacing.xxs)
@@ -332,7 +393,9 @@ struct ScanToolbarActions: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Capture screen area, coming later")
-            Button("Clear") { session.reset() }
+            // An icon, so the section pills keep their names at the
+            // window's usual width.
+            Button { session.reset() } label: { Image(systemName: "xmark.circle") }
                 .buttonStyle(.appleSecondary)
                 .disabled(session.phase == .empty)
                 .help("Clear this scan and start again")
@@ -340,7 +403,7 @@ struct ScanToolbarActions: View {
             Button("Open file") { ScanToolbarActions.chooseFile(for: session) }
                 .buttonStyle(.applePrimary)
                 .keyboardShortcut("o", modifiers: .command)
-                .help("Read a receipt or document on this Mac")
+                .help("Read a document, receipt, card or photo on this Mac")
         }
     }
 
@@ -352,4 +415,10 @@ struct ScanToolbarActions: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         session.open(url)
     }
+}
+
+/// What the preview shows: a file and its page.
+private struct PreviewKey: Hashable {
+    var url: URL?
+    var page: Int
 }

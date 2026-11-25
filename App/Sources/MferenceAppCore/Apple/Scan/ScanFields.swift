@@ -217,9 +217,10 @@ public enum ScanFormat {
 public enum ScanHighlights {
     public static let keys: [ScanFieldKey] = [.merchant, .date, .tax, .total]
 
-    public static func boxes(fields: ScanFields, reading: ScanReading) -> [ScanFieldKey: CGRect] {
+    /// Boxes on `page` only, the page the screen shows.
+    public static func boxes(fields: ScanFields, reading: ScanReading, page: Int = 0) -> [ScanFieldKey: CGRect] {
         var result: [ScanFieldKey: CGRect] = [:]
-        let lines = reading.lines.filter { $0.box.width > 0 && $0.box.height > 0 }
+        let lines = reading.lines.filter { $0.page == page && $0.box.width > 0 && $0.box.height > 0 }
         for key in keys {
             guard let value = fields.value(key) else { continue }
             let match: ScanLine?

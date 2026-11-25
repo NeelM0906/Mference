@@ -163,7 +163,7 @@ struct SectionContent: View {
     }
 
     /// Where chat hands off: Settings (Memory, the model library) and other
-    /// sections (suggestion chips such as "Scan a receipt").
+    /// sections (suggestion chips such as "Scan a document").
     private var chatActions: ChatActions {
         ChatActions(openMemorySettings: { shell?.openSettings(.memory) },
                     openModelLibrary: { shell?.openSettings(.models, showingLibrary: true) },

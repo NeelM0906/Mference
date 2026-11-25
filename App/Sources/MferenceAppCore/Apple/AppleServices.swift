@@ -46,7 +46,8 @@ public final class AppleServices {
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,
                              scan: ScanSession(scanner: VisionScanner(), assistant: assistant,
-                                               context: container.mainContext),
+                                               context: container.mainContext,
+                                               onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) }),
                              calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
                              weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(
@@ -77,7 +78,9 @@ public final class AppleServices {
         return AppleServices(assistant: assistant,
                              scan: ScanSession(scanner: PreviewScanner(), assistant: assistant,
                                                context: container.mainContext,
-                                               imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans")),
+                                               imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans"),
+                                               onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) },
+                                               openFile: { _ in }),
                              calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker),
                              weekAsk: WeekAskModel(calendar: calendar, answerer: WeekAnswerer(picker: WeekModelPicker(engine: engine))))

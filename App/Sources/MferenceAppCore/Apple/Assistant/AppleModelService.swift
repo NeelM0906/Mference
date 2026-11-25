@@ -33,6 +33,11 @@ public protocol AppleModelServicing: Sendable {
     /// `allowFallback` false asks Apple's model only (automatic, on open).
     func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone, allowFallback: Bool)
         async throws -> AssistantResult<MailEventSuggestion?>
+    /// What a scan is, when the text alone does not say. `allowFallback`
+    /// false (automatic, while reading a scan) asks Apple's model only.
+    func classifyScan(_ recognizedText: String, allowFallback: Bool) async throws -> AssistantResult<ScanKind>
+    /// A business card's name, company and job title; the person checks them.
+    func fillContact(from recognizedText: String, allowFallback: Bool) async throws -> AssistantResult<ContactDraft>
 }
 
 /// Apple's on-device model first; Quick through the engine when Apple
@@ -166,6 +171,29 @@ public struct AppleModelService: AppleModelServicing {
             guard AssistantAnswerParser.string(object["title"]) != nil else { return .some(nil) }
             guard let suggestion = MailEventSuggestion(json: object, timeZone: timeZone) else { return nil }
             return .some(suggestion)
+        }
+    }
+
+    public func classifyScan(_ recognizedText: String, allowFallback: Bool) async throws -> AssistantResult<ScanKind> {
+        let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.scanKind),
+                                       prompt: AssistantPrompts.textPrompt("Say what this scanned document is.",
+                                                                           recognizedText, limit: 2_000),
+                                       maximumTokens: 24)
+        return try await run(request, models: await candidates(allowFallback: allowFallback)) { answer in
+            guard let object = AssistantAnswerParser.jsonObject(in: answer),
+                  let value = AssistantAnswerParser.string(object["kind"])?.lowercased() else { return nil }
+            return ScanKind(rawValue: value)
+        }
+    }
+
+    public func fillContact(from recognizedText: String, allowFallback: Bool) async throws
+        -> AssistantResult<ContactDraft> {
+        let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.contactFields),
+                                       prompt: AssistantPrompts.textPrompt("Fill the fields from this business card.",
+                                                                           recognizedText, limit: 1_500),
+                                       maximumTokens: 80)
+        return try await run(request, models: await candidates(allowFallback: allowFallback)) { answer in
+            AssistantAnswerParser.jsonObject(in: answer).map(ContactDraft.init(json:))
         }
     }
 

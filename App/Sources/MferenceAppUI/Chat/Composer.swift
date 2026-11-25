@@ -281,7 +281,7 @@ struct SuggestionChips: View {
             chip("Plan my week") {
                 model.draft = "Help me plan my week. Here is what I have on: "
             }
-            chip("Scan a receipt") {
+            chip("Scan a document") {
                 actions.openSection(.scan)
             }
         }

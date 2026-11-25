@@ -9,7 +9,7 @@ public struct ChatActions {
     public var openMemorySettings: @MainActor () -> Void
     /// "Manage models" in the picker: the model library.
     public var openModelLibrary: @MainActor () -> Void
-    /// Suggestion chips that belong to another screen ("Scan a receipt").
+    /// Suggestion chips that belong to another screen ("Scan a document").
     public var openSection: @MainActor (AppSection) -> Void
 
     public init(openMemorySettings: @escaping @MainActor () -> Void = {},
