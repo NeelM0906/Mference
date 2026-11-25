@@ -226,7 +226,10 @@ import Testing
 
     @Test func clockTimesAndRangesHoldWhatTheScheduleNames() {
         let context = Self.context()
-        #expect(context.clockTimes.isSuperset(of: [8 * 60, 9 * 60, 13 * 60 + 30, 17 * 60, 0]))
+        // Typed up front: Swift 6.3 cannot type-check the untyped literal
+        // inside `#expect` in reasonable time.
+        let named: Set<Int> = [8 * 60, 9 * 60, 13 * 60 + 30, 17 * 60, 0]
+        #expect(context.clockTimes.isSuperset(of: named))
         #expect(!context.clockTimes.contains(21 * 60))
         #expect(context.clockRanges.contains(ClockRange(start: 13 * 60, end: 13 * 60 + 30)))
         #expect(context.clockRanges.contains(ClockRange(start: 10 * 60, end: 12 * 60)))
