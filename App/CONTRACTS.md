@@ -132,3 +132,12 @@ Apple's on-device model (2026-11-24): where FoundationModels reports the
 row `seesImages`, and `FoundationChatModel` sends a user turn's pictures as
 image attachments ahead of its text, in history turns too. Nothing to
 download, so the chat never offers image understanding for it.
+
+## AppModel: Bonsai 2.5 27B (2026-11-25)
+
+`AppModel.bonsai27b` (`bonsai-2.5-27b-q2_0`, `EngineProductSlot.bonsai27b`):
+PrismML's Ternary Bonsai 2.5 27B, llama.cpp's stock `Q2_0` with its MTP head,
+in the "Also on this Mac" group. It follows Deep's rules: offered only on Macs
+with more than 16 GB, downloaded after approval
+(`DownloadSource.bonsai27b`), and image understanding through its own Q8_0
+projector (`DownloadSource.bonsai27bImageUnderstanding`).

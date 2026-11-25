@@ -59,7 +59,7 @@ import UniformTypeIdentifiers
     }
 
     @Test func onlyQuickAndDeepHaveImageUnderstanding() {
-        #expect(AppModel.allCases.filter(\.supportsImageUnderstanding) == [.quick, .deep])
+        #expect(AppModel.allCases.filter(\.supportsImageUnderstanding) == [.quick, .deep, .bonsai27b])
         // A native model is never reported as seeing, whatever its catalog says.
         let options = EngineService.options(catalog: AppServices.fakeCatalog([.maple], seeing: [.maple]),
                                             status: EngineHostStatus(), physicalMemory: 64 << 30)

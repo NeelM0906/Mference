@@ -84,8 +84,8 @@ App/Scripts/searxng/prepare.sh --fetch   # once: fetches and verifies the bundle
 App/Scripts/run.sh                       # builds, bundles and opens the app
 ```
 
-On first run the app helps you pick a model. Quick and Deep download from
-inside the app into `~/llm-models/gguf/`. The other five are installed from
+On first run the app helps you pick a model. Quick, Deep and Bonsai download
+from inside the app into `~/llm-models/gguf/`. The other five are installed from
 the terminal, and the app finds them in `~/llm-models` on its own:
 
 ```sh

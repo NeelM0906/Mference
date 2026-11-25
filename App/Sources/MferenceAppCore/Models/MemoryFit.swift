@@ -51,6 +51,7 @@ public struct MemoryFit: Sendable, Hashable {
         switch model {
         case .quick: (1.0, 1_536 << 20)
         case .deep: (1.0, 2_560 << 20)
+        case .bonsai27b: (1.0, 2_560 << 20)
         case .inkling2Mini: (1.0, 2_048 << 20)
         case .qwen36: (0.3, 2_048 << 20)
         case .minicpm5: (1.0, 1_024 << 20)

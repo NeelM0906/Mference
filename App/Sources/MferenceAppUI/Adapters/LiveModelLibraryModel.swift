@@ -158,8 +158,9 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         switch row.fit {
         case .tooLarge: return .tooLarge("Needs more memory than this Mac has.")
         case .fits, .tight:
-            // Deep is offered only above 16 GB and only after approval (L4).
-            return row.model == .deep && row.state != .installed ? .offerWithApproval : .fits
+            // Deep and Bonsai are offered only above 16 GB and only after approval (L4).
+            return (row.model == .deep || row.model == .bonsai27b) && row.state != .installed
+                ? .offerWithApproval : .fits
         }
     }
 
@@ -167,6 +168,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         switch model {
         case .quick: "Qwen3.5 4B"
         case .deep: "Qwen3.8 27B"
+        case .bonsai27b: "Ternary Qwen3.8 27B"
         case .inkling2Mini: "Mini"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
@@ -179,6 +181,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         switch model {
         case .quick: "Unsloth UD-Q4_K_XL"
         case .deep: "ISTA GSQ-RCO IQ3_S with MTP"
+        case .bonsai27b: "PrismML ternary Q2_0 with MTP"
         case .inkling2Mini: "Mference install of Unsloth UD-Q4_K_XL"
         case .qwen36: "Mference install, experts stream from the SSD"
         case .minicpm5: "Mference install, 4-bit"
