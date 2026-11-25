@@ -2,7 +2,7 @@
 
 extension ArchConfig {
     /// The retired Gemma 4 26B-A4B baseline's geometry (see
-    /// `docs/RETIRED_FAMILIES.md`), kept as a synthetic shape for tests of
+    /// AGENTS.md), kept as a synthetic shape for tests of
     /// shared kernels and KV storage: 30 layers of 1024-token sliding-window
     /// attention with a full-attention layer every sixth, K = V on full
     /// layers, and every family-extension axis at its `ArchConfig.init`

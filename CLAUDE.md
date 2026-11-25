@@ -61,7 +61,7 @@ This section is the architecture overview. The remaining references are
 design specs, experiment record, release records and per-family dossiers were
 removed on 2026-11-19 to keep the docs lean; read them from git history
 (`mference-app` before that date) when you need the background. Retired
-families are listed in the README.
+families are listed in [AGENTS.md](AGENTS.md).
 
 ### Targets
 
@@ -189,7 +189,7 @@ schema, `AppSection`, `PermissionBroker`); changing one is its own PR.
 | Target | Path | Notes |
 | --- | --- | --- |
 | `MferenceDesign` | `App/Sources/MferenceDesign` | Tokens (`MFColor`, `MFFont`, `MFSpacing`, `MFRadius`, `MFLineSpacing`) and components. Views use tokens only. |
-| `MferenceAppCore` | `App/Sources/MferenceAppCore` | No SwiftUI views. `Engine/` (`EngineServicing`, `EngineService` over `EngineHost`), `Services/AppServices` (the one composition root), `Models/` (library, downloads, memory fit), `Chat/`, `Web/` (bundled SearXNG, tools, citations), `Apple/` (Vision, EventKit, Mail, FoundationModels), `Find/` (content search: FTS5 + vector index, extractors, photo/video/audio sampling, crawler, searcher), `Persistence/` (SwiftData), `Permissions/`, `Memory/`, `Settings/`. Only `Engine/` imports `MferenceEngine` or `Mference`. |
+| `MferenceAppCore` | `App/Sources/MferenceAppCore` | No SwiftUI views. `Engine/` (`EngineServicing`, `EngineService` over `EngineHost`), `Services/AppServices` (the one composition root), `Models/` (library, downloads, memory fit), `Chat/`, `Web/` (bundled SearXNG, tools, citations), `Apple/` (Vision, EventKit, Mail, FoundationModels), `Find/` (content search: FTS5 + vector index, extractors, photo/video/audio sampling, crawler, searcher), `Persistence/` (SwiftData), `Permissions/`, `Memory/`, `Settings/`. Only `Engine/` and the `Services/AppServices` composition root import `MferenceEngine` or `Mference`. |
 | `MferenceAppUI` | `App/Sources/MferenceAppUI` | SwiftUI screens, one folder per mockup board; `Shell/` routes `AppSection`s; `Adapters/` (`ScreenModels.live`) maps core services to view-facing protocols. |
 | `MferenceMac` | `App/Sources/MferenceMac` | `@main`: sets `AGX_RELAX_CDM_CTXSTORE_TIMEOUT` before any Metal device exists; `AppRuntime` must build exactly one `AppServices.live` and shut it down in order on quit (web first, then the engine). |
 | `MferenceSmoke` | `App/Sources/MferenceSmoke` | Real-model smoke through the app's engine path; refuses to run without `MFERENCE_APP_SMOKE=1`. |

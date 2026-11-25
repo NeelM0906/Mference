@@ -503,7 +503,7 @@ public enum ManifestReader {
 
     /// What an absent family-extension key in `manifest.arch` means: the
     /// original install format's values (Gemma 4's, a family retired on
-    /// 2026-11-18; see `docs/RETIRED_FAMILIES.md`). They equal the
+    /// 2026-11-18; AGENTS.md lists the retired families). They equal the
     /// `ArchConfig.init` defaults and must not change, or kept installs that
     /// omit a key would validate against different values.
     private struct AbsentFieldDefaults {
@@ -913,7 +913,7 @@ public enum ManifestReader {
     ]
 
     /// `arch.family` values of the families retired on 2026-11-18 (see
-    /// `docs/RETIRED_FAMILIES.md`). Their installs on disk are left alone;
+    /// AGENTS.md). Their installs on disk are left alone;
     /// loading one fails with `ModelError.retiredFamily` instead of "unknown
     /// arch.family", so the library and the CLI can say what happened.
     public static let retiredFamilies: Set<String> = [
@@ -954,7 +954,7 @@ public enum ManifestReader {
               size <= maxBytes,
               let data = try? Data(contentsOf: manifestURL),
               let peek = try? JSONDecoder().decode(Peek.self, from: data) else { return nil }
-        let notServed = "(docs/RETIRED_FAMILIES.md); the install is left on disk but not served"
+        let notServed = "(see AGENTS.md); the install is left on disk but not served"
         if let id = peek.modelID, let name = retiredCheckpoints[id] {
             return RetiredInstall(identifier: id,
                                   detail: "\(id) is a \(name) checkpoint, a retired family \(notServed)")
