@@ -16,7 +16,7 @@ import Testing
         #expect(AppModel(modelID: "inkling-2-mini-ud-q4_k_xl") == .inkling2Mini)
         #expect(model.isEngineModel && AppModel.engineModels.contains(model))
         #expect(model.group == .alsoOnThisMac)
-        #expect(AppModel.allCases.filter { $0.group == .alsoOnThisMac } == [.inkling2Mini, .qwen36, .minicpm5, .maple])
+        #expect(AppModel.allCases.filter { $0.group == .alsoOnThisMac } == [.inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple])
         #expect(AppModel.allCases.filter { $0.group == .recommended } == [.quick, .deep])
         #expect(model.engineLabel == "Mference" && model.isPreview && model.supportsThinking)
         #expect(model.name == "Inkling 2 Mini" && model.shortName == "Inkling 2" && model.detail == "Mini")

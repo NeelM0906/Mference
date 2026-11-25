@@ -19,7 +19,7 @@ public enum ModelGroup: String, Sendable, Hashable, Codable, CaseIterable {
 
 /// The product models the app offers (decision L1), in picker order.
 public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identifiable {
-    case quick, deep, inkling2Mini, qwen36, minicpm5, maple
+    case quick, deep, inkling2Mini, qwen36, minicpm5, minicpm5_1b, maple
     /// Apple's on-device model. Not an engine model: chat routes it to
     /// FoundationModels (`AppleChatRouting`), and the engine, the model
     /// library and downloads never list it (`engineModels`).
@@ -33,6 +33,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .inkling2Mini: "inkling-2-mini-ud-q4_k_xl"
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
+        case .minicpm5_1b: "minicpm5-1b-mlx-4bit"
         case .maple: "maple-preview-2bit-mlx"
         case .apple: "apple-foundation-model"
         }
@@ -54,7 +55,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     public var group: ModelGroup {
         switch self {
         case .quick, .deep: .recommended
-        case .inkling2Mini, .qwen36, .minicpm5, .maple: .alsoOnThisMac
+        case .inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple: .alsoOnThisMac
         case .apple: .builtIntoMacOS
         }
     }
@@ -67,6 +68,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .inkling2Mini: "Inkling 2 Mini"
         case .qwen36: "Qwen 3.6"
         case .minicpm5: "MiniCPM5"
+        case .minicpm5_1b: "MiniCPM5"
         case .maple: "Maple"
         case .apple: "Apple Intelligence"
         }
@@ -80,6 +82,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .inkling2Mini: "Inkling 2"
         case .qwen36: "Qwen 3.6"
         case .minicpm5: "MiniCPM5"
+        case .minicpm5_1b: "MiniCPM5 1B"
         case .maple: "Maple"
         case .apple: AppleModelLabels.current.shortName
         }
@@ -93,6 +96,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .inkling2Mini: "Mini"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
+        case .minicpm5_1b: "1B"
         case .maple: "Preview"
         case .apple: AppleModelLabels.current.detail
         }
@@ -106,6 +110,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .inkling2Mini: "Deep-tier mixture-of-experts model."
         case .qwen36: "Large mixture-of-experts. Experts stream from the SSD."
         case .minicpm5: "Very small and quick. Good for short replies."
+        case .minicpm5_1b: "The smallest and fastest. Good for quick, short replies."
         case .maple: "Experimental model."
         case .apple: "Apple’s on-device model. Short chats and quick rewrites. Nothing to download."
         }
@@ -115,7 +120,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     public var engineLabel: String {
         switch self {
         case .quick, .deep: "llama.cpp"
-        case .inkling2Mini, .qwen36, .minicpm5, .maple: "Mference"
+        case .inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple: "Mference"
         case .apple: "Apple"
         }
     }
@@ -127,7 +132,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     public var supportsThinking: Bool {
         switch self {
         case .quick, .deep, .inkling2Mini, .qwen36: true
-        case .minicpm5, .maple, .apple: false
+        case .minicpm5, .minicpm5_1b, .maple, .apple: false
         }
     }
 }
