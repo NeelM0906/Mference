@@ -4,8 +4,8 @@ import Synchronization
 
 /// Find's live embedder: EmbeddingGemma 2 through the engine's
 /// `LlamaEmbedder`: the text model, and with `mediaModelPath` its image and
-/// audio encoders. Only `Engine/` imports the engine, so Find reaches the
-/// model through this type.
+/// audio encoders. Only `Engine/` and the `AppServices` composition root
+/// import the engine, so Find reaches the model through this type.
 ///
 /// The model loads on first use and `unload()` frees it (Find calls it when
 /// idle); the media encoders load only when a photo, frame or sound is

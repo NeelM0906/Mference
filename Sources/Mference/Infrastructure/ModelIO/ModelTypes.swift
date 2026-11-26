@@ -3,8 +3,8 @@ import Metal
 
 /// Model family discriminator. Selects the tensor-name contract, the layer
 /// graph shape, and family-specific kernel behavior. Stored in
-/// `manifest.json -> arch.family`. The families retired on 2026-11-18 (see
-/// `docs/RETIRED_FAMILIES.md`) are not cases: their installs fail to load
+/// `manifest.json -> arch.family`. The families retired on 2026-11-18 (listed
+/// in AGENTS.md) are not cases: their installs fail to load
 /// as an unknown family.
 public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     case qwen36 = "qwen36"
@@ -1290,10 +1290,10 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
         case .retiredCheckpoint(let modelID):
             let name = ManifestReader.retiredCheckpoints[modelID] ?? "a retired"
             return "checkpoint \(modelID) (\(name)) was retired on 2026-11-18 and this runtime no longer loads it "
-                + "(see docs/RETIRED_FAMILIES.md); the install on disk is untouched"
+                + "(see the retired families in AGENTS.md); the install on disk is untouched"
         case .retiredFamily(let family):
             return "family \(family) was retired on 2026-11-18 and this runtime no longer loads it "
-                + "(see docs/RETIRED_FAMILIES.md); the install on disk is untouched"
+                + "(see the retired families in AGENTS.md); the install on disk is untouched"
         }
     }
 }

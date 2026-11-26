@@ -19,7 +19,8 @@ Adding an implementation behind a contract needs no approval.
 Rules that follow from them:
 
 - Views and view models import `MferenceAppCore`, `MferenceDesign` and
-  SwiftUI only. Only `MferenceAppCore/Engine` imports `MferenceEngine` or
+  SwiftUI only. Only `MferenceAppCore/Engine` and the composition root
+  (`MferenceAppCore/Services/AppServices.swift`) import `MferenceEngine` or
   `Mference`.
 - Only `MferenceAppCore/Speech` imports `FluidAudio`, uses AVFoundation
   capture (`AVAudioEngine` input, `AVCaptureDevice`) or creates Core Audio

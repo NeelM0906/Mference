@@ -260,9 +260,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// fingerprint (`GGUFSourcePin.fingerprint`), not an index hash.
     ///
     /// Installed bytes: 15,829,303,296 of expert blobs (per-layer strides)
-    /// plus about 1.82 GB resident, tokenizer sidecars and metadata.
-    /// `ManifestReader.familiesWithoutRunner` refuses the install at load
-    /// until `Inkling2ForwardRunner` lands.
+    /// plus about 1.82 GB resident, tokenizer sidecars and metadata. It runs
+    /// on `Inkling2ForwardRunner`.
     public static let inkling2Mini = SupportedModelSource(
         name: "inkling2mini",
         displayName: "Inkling 2 Mini, Unsloth UD-Q4_K_XL GGUF",

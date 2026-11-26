@@ -92,8 +92,15 @@ import Testing
         #expect(throws: ModelError.retiredFamily(family: "gemma4")) {
             _ = try ManifestReader.peekFamily(directoryURL: legacy)
         }
-        #expect(ModelError.retiredFamily(family: "flint").description
-            .contains("RETIRED_FAMILIES.md"))
+        // The message points at a document that exists: AGENTS.md lists the
+        // retired families (there is no docs/RETIRED_FAMILIES.md).
+        #expect(ModelError.retiredFamily(family: "flint").description.contains("AGENTS.md"))
+        #expect(ModelError.retiredCheckpoint(modelID: "x").description.contains("AGENTS.md"))
+        #expect(!ModelError.retiredFamily(family: "flint").description.contains("RETIRED_FAMILIES"))
+        let flint = try Self.writeManifest(family: "flint")
+        defer { try? FileManager.default.removeItem(at: flint) }
+        let detail = ManifestReader.retiredInstall(manifestURL: flint.appendingPathComponent("manifest.json"))?.detail
+        #expect(detail?.contains("AGENTS.md") == true)
     }
 
     /// Swift-Qwen3.8 carries the kept `qwen38` family, so `peekFamily` must

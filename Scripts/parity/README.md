@@ -2,7 +2,7 @@
 
 Generators for the committed reference-parity goldens under
 `Tests/Mference/Fixtures/`. Generators for the
-retired families (see the README), and the GGUF quant-table
+retired families (listed in AGENTS.md), and the GGUF quant-table
 generator whose runtime source went with them, were removed.
 
 ## minicpm5 reference-parity goldens
