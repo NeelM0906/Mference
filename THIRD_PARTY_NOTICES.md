@@ -82,10 +82,10 @@ Maple Preview: revision `361db5da5e74ff6fcdd852d478e1f266ce11013a` of
 [`deepgrove/maple-preview-2bit-mlx`](https://huggingface.co/deepgrove/maple-preview-2bit-mlx).
 The installer verifies its source-index SHA-256
 `56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95`.
-That pinned repository revision does not declare a license for the checkpoint
-weights in a model card, LICENSE file, or Hub license tag. Downloading, using,
-or redistributing those weights therefore requires separately establishing
-that the necessary rights have been obtained; Mference makes no grant of
+The original checkpoint, [`deepgrove/maple-preview`](https://huggingface.co/deepgrove/maple-preview),
+declares the MIT license. The pinned 2-bit revision has no model card; the
+repository's current main branch adds one declaring `license: mit`, as read
+on 2026-11-25. Those terms govern the weights, and Mference makes no grant of
 rights to them.
 
 Inkling 2 Mini: revision `45fd08764f2b0bf16b03a5483a80e5c7aaec8772` of
