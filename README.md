@@ -37,7 +37,7 @@
   and the model fills in merchant, date, total and tax for you to check.
 - **Search the web when you need it.** Turn it on for a chat and answers come
   back with numbered sources, through a search engine bundled inside the app.
-  Offline mode turns it off, along with every download.
+  Offline mode turns it off, along with chat and speech model downloads.
 - **Calendar and to-dos, in step with your Mac.** Your Mac's calendars in day,
   week, month and year views, to-dos synced with Reminders, and questions about
   your week answered from your own calendar.
@@ -79,7 +79,8 @@ Calendar, Reminders, Mail, Full Disk Access, the microphone, call audio, the
 camera or Photos only when you first use the feature that needs it.
 
 <sub>Screenshots are from the app itself, running with demo data: the mail,
-calendar, files and people in them are invented.</sub>
+calendar and files, and the people in them, are invented. Web answers are live
+model output, shown as generated.</sub>
 
 ## Models
 
@@ -96,7 +97,7 @@ Mac will differ.
 | [MiniCPM5-1B](https://huggingface.co/openbmb/MiniCPM5-1B-MLX) MLX 4-bit | 0.6 GB | 990 / 154 | 0.2 GB + 0.6 GB mapped |
 
 **Deep: 27B dense.** Harder reasoning and longer documents. Both draft several
-tokens per step (MTP) and check them, so they answer faster with the same output.
+tokens per step (MTP) and check them, so they answer faster.
 
 | Model | On disk | Prefill / decode (tok/s) | Peak memory |
 | --- | ---: | --- | ---: |

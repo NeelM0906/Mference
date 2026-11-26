@@ -2,22 +2,31 @@ import Foundation
 
 /// Diagnostic only, for README and site captures: with `MFERENCE_DEMO_DATA=<dir>` set, Mail
 /// reads `<dir>/mail/*.eml` (and `<dir>/mail/sent/*.eml`) and Calendar reads
-/// `<dir>/calendar/*.ics`, both in memory, instead of this Mac's Apple Mail and EventKit; a
-/// new planner starts with the to-dos in `<dir>/calendar/todos.tsv`. Nothing is written back
+/// `<dir>/calendar/*.ics`, both in memory, instead of this Mac's Apple Mail and EventKit; the
+/// planner lives in `<dir>/Planner.json` and starts with the to-dos in `<dir>/calendar/todos.tsv`. Nothing is written back
 /// to Mail or Calendar and nothing is sent. The mail runs through the same parser, sorter and
 /// reply drafter as real mail. A file named `*-seen.eml` is read; others are unread. Not a
 /// supported control.
 public enum DemoData {
     public static let variable = "MFERENCE_DEMO_DATA"
 
-    /// The demo directory, when the variable names an existing one.
-    public static var directory: URL? {
-        guard let path = ProcessInfo.processInfo.environment[variable], !path.isEmpty else { return nil }
+    /// The demo directory whenever the variable is set. A set but missing path fails closed:
+    /// demo mode stays on with no demo data, and never falls back to this Mac's Mail and Calendar.
+    public static var directory: URL? { directory(environment: ProcessInfo.processInfo.environment) }
+
+    static func directory(environment: [String: String]) -> URL? {
+        guard let path = environment[variable], !path.isEmpty else { return nil }
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return nil
+        if !FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) || !isDirectory.boolValue {
+            FileHandle.standardError.write(Data("\(variable): \(path) is not a directory; demo mode shows no mail or events\n".utf8))
         }
         return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// Where the demo planner keeps its to-dos and proposals: inside the demo directory, never
+    /// the person's own Planner.json.
+    static func plannerURL(in directory: URL) -> URL {
+        directory.appending(path: "Planner.json")
     }
 
     static let accountID = "demo"
@@ -148,11 +157,9 @@ public enum DemoData {
 
     // MARK: To-dos
 
-    /// The live planner; when it has no file yet it starts with the demo to-dos
+    /// The demo planner (`<dir>/Planner.json`); when it has no file yet it starts with the demo to-dos
     /// (`yyyy-MM-dd<TAB>title` lines).
-    public static func plannerStore(in directory: URL,
-                                    at storeURL: URL = AppStorageLocation.applicationSupport
-                                        .appending(path: "Planner.json")) -> PlannerStore {
+    public static func plannerStore(in directory: URL, at storeURL: URL? = nil) -> PlannerStore {
         let url = directory.appending(path: "calendar/todos.tsv")
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -163,6 +170,6 @@ public enum DemoData {
                 guard parts.count == 2, let due = formatter.date(from: parts[0] + " 09:00") else { return nil }
                 return TodoItem(title: parts[1], due: due, createdAt: due.addingTimeInterval(-3 * 86_400))
             }
-        return PlannerStore(url: storeURL, initial: PlannerStore.Contents(todos: todos))
+        return PlannerStore(url: storeURL ?? plannerURL(in: directory), initial: PlannerStore.Contents(todos: todos))
     }
 }

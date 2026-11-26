@@ -53,6 +53,7 @@ import Testing
         let source = DemoData.mailSource(in: root)
 
         let inbox = try await source.messages(in: [.inbox], limit: 10)
+        try #require(inbox.count == 2)
         #expect(inbox.map(\.subject) == ["Thursday design review", "Five Mac shortcuts"])
         #expect(inbox[0].senderName == "Priya Raman")
         #expect(inbox[0].senderAddress == "priya@lumenstudio.example")
@@ -61,6 +62,7 @@ import Testing
         #expect(inbox[1].isRead == true)
 
         let sent = try await source.messages(in: [.sent], limit: 10)
+        try #require(sent.count == 1)
         #expect(sent.map(\.subject) == ["Leak in the bathroom"])
         #expect(sent[0].isOutgoing)
         #expect(sent[0].recipients.first?.address == "dana@maplecourt.example")
@@ -102,6 +104,25 @@ import Testing
         try fresh.update { $0.todos.removeAll() }
         let reopened = DemoData.plannerStore(in: root, at: storeURL)
         #expect(reopened.snapshot.todos.isEmpty)
+    }
+
+    /// Review R1-1: the demo planner must never be the person's own Planner.json, or real to-dos
+    /// appear in captures and the in-memory Reminders can delete them.
+    @Test func demoPlannerLivesInTheDemoDirectory() throws {
+        let root = try makeDemo()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = DemoData.plannerURL(in: root)
+        #expect(url.path.hasPrefix(root.path), "demo planner at \(url.path), outside \(root.path)")
+        #expect(url != AppStorageLocation.applicationSupport.appending(path: "Planner.json"))
+    }
+
+    /// Review R1-2: a set but missing demo path fails closed (empty demo data), never falling back
+    /// to the person's real Mail and Calendar.
+    @Test func setButMissingDemoPathFailsClosed() {
+        let missing = "/nonexistent-mference-demo-\(UUID().uuidString)"
+        #expect(DemoData.directory(environment: [DemoData.variable: missing])?.path == missing)
+        #expect(DemoData.directory(environment: [:]) == nil)
+        #expect(DemoData.directory(environment: [DemoData.variable: ""]) == nil)
     }
 
     @Test func addressesParseWithAndWithoutNames() {
