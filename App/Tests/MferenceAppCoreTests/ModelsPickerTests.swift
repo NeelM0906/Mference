@@ -6,7 +6,7 @@ import Testing
 @Suite struct ModelsPickerTests {
     @Test @MainActor func rowsAreGroupedAndShowInstallState() async {
         let engine = AppServices.fakeEngine(installed: [.quick, .qwen36, .maple])
-        let picker = ModelPickerModel(engine: engine, selected: .quick)
+        let picker = ModelPickerModel(engine: engine, selected: .quick, physicalMemory: 32 << 30)
         await picker.refresh()
         #expect(picker.recommended.map(\.model) == [.quick, .deep])
         #expect(picker.alsoOnThisMac.map(\.model) == [.bonsai27b, .inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple])
@@ -23,7 +23,7 @@ import Testing
         let gate = FakeEngineLatch()
         let engine = AppServices.fakeEngine(scripts: [AppModel.deep.modelID: FakeEngineScript(loadStarted: started,
                                                                                                loadGate: gate)])
-        let picker = ModelPickerModel(engine: engine, selected: .quick)
+        let picker = ModelPickerModel(engine: engine, selected: .quick, physicalMemory: 32 << 30)
         await picker.refresh()
         let follow = Task { await picker.run() }
         defer { follow.cancel() }

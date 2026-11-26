@@ -17,10 +17,10 @@ import Testing
                                          engine: model.engineLabel == "llama.cpp" ? .llamaCpp : .mference,
                                          product: EngineProductSlot(modelID: model.modelID))
         })
-        let service = EngineService(discover: { catalog }) { catalog, observer in
+        let service = EngineService(discover: { catalog }, makeHost: { catalog, observer in
             EngineHost(catalog: catalog, backends: [native, llama], idleUnloadAfter: idleUnloadAfter,
                        observer: observer)
-        }
+        }, physicalMemory: AppServices.fakePhysicalMemory)
         return (service, journal)
     }
 
@@ -117,6 +117,19 @@ import Testing
         #expect(other as? EngineServiceError == .invalidRequest("m"))
     }
 
+    /// A fake engine stands for a Mac with room for every product model, so a
+    /// test's gating never depends on the memory of the host it runs on (CI
+    /// runners have 16 GB, where the real gate refuses Deep and Bonsai).
+    @Test func fakeEnginesDoNotDependOnTheHostsMemory() async {
+        let options = await AppServices.fakeEngine().models()
+        #expect(options.first { $0.model == .deep }?.availability == .ready)
+        #expect(options.first { $0.model == .bonsai27b }?.availability == .ready)
+        // The gate itself still applies when a test asks for a small Mac.
+        let small = await AppServices.fakeEngine(physicalMemory: 16 << 30).models()
+        #expect(small.first { $0.model == .deep }?.availability
+            == .notInstalled(reason: "Needs a Mac with more than 16 GB of memory."))
+    }
+
     @Test func refreshPicksUpANewInstallWhileAModelIsLoaded() async throws {
         let journal = FakeEngineJournal()
         let backend = FakeEngineBackend(engine: .llamaCpp, journal: journal)
@@ -125,9 +138,9 @@ import Testing
             EngineCatalog(models: installed.withLock { $0 }.map {
                 FakeEngineBackend.descriptor(id: $0.modelID, engine: .llamaCpp)
             })
-        }) { catalog, observer in
+        }, makeHost: { catalog, observer in
             EngineHost(catalog: catalog, backends: [backend], observer: observer)
-        }
+        }, physicalMemory: AppServices.fakePhysicalMemory)
         try await service.load(.quick)
         installed.withLock { $0.append(.deep) }
         await service.refreshCatalog()

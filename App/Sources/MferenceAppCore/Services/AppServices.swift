@@ -247,10 +247,11 @@ public final class AppServices {
                                permissions: any PermissionBroker = FakePermissionBroker(),
                                speech: any SpeechServicing = FakeSpeechService(),
                                seeing: [AppModel] = [],
-                               idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil)) -> AppServices {
+                               idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil),
+                               physicalMemory: UInt64 = fakePhysicalMemory) -> AppServices {
         let settings = settings ?? AppSettings(store: InMemorySettingsStore())
         let engine = fakeEngine(installed: installed, seeing: seeing, scripts: scripts, journal: journal,
-                                idleUnload: idleUnload)
+                                idleUnload: idleUnload, physicalMemory: physicalMemory)
         // Downloads that can never reach the network: no host is allowed.
         let downloads = DownloadManager(
             destination: FileManager.default.temporaryDirectory.appending(path: "mference-preview-downloads"),
@@ -271,21 +272,28 @@ public final class AppServices {
                            idleUnload: idleUnload)
     }
 
+    /// The memory fake engines assume: a Mac with room for every product model,
+    /// so previews and tests never depend on the host's memory (CI runners
+    /// have 16 GB, where the real gate refuses Deep and Bonsai). Pass a smaller
+    /// `physicalMemory` to exercise the gate itself.
+    public nonisolated static let fakePhysicalMemory: UInt64 = 64 << 30
+
     /// An `EngineService` over fake backends, for previews and tests.
     public nonisolated static func fakeEngine(installed: [AppModel] = AppModel.engineModels,
                                               seeing: [AppModel] = [],
                                               scripts: [String: FakeEngineScript] = [:],
                                               journal: FakeEngineJournal = FakeEngineJournal(),
-                                              idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil))
+                                              idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil),
+                                              physicalMemory: UInt64 = fakePhysicalMemory)
         -> EngineService {
         let native = FakeEngineBackend(engine: .mference, journal: journal, scripts: scripts)
         let llama = FakeEngineBackend(engine: .llamaCpp, journal: journal, scripts: scripts)
         let catalog = fakeCatalog(installed, seeing: seeing)
-        return EngineService(discover: { catalog }) { catalog, observer in
+        return EngineService(discover: { catalog }, makeHost: { catalog, observer in
             EngineHost(catalog: catalog, backends: [native, llama],
                        idleUnloadAfter: EngineService.defaultIdleUnload,
                        sleep: idleUnload.sleeper, observer: observer)
-        }
+        }, physicalMemory: physicalMemory)
     }
 
     /// A catalog in which `installed` are discovered, with plausible sizes;
