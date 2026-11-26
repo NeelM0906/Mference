@@ -31,8 +31,14 @@ public enum DemoData {
 
     static let accountID = "demo"
 
-    /// The calendar model's Reminders sync choices in demo mode: their own suite, so a demo
-    /// session never changes what a normal launch syncs.
+    /// The settings store for this launch (AppSettings): the app's own defaults, or in demo mode
+    /// the same demo suite the calendar model reads.
+    static func settingsStore(demo: URL?) -> UserDefaults {
+        demo == nil ? .standard : settings
+    }
+
+    /// Every setting in demo mode, the calendar model's Reminders sync choices included: their
+    /// own suite, so a demo session never changes what a normal launch does.
     static var settings: UserDefaults {
         guard let suite = UserDefaults(suiteName: "ai.mference.demo-data") else {
             preconditionFailure("a fixed, non-global suite name always opens")

@@ -155,6 +155,27 @@ import Testing
         #expect(builtLivePlanner)
     }
 
+    /// Review R3-1: in demo mode the Settings switch and the calendar model share the demo suite,
+    /// so flipping Reminders sync agrees on screen and never reaches the person's own settings.
+    @MainActor @Test func demoSettingsAgreeAndStayOutOfTheRealDefaults() throws {
+        let root = try makeDemo()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = AppSettings.Key.remindersSyncEnabled
+        let real = UserDefaults.standard.object(forKey: key)
+        defer { UserDefaults.standard.set(real, forKey: key) }
+        let sources = AppleSources.make(demo: root, broker: PreviewPermissionBroker(),
+                                        livePlanner: { PlannerStore(url: nil) })
+        let store = DemoData.settingsStore(demo: root)
+        defer { store.removeObject(forKey: key) }
+        let settings = AppSettings(store: store)
+        settings.remindersSyncEnabled = !sources.settings.bool(forKey: key)
+        #expect(sources.settings.bool(forKey: key) == settings.remindersSyncEnabled,
+                "the demo calendar must read what demo Settings wrote")
+        #expect((UserDefaults.standard.object(forKey: key) as? Bool) == (real as? Bool),
+                "demo Settings must not write the real defaults")
+        #expect(DemoData.settingsStore(demo: nil) === UserDefaults.standard)
+    }
+
     @Test func addressesParseWithAndWithoutNames() {
         #expect(DemoData.parseAddress("\"Sam Carter\" <sam@x.example>") == ("Sam Carter", "sam@x.example"))
         #expect(DemoData.parseAddress("Sam <sam@x.example>") == ("Sam", "sam@x.example"))

@@ -31,16 +31,17 @@
   answer comes back with the files it used.
 - **Find files by what is in them**: "the lease clause about pets", "that
   screenshot with the wifi password", "the zebra photo". Word matches show as
-  you type and meaning matches follow, from any app with ⌥Space. The index and
-  its small search model stay on your Mac.
+  you type and meaning matches follow, from any app with ⌥Space. Turn on photos,
+  video and audio to search what is in them. The index and its small search
+  model stay on your Mac.
 - **Scan images.** Receipts, documents and screenshots are read on the Mac,
   and the model fills in merchant, date, total and tax for you to check.
 - **Search the web when you need it.** Turn it on for a chat and answers come
   back with numbered sources, through a search engine bundled inside the app.
   Offline mode turns it off, along with chat and speech model downloads.
 - **Calendar and to-dos, in step with your Mac.** Your Mac's calendars in day,
-  week, month and year views, to-dos synced with Reminders, and questions about
-  your week answered from your own calendar.
+  week, month and year views, to-dos that sync with Reminders once you turn it
+  on, and questions about your week answered from your own calendar.
 - **Notes** with checklists, headings and attachments, kept on your Mac.
   Dictate into any note, record a meeting with speaker labels and get its
   decisions and action items, or transcribe an audio file.
@@ -80,7 +81,7 @@ camera or Photos only when you first use the feature that needs it.
 
 <sub>Screenshots are from the app itself, running with demo data: the mail,
 calendar and files, and the people in them, are invented. Web answers are live
-model output, shown as generated.</sub>
+model output, shown as generated. The Errands tab they show is not built yet.</sub>
 
 ## Models
 

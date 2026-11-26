@@ -21,6 +21,6 @@ struct AppleSources {
         }
         return AppleSources(calendar: DemoData.calendarService(in: demo), mail: DemoData.mailSource(in: demo),
                             sender: RecordingMailSender(), mailApp: FixedMailApp(running: true),
-                            planner: DemoData.plannerStore(in: demo), settings: DemoData.settings)
+                            planner: DemoData.plannerStore(in: demo), settings: DemoData.settingsStore(demo: demo))
     }
 }
