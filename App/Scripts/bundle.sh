@@ -18,6 +18,8 @@
 #                                              transformers', ...), test bundles
 #                                              excluded
 #      Contents/Resources/Fonts                App/Resources/Fonts (Geist, OFL)
+#      Contents/Resources/AppIcon.icns         App/Resources/AppIcon.icns (the
+#                                              Dock icon and the in-app mark)
 #      Contents/Resources/SearXNG              App/Resources/SearXNG (see hook)
 # 3. Signs with App/Resources/Mference.entitlements (no App Sandbox),
 #    verifies the signature, and runs `Mference --verify-bundle`, which loads
@@ -174,6 +176,9 @@ shopt -u nullglob
 if [[ -d "$RESOURCES_SRC/Fonts" ]]; then
     ditto --norsrc --noextattr "$RESOURCES_SRC/Fonts" "$STAGING/Contents/Resources/Fonts"
 fi
+
+# The app icon (CFBundleIconFile), built from docs/assets/mference-app-icon.png.
+cp "$RESOURCES_SRC/AppIcon.icns" "$STAGING/Contents/Resources/AppIcon.icns"
 
 # SearXNG hook (U3), see the header.
 if [[ -d "$RESOURCES_SRC/SearXNG" ]]; then

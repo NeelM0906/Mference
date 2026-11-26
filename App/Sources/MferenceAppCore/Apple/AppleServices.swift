@@ -36,12 +36,18 @@ public final class AppleServices {
                             plannerStore: PlannerStore = .live(),
                             useAppleModel: @escaping @Sendable () async -> Bool) -> AppleServices {
         let assistant = AppleModelService.live(engine: engine, useAppleModel: useAppleModel)
-        let calendarService = EventKitService(broker: broker)
-        let mailSource = AppleMailSource()
-        let calendar = CalendarWeekModel(service: calendarService, store: plannerStore)
+        // README captures only (`MFERENCE_DEMO_DATA`): demo mail and calendar in memory,
+        // and a sender that records instead of sending.
+        let demo = DemoData.directory
+        let calendarService: any CalendarServicing = demo.map(DemoData.calendarService(in:))
+            ?? EventKitService(broker: broker)
+        let mailSource: any MailSource = demo.map(DemoData.mailSource(in:)) ?? AppleMailSource()
+        let sender: any MailSending = demo == nil ? AppleMailSender(broker: broker) : RecordingMailSender()
+        let calendar = CalendarWeekModel(service: calendarService,
+                                         store: demo.map { DemoData.plannerStore(in: $0) } ?? plannerStore)
         let mail = MailInboxModel(source: mailSource, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine),
-                                  composeWriter: MailComposeWriter(engine: engine), sender: AppleMailSender(broker: broker),
+                                  composeWriter: MailComposeWriter(engine: engine), sender: sender,
                                   broker: broker,
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,

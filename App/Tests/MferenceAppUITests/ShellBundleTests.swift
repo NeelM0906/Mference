@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import MferenceAppCore
+@testable import MferenceAppUI
 import Testing
 
 /// Locks `App/Resources/Info.plist` (copied into Mference.app by
@@ -43,6 +45,25 @@ import Testing
                 #expect(info[key] as? String == permission.reason, "\(key) != AppPermission.\(permission).reason")
             }
         }
+    }
+
+    /// The Dock icon and the in-app mark: Info.plist names AppIcon, bundle.sh copies
+    /// App/Resources/AppIcon.icns, and the file is a real, loadable icon.
+    @Test func appIconIsNamedAndLoadable() throws {
+        let info = try Self.plist("Info.plist")
+        #expect(info["CFBundleIconFile"] as? String == "AppIcon")
+        let icon = try #require(NSImage(contentsOf: Self.resources.appendingPathComponent("AppIcon.icns")))
+        #expect(icon.representations.contains { $0.pixelsWide >= 1024 }, "the icon needs its 512@2x size")
+    }
+
+    /// An unbundled build (tests, previews, `swift run`) names no icon, so the mark falls
+    /// back to the lettered tile instead of drawing an empty image.
+    @Test func appMarkFallsBackWithoutABundleIcon() throws {
+        let empty = FileManager.default.temporaryDirectory.appendingPathComponent("NoIcon-\(UUID().uuidString).bundle")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: empty) }
+        let bundle = try #require(Bundle(url: empty))
+        #expect(AppMark.icon(in: bundle) == nil)
     }
 
     @Test func entitlementsHaveNoSandbox() throws {
