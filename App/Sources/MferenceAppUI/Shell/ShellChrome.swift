@@ -6,15 +6,7 @@ import SwiftUI
 struct ShellBrand: View {
     var body: some View {
         HStack(spacing: MFSpacing.s) {
-            Text("M")
-                .font(MFFont.calloutSemibold)
-                .foregroundStyle(MFColor.secondary)
-                .frame(width: ShellMetrics.markSide, height: ShellMetrics.markSide)
-                .background(
-                    RoundedRectangle(cornerRadius: ShellMetrics.markRadius)
-                        .fill(LinearGradient(colors: [MFColor.surface, MFColor.hairlineStrong],
-                                             startPoint: .topLeading, endPoint: .bottomTrailing)))
-                .overlay(RoundedRectangle(cornerRadius: ShellMetrics.markRadius).strokeBorder(MFColor.hairlineStrong))
+            AppMark(side: ShellMetrics.markSide, radius: ShellMetrics.markRadius, letterFont: MFFont.calloutSemibold)
             Text("Mference")
                 .font(MFFont.brand)
                 .foregroundStyle(MFColor.ink)

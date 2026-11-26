@@ -8,6 +8,8 @@
 	<string>Mference</string>
 	<key>CFBundleExecutable</key>
 	<string>Mference</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>ai.mference.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>

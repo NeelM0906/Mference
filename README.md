@@ -5,76 +5,119 @@
 <h1 align="center">Mference</h1>
 
 <p align="center">
-  A private AI assistant that runs entirely on your Mac.<br>
-  Chat, search the web, sort your mail, plan your week and read receipts,
-  with your chats, files and mail kept on the machine.
+  <b>Truly private AI, on your Mac.</b><br>
+  Run several models and pick the right one for the job. Chat with your files,
+  find files by what is in them, scan images, search the web when you want to,
+  and keep your calendar and to-dos in step with your Mac. Nothing leaves it
+  unless you ask.
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/chat.jpg" alt="Mference chat answering from the web with numbered citations" width="820">
+  <img src="docs/assets/readme/chat.jpg" alt="Mference answering a question about GTA 6 from the web, with 23 numbered sources, using Qwen 3.6 on the Mac" width="820">
+</p>
+
+<p align="center">
+  <a href="https://neelm0906.github.io/Mference/assets/film/mference-launch.mp4"><img src="docs/assets/readme/film-poster.jpg" alt="Mference launch film: 52 seconds of the app in use" width="520"></a><br>
+  <a href="https://neelm0906.github.io/Mference/assets/film/mference-launch.mp4"><b>▶ Watch the 52-second film</b></a>
 </p>
 
 ## What it does
 
-- **Chat** with a local model. Turn on web search and answers come back with
-  numbered citations, through a search engine bundled inside the app that
-  queries public search engines. Offline mode turns off web search and chat
-  and speech model downloads.
-- **Find** files by what is in them: "the lease clause about pets", "that
-  screenshot with the wifi password". Word matches show as you type and
-  meaning matches follow, from any app with ⌥Space. Turn on photos, video and
-  audio to find "the zebra photo", the moment in a video, or the voice memo
-  about the plumber, in your folders and, if you allow it, your Photos
-  library. Chat can answer from your files with sources. The index
-  and its small search model stay on your Mac.
+- **Runs several models, all on your Mac.** Quick ones for everyday replies,
+  Deep ones for harder work, and large mixture-of-experts models that stream
+  from the SSD. Pick one per chat; the app shows how much memory each needs
+  before you load it. [The models](#models).
+- **Chat with your files.** Ask about a lease, a quote or your notes, and the
+  answer comes back with the files it used.
+- **Find files by what is in them**: "the lease clause about pets", "that
+  screenshot with the wifi password", "the zebra photo". Word matches show as
+  you type and meaning matches follow, from any app with ⌥Space. Turn on photos,
+  video and audio to search what is in them. The index and its small search
+  model stay on your Mac.
+- **Scan images.** Receipts, documents and screenshots are read on the Mac,
+  and the model fills in merchant, date, total and tax for you to check.
+- **Search the web when you need it.** Turn it on for a chat and answers come
+  back with numbered sources, through a search engine bundled inside the app.
+  Offline mode turns it off, along with chat and speech model downloads.
+- **Calendar and to-dos, in step with your Mac.** Your Mac's calendars in day,
+  week, month and year views, to-dos that sync with Reminders once you turn it
+  on, and questions about your week answered from your own calendar.
+- **Notes** with checklists, headings and attachments, kept on your Mac.
+  Dictate into any note, record a meeting with speaker labels and get its
+  decisions and action items, or transcribe an audio file.
 - **Mail** reads your Apple Mail mailboxes and drafts replies in your voice.
   Nothing is sent until you press Send.
-- **Calendar and to-dos.** Day, week, month and year views of your calendars,
-  events proposed from your mail, and to-dos kept in sync with Reminders.
-- **Notes** with checklists, headings and attachments. Dictate into any
-  note, record a meeting with speaker labels and get a summary of decisions
-  and action items, or transcribe an audio file. Speech recognition runs on
-  your Mac; its models download only when you set Notes up.
-- **Scan** a receipt or document. On-device text recognition reads it, and
-  the model fills in merchant, date, total and tax for you to check.
-- **Models** download from inside the app, and the app shows how much memory
-  each one needs on your Mac before you load it.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/find.jpg" alt="Find: the search 'the zebra photo' finds two photos by what is in the picture"><br><sub><b>Find</b> matches what is in a picture, not just its name.</sub></td>
+    <td width="50%"><img src="docs/assets/readme/files.jpg" alt="Chat answering from a plumber's quote in the person's files: $395 before tax, with each line item"><br><sub><b>Chat from your files</b>: the plumber's quote, itemised.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/readme/mail.jpg" alt="Mail with a reply drafted in the person's voice, not sent until they press Send"><br><sub><b>Mail</b> drafts a reply in your voice. You press Send.</sub></td>
+    <td><img src="docs/assets/readme/calendar.jpg" alt="Week view answering 'What does my Thursday look like, and is Saturday evening free?'"><br><sub><b>Calendar</b> answers questions about your week.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/readme/notes.jpg" alt="A meeting recording transcribed into a summary with decisions"><br><sub><b>Notes</b> turns a meeting into decisions and action items.</sub></td>
+    <td><img src="docs/assets/readme/scan.jpg" alt="A scanned cafe receipt with merchant, date, total, tax and payment filled in"><br><sub><b>Scan</b> reads a receipt into fields you check.</sub></td>
+  </tr>
+</table>
+
+### No internet, same assistant
+
+Every answer below was written with Offline mode on, by a different model.
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/assets/readme/offline-quick.jpg" alt="Quick 4B, offline, turning notes into a message to a landlord"><br><sub><b>Quick 4B</b>: notes into a message.</sub></td>
+    <td width="33%"><img src="docs/assets/readme/offline-qwen36.jpg" alt="Qwen 3.6, offline, planning a four-day Lisbon trip"><br><sub><b>Qwen 3.6</b>: a four-day trip plan.</sub></td>
+    <td width="33%"><img src="docs/assets/readme/offline-bonsai.jpg" alt="Bonsai 27B, offline, explaining a heat pump to a 10-year-old"><br><sub><b>Bonsai 27B</b>: a heat pump for a 10-year-old.</sub></td>
+  </tr>
+</table>
 
 Your chats, notes, files, mail and calendar stay on the Mac. The app asks for
 Calendar, Reminders, Mail, Full Disk Access, the microphone, call audio, the
 camera or Photos only when you first use the feature that needs it.
 
-<table>
-  <tr>
-    <td><img src="docs/assets/readme/mail.jpg" alt="Mail with a drafted reply and a proposed calendar change"></td>
-    <td><img src="docs/assets/readme/calendar.jpg" alt="Week view with to-dos and a proposed event"></td>
-    <td><img src="docs/assets/readme/scan.jpg" alt="A scanned receipt with its fields filled in"></td>
-  </tr>
-</table>
-
-<sub>Images are design renders. The shipped app may differ in detail, and the
-Errands tab they show is not built yet.</sub>
+<sub>Screenshots are from the app itself, running with demo data: the mail,
+calendar and files, and the people in them, are invented. Web answers are live
+model output, shown as generated. The Errands tab they show is not built yet.</sub>
 
 ## Models
 
-| Slot | Model | On disk | Prefill / decode (tok/s) | Peak memory |
-| --- | --- | ---: | --- | ---: |
-| Quick | [Qwen3.5-4B](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) UD-Q4_K_XL | 2.9 GB | 599 / 50 | 1.3 GB |
-| Deep | [Qwen3.8-27B GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ3_S, MTP | 12.1 GB | 85 / 17 | 3.1 GB + 12.1 GB mapped |
-| Bonsai | [Ternary Bonsai 2.5 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2.5-27B-GGUF) Q2_0, MTP | 7.9 GB | 95 / 22 | 3.2 GB + 7.9 GB mapped |
-| | [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (MoE) | 19.6 GB | 258 / 29 | 8.3 GB |
-| | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | 1.4 GB | 422 / 72 | 0.8 GB |
-| | [MiniCPM5-1B](https://huggingface.co/openbmb/MiniCPM5-1B-MLX) MLX 4-bit | 0.6 GB | not yet measured | not yet measured |
-| | [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) 20B-A1B (MoE) | 6.6 GB | 44 / 33 | 0.7 GB |
-| | [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) UD-Q4_K_XL (looped MoE), 32 GB Macs and up | 17.7 GB | 229 / 26 | 14.4 GB |
+Three kinds, all running on your Mac. Every figure below is from one 32 GB
+M1 Max at a 512-token prompt: indicative, not a protocol benchmark, and your
+Mac will differ.
 
-Indicative readings from one 32 GB M1 Max with a 512-token prompt, not
-protocol benchmarks; your Mac will differ. The mixture-of-experts models keep
-only their shared weights in memory and read the experts each token needs
-from the SSD, so Qwen 3.6 also runs in about 1.5 GB with a smaller expert
-cache. Inkling 2 Mini is the exception: on 32 to 47 GB Macs it keeps the
-experts of its looped core in memory and reads the rest ahead of use, and from
-48 GB it keeps every layer. It is offered on Macs with 32 GB or more.
+**Quick: 5B and under.** Fast, small, and fine on any Apple Silicon Mac.
+
+| Model | On disk | Prefill / decode (tok/s) | Peak memory |
+| --- | ---: | --- | ---: |
+| [Qwen3.5-4B](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) UD-Q4_K_XL (the default) | 2.9 GB | 599 / 50 | 1.3 GB |
+| [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | 1.4 GB | 422 / 72 | 0.8 GB |
+| [MiniCPM5-1B](https://huggingface.co/openbmb/MiniCPM5-1B-MLX) MLX 4-bit | 0.6 GB | 990 / 154 | 0.2 GB + 0.6 GB mapped |
+
+**Deep: 27B dense.** Harder reasoning and longer documents. Both draft several
+tokens per step (MTP) and check them, so they answer faster.
+
+| Model | On disk | Prefill / decode (tok/s) | Peak memory |
+| --- | ---: | --- | ---: |
+| [Qwen3.8-27B GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ3_S | 12.1 GB | 85 / 17 | 3.1 GB + 12.1 GB mapped |
+| [Ternary Bonsai 2.5 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2.5-27B-GGUF) Q2_0 | 7.9 GB | 95 / 22 | 3.2 GB + 7.9 GB mapped |
+
+**Streamed mixture-of-experts.** Large models that keep only their shared
+weights in memory and read the experts each token needs from the SSD.
+
+| Model | On disk | Prefill / decode (tok/s) | Peak memory |
+| --- | ---: | --- | ---: |
+| [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) | 19.6 GB | 258 / 29 | 8.3 GB |
+| [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) 20B-A1B | 6.6 GB | 44 / 33 | 0.7 GB |
+| [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) UD-Q4_K_XL (looped), 32 GB Macs and up | 17.7 GB | 229 / 26 | 14.4 GB |
+
+Qwen 3.6 also runs in about 1.5 GB with a smaller expert cache. Inkling 2 Mini
+is the exception to streaming: on 32 to 47 GB Macs it keeps the experts of its
+looped core in memory and reads the rest ahead of use, and from 48 GB it keeps
+every layer.
 
 ## Get started
 
@@ -89,9 +132,9 @@ App/Scripts/searxng/prepare.sh --fetch   # once: fetches and verifies the bundle
 App/Scripts/run.sh                       # builds, bundles and opens the app
 ```
 
-On first run the app helps you pick a model. Quick, Deep and Bonsai download
-from inside the app into `~/llm-models/gguf/`. The other five are installed from
-the terminal, and the app finds them in `~/llm-models` on its own:
+On first run the app helps you pick a model. Qwen3.5-4B, Qwen3.8-27B and Bonsai
+download from inside the app into `~/llm-models/gguf/`. The other five are
+installed from the terminal, and the app finds them in `~/llm-models` on its own:
 
 ```sh
 swift run -c release MferenceRepack --model qwen36 --output ~/llm-models/qwen36.gturbo
@@ -124,5 +167,5 @@ its source) and the Geist font (OFL). See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Model weights are not part of this repository and keep their own licenses.
-Maple's checkpoint declares none, so establish your rights before you
-download, use or redistribute it.
+[Maple Preview](https://huggingface.co/deepgrove/maple-preview) is MIT; its
+2-bit MLX repository added the same MIT card after the revision Mference pins.

@@ -393,15 +393,8 @@ struct OnboardingSidebar: View {
                 // Snapshot stand-in for the window buttons the real window draws here.
                 ShellWindowButtonsPlaceholder()
             }
-            Text("M")
-                .font(MFFont.largeTitle)
-                .foregroundStyle(MFColor.secondary)
-                .frame(width: OnboardingMetrics.markSide, height: OnboardingMetrics.markSide)
-                .background(RoundedRectangle(cornerRadius: OnboardingMetrics.markRadius)
-                    .fill(LinearGradient(colors: [MFColor.surface, MFColor.hairlineStrong],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing)))
-                .overlay(RoundedRectangle(cornerRadius: OnboardingMetrics.markRadius)
-                    .strokeBorder(MFColor.hairlineStrong, lineWidth: MFLayout.hairline))
+            AppMark(side: OnboardingMetrics.markSide, radius: OnboardingMetrics.markRadius,
+                    letterFont: MFFont.largeTitle, borderWidth: MFLayout.hairline)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: MFSpacing.m) {
                 Text("Your own AI,\non this Mac.")
