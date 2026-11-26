@@ -33,22 +33,19 @@ public final class AppleServices {
     /// Nothing is read or asked until a screen or Settings needs it.
     /// `useAppleModel` reads Settings > Models > Apple Intelligence model.
     public static func live(engine: any EngineServicing, broker: any PermissionBroker, container: ModelContainer,
-                            plannerStore: PlannerStore = .live(),
+                            plannerStore: PlannerStore? = nil,
                             useAppleModel: @escaping @Sendable () async -> Bool) -> AppleServices {
         let assistant = AppleModelService.live(engine: engine, useAppleModel: useAppleModel)
-        // README captures only (`MFERENCE_DEMO_DATA`): demo mail and calendar in memory,
-        // and a sender that records instead of sending.
-        let demo = DemoData.directory
-        let calendarService: any CalendarServicing = demo.map(DemoData.calendarService(in:))
-            ?? EventKitService(broker: broker)
-        let mailSource: any MailSource = demo.map(DemoData.mailSource(in:)) ?? AppleMailSource()
-        let sender: any MailSending = demo == nil ? AppleMailSender(broker: broker) : RecordingMailSender()
-        let calendar = CalendarWeekModel(service: calendarService,
-                                         store: demo.map { DemoData.plannerStore(in: $0) } ?? plannerStore)
+        // README captures only (`MFERENCE_DEMO_DATA`): demo mail, calendar and planner, and a
+        // sender that records instead of sending (AppleSources).
+        let sources = AppleSources.make(demo: DemoData.directory, broker: broker,
+                                        livePlanner: { plannerStore ?? .live() })
+        let calendarService = sources.calendar, mailSource = sources.mail
+        let calendar = CalendarWeekModel(service: calendarService, store: sources.planner, defaults: sources.settings)
         let mail = MailInboxModel(source: mailSource, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine),
-                                  composeWriter: MailComposeWriter(engine: engine), sender: sender,
-                                  broker: broker,
+                                  composeWriter: MailComposeWriter(engine: engine), sender: sources.sender,
+                                  broker: broker, mailApp: sources.mailApp,
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,
                              scan: ScanSession(scanner: VisionScanner(), assistant: assistant,

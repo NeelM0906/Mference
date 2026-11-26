@@ -85,8 +85,7 @@ The installer verifies its source-index SHA-256
 The original checkpoint, [`deepgrove/maple-preview`](https://huggingface.co/deepgrove/maple-preview),
 declares the MIT license. The pinned 2-bit revision has no model card; the
 repository's current main branch adds one declaring `license: mit`, as read
-on 2026-11-25. Those terms govern the weights, and Mference makes no grant of
-rights to them.
+on 2026-11-25. Mference makes no grant of rights to those weights.
 
 Inkling 2 Mini: revision `45fd08764f2b0bf16b03a5483a80e5c7aaec8772` of
 [`unsloth/Inkling-2-Mini-GGUF`](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF),

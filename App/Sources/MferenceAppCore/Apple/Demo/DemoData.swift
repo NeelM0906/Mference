@@ -31,6 +31,15 @@ public enum DemoData {
 
     static let accountID = "demo"
 
+    /// The calendar model's Reminders sync choices in demo mode: their own suite, so a demo
+    /// session never changes what a normal launch syncs.
+    static var settings: UserDefaults {
+        guard let suite = UserDefaults(suiteName: "ai.mference.demo-data") else {
+            preconditionFailure("a fixed, non-global suite name always opens")
+        }
+        return suite
+    }
+
     // MARK: Mail
 
     public static func mailSource(in directory: URL) -> InMemoryMailSource {
