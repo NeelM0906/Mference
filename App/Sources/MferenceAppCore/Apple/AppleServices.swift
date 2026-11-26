@@ -33,19 +33,16 @@ public final class AppleServices {
     /// Nothing is read or asked until a screen or Settings needs it.
     /// `useAppleModel` reads Settings > Models > Apple Intelligence model.
     public static func live(engine: any EngineServicing, broker: any PermissionBroker, container: ModelContainer,
-                            plannerStore: PlannerStore? = nil,
+                            plannerStore: PlannerStore = .live(),
                             useAppleModel: @escaping @Sendable () async -> Bool) -> AppleServices {
         let assistant = AppleModelService.live(engine: engine, useAppleModel: useAppleModel)
-        // README captures only (`MFERENCE_DEMO_DATA`): demo mail, calendar and planner, and a
-        // sender that records instead of sending (AppleSources).
-        let sources = AppleSources.make(demo: DemoData.directory, broker: broker,
-                                        livePlanner: { plannerStore ?? .live() })
-        let calendarService = sources.calendar, mailSource = sources.mail
-        let calendar = CalendarWeekModel(service: calendarService, store: sources.planner, defaults: sources.settings)
+        let calendarService = EventKitService(broker: broker)
+        let mailSource = AppleMailSource()
+        let calendar = CalendarWeekModel(service: calendarService, store: plannerStore)
         let mail = MailInboxModel(source: mailSource, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine),
-                                  composeWriter: MailComposeWriter(engine: engine), sender: sources.sender,
-                                  broker: broker, mailApp: sources.mailApp,
+                                  composeWriter: MailComposeWriter(engine: engine), sender: AppleMailSender(broker: broker),
+                                  broker: broker,
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,
                              scan: ScanSession(scanner: VisionScanner(), assistant: assistant,

@@ -159,8 +159,7 @@ public final class AppServices {
     /// (the app itself); nil reads files in this process.
     public static func live(presentPermissionReason: @escaping LivePermissionBroker.ReasonPresenter,
                             findHelper: URL? = nil) -> AppServices {
-        // Demo mode (MFERENCE_DEMO_DATA) keeps every setting in its own suite (DemoData).
-        let settings = AppSettings(store: DemoData.settingsStore(demo: DemoData.directory))
+        let settings = AppSettings()
         let idleUnload = IdleUnloadControl(delay: settings.idleUnloadDelay)
         let container: ModelContainer
         var storeError: String?
