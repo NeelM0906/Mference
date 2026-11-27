@@ -38,7 +38,7 @@
   and the model fills in merchant, date, total and tax for you to check.
 - **Search the web when you need it.** Turn it on for a chat and answers come
   back with numbered sources, through a search engine bundled inside the app.
-  Offline mode turns it off, along with chat and speech model downloads.
+  Offline mode turns it off, along with every model download.
 - **Calendar and to-dos, in step with your Mac.** Your Mac's calendars in day,
   week, month and year views, to-dos that sync with Reminders once you turn it
   on, and questions about your week answered from your own calendar.

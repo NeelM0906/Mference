@@ -51,6 +51,9 @@ public enum FindModelState: Sendable, Hashable {
     case verifying
     case ready(URL)
     case failed(String)
+    /// Not downloaded yet, and Offline mode is on: the download starts (or
+    /// resumes) when it is turned off.
+    case waitingForOfflineMode
 
     public var isReady: Bool {
         if case .ready = self { return true }

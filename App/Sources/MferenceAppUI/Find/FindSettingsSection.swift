@@ -173,6 +173,7 @@ struct FindSettingsSection: View {
         case .downloading(let fraction): return "Downloading the model: \(Int(fraction * 100))% of \(FindModelFile.media.sizeLabel)."
         case .verifying: return "Checking the model…"
         case .failed(let message): return "The model could not be downloaded: \(message)"
+        case .waitingForOfflineMode: return "Downloads when Offline mode is off."
         case .ready, .notDownloaded: return about
         }
     }
