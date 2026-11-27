@@ -230,6 +230,12 @@ import Testing
         #expect(ask.highlightedOpenTimes.isEmpty)
     }
 
+    /// Waits until the read `holdNextRead()` holds has started.
+    static func untilReadHeld(_ service: InMemoryCalendarService) async throws {
+        for _ in 0..<2_000 where !(await service.isReadHeld) { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await service.isReadHeld, "the held read never started")
+    }
+
     @Test @MainActor func aCheckANewerAnswerOvertookLeavesThatAnswerCurrent() async throws {
         let service = InMemoryCalendarService(events: CalendarFixtures.events)
         let (_, ask) = await Self.setUp(engine: Self.engine(), service: service)
@@ -238,11 +244,12 @@ import Testing
                                                 end: CalendarFixtures.date(16, 16), source: ItemSource(kind: .manual, label: "x")))
         // The change check reads Calendar slowly; a new question answers
         // from the changed calendar before it finishes.
-        await service.delayNextRead(by: .milliseconds(200))
+        await service.holdNextRead()
         let check = Task { await ask.calendarChanged() }
-        for _ in 0..<200 where await service.isNextReadDelayed { try await Task.sleep(for: .milliseconds(5)) }
+        try await Self.untilReadHeld(service)
         await ask.ask("When am I free for 2 hours?")
         #expect(ask.answers.count == 1)
+        await service.releaseHeldRead()
         await check.value
         #expect(!ask.isStale)
         #expect(!ask.highlightedOpenTimes.isEmpty)
@@ -255,22 +262,24 @@ import Testing
         let slot = try #require(ask.highlightedOpenTimes.first)
         // The grid reload after Block's save is slow; Calendar's change
         // notice for that save arrives before Block has returned.
-        await service.delayNextRead(by: .milliseconds(200))
+        await service.holdNextRead()
         let block = Task { await ask.block(slot) }
-        for _ in 0..<200 where await service.isNextReadDelayed { try await Task.sleep(for: .milliseconds(5)) }
+        try await Self.untilReadHeld(service)
         await ask.calendarChanged()
+        await service.releaseHeldRead()
         await block.value
         #expect(ask.blocked[slot] != nil)
         #expect(!ask.isStale)
         // A real change during a Block still counts once the Block is in.
-        await service.delayNextRead(by: .milliseconds(200))
+        await service.holdNextRead()
         let second = DateInterval(start: CalendarFixtures.date(18, 9), end: CalendarFixtures.date(18, 10))
         let again = Task { await ask.block(second) }
-        for _ in 0..<200 where await service.isNextReadDelayed { try await Task.sleep(for: .milliseconds(5)) }
+        try await Self.untilReadHeld(service)
         _ = try await service.add(ProposedEvent(title: "Dentist", start: CalendarFixtures.date(16, 15),
                                                 end: CalendarFixtures.date(16, 16), source: ItemSource(kind: .manual, label: "x")))
         await ask.calendarChanged()
         #expect(!ask.isStale)
+        await service.releaseHeldRead()
         await again.value
         #expect(ask.isStale)
     }
