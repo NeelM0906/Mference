@@ -33,11 +33,11 @@ final class SlowReader: FindExtracting {
         }
         try? await Task.sleep(for: delay)
         state.withLock { $0.inFlight -= 1 }
-        return FindExtractor.extract(url, kind: kind, options: options)
+        return await FindMediaFixtures.extract(url, kind: kind, options: options)
     }
 
     func prepare(_ url: URL, kind: FindKind, pieces: [FindMediaPiece]) async -> [URL?] {
-        FindMedia.prepare(url, kind: kind, pieces: pieces, into: FindMediaFolder.url)
+        await FindMediaFixtures.prepare(url, kind: kind, pieces: pieces, into: FindMediaFolder.url)
     }
 
     func shutdown() async {}
@@ -125,12 +125,12 @@ final class CountingEmbedder: FindTextEmbedding {
         #expect(reader.hurryCalls.last == false, "back to background once caught up")
     }
 
-    @Test func photosWithoutTextSkipTheFullRead() throws {
+    @Test func photosWithoutTextSkipTheFullRead() async throws {
         let folder = try FindTempFolder()
         let plain = try FindMediaFixtures.png(folder.url.appending(path: "IMG_1.png"), red: 0.2, green: 0.5, blue: 0.3)
-        #expect(FindExtractor.extract(plain, kind: .image, options: FindExtractOptions(ocr: true)).chunks.isEmpty)
+        #expect(await FindMediaFixtures.extract(plain, kind: .image, options: FindExtractOptions(ocr: true)).chunks.isEmpty)
         let sign = try Self.textImage(folder.url.appending(path: "IMG_2.png"), lines: ["PARKING PERMIT", "ZONE 4 ONLY"])
-        let read = FindExtractor.extract(sign, kind: .image, options: FindExtractOptions(ocr: true)).chunks
+        let read = await FindMediaFixtures.extract(sign, kind: .image, options: FindExtractOptions(ocr: true)).chunks
         #expect(read.first?.fromOCR == true)
         #expect(read.first?.text.uppercased().contains("PARKING") == true)
     }

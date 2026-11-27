@@ -132,7 +132,9 @@ public struct InProcessFindExtractor: FindExtracting {
     }
 
     public func extract(_ url: URL, kind: FindKind, options: FindExtractOptions) async -> FindExtraction {
-        let work = Task.detached(priority: Task.currentPriority) { FindExtractor.extract(url, kind: kind, options: options) }
+        let work = Task.detached(priority: Task.currentPriority) {
+            await BlockingWork.run { FindExtractor.extract(url, kind: kind, options: options) }
+        }
         let timeout = self.timeout
         return await withTaskGroup(of: FindExtraction?.self) { group in
             group.addTask { await work.value }
@@ -147,9 +149,9 @@ public struct InProcessFindExtractor: FindExtracting {
     }
 
     public func prepare(_ url: URL, kind: FindKind, pieces: [FindMediaPiece]) async -> [URL?] {
-        await Task.detached(priority: Task.currentPriority) {
+        await BlockingWork.run {
             FindMedia.prepare(url, kind: kind, pieces: pieces, into: FindMediaFolder.url)
-        }.value
+        }
     }
 
     public func shutdown() async {}
