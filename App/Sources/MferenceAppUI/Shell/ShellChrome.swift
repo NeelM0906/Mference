@@ -87,7 +87,11 @@ struct ShellTrailingControls: View {
                     Color.clear.frame(width: measuredItemsWidth, height: 1)
                 }
             } else {
+                // At their natural width, so a squeezed toolbar never reports
+                // a smaller width that would keep the names and hide the
+                // overflow.
                 ShellToolbarItems(items: items)
+                    .fixedSize(horizontal: true, vertical: false)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { onItemsWidth?($0) }
             }
             if Self.showsGeneralControls(screenItems: items) {
