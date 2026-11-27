@@ -128,6 +128,9 @@ public final class FindService: ChatFilesProviding {
         public var photoLibrary: (any FindPhotoLibrary)?
         /// Asks for the Photos permission.
         public var permissions: (any PermissionBroker)?
+        /// Offline mode: no model download starts or keeps running; a model
+        /// already downloaded is used as usual.
+        public var isOffline: @MainActor @Sendable () -> Bool
 
         public init(indexDirectory: URL?, model: any FindModelProviding,
                     mediaModel: any FindModelProviding = PresentFindModel(),
@@ -135,7 +138,8 @@ public final class FindService: ChatFilesProviding {
                     extractor: any FindExtracting, watchFolders: Bool,
                     recentFiles: @escaping @Sendable ([URL]) -> [String: Date] = { _ in [:] },
                     onBattery: @escaping @Sendable () -> Bool = { false },
-                    photoLibrary: (any FindPhotoLibrary)? = nil, permissions: (any PermissionBroker)? = nil) {
+                    photoLibrary: (any FindPhotoLibrary)? = nil, permissions: (any PermissionBroker)? = nil,
+                    isOffline: @escaping @MainActor @Sendable () -> Bool = { false }) {
             self.indexDirectory = indexDirectory
             self.model = model
             self.mediaModel = mediaModel
@@ -146,6 +150,7 @@ public final class FindService: ChatFilesProviding {
             self.onBattery = onBattery
             self.photoLibrary = photoLibrary
             self.permissions = permissions
+            self.isOffline = isOffline
         }
     }
 
@@ -193,7 +198,8 @@ public final class FindService: ChatFilesProviding {
     /// The app's Find: the index and model under Application Support, the
     /// helper process for reading, EmbeddingGemma 2 through the engine.
     public static func live(settings: FindSettings, engine: any EngineServicing, helper: URL?,
-                            permissions: (any PermissionBroker)? = nil) -> FindService {
+                            permissions: (any PermissionBroker)? = nil,
+                            isOffline: @escaping @MainActor @Sendable () -> Bool = { false }) -> FindService {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Mference/Find", directoryHint: .isDirectory)
         // A few helper processes read side by side (one per four cores, up
@@ -204,14 +210,16 @@ public final class FindService: ChatFilesProviding {
         let library = LivePhotoLibrary()
         let extractor = FindLibraryReader(base: files, library: library)
         let models = base.appending(path: "Model", directoryHint: .isDirectory)
+        let storeOffline: @Sendable () async -> Bool = { await MainActor.run { isOffline() } }
         return FindService(settings: settings, dependencies: Dependencies(
             indexDirectory: base.appending(path: "Index", directoryHint: .isDirectory),
-            model: FindModelStore(directory: models),
-            mediaModel: FindModelStore(directory: models, file: .media),
+            model: FindModelStore(directory: models, isOffline: storeOffline),
+            mediaModel: FindModelStore(directory: models, file: .media, isOffline: storeOffline),
             makeEmbedder: { FindEmbedderLive(modelPath: $0, mediaModelPath: $1) },
             extractor: extractor, watchFolders: true,
             recentFiles: { FindRecentFiles.lastUsed(under: $0) },
-            onBattery: FindPower.isOnBattery, photoLibrary: library, permissions: permissions), engine: engine)
+            onBattery: FindPower.isOnBattery, photoLibrary: library, permissions: permissions,
+            isOffline: isOffline), engine: engine)
     }
 
     /// Previews and tests: in memory, the hashing embedder, no download.
@@ -305,6 +313,10 @@ public final class FindService: ChatFilesProviding {
         await reconfigure()
         try? await indexer?.requeue(kinds: [.image, .video, .audio])
         if on, settings.enabled { Task { await ensureMediaModel() } }
+        // Off: a model only waiting for Offline mode is no longer wanted.
+        if !on, mediaModelState == .waitingForOfflineMode {
+            mediaModelState = await dependencies.mediaModel.currentState()
+        }
     }
 
     /// The Photos library. On asks for the Photos permission first (the
@@ -379,6 +391,47 @@ public final class FindService: ChatFilesProviding {
     public func setLearnOnlyOnPower(_ on: Bool) async {
         settings.learnOnlyOnPower = on
         await indexer?.kick()
+    }
+
+    /// Offline mode changed (AppServices forwards the app's switch). On, a
+    /// running model download stops; its partial file stays, so it resumes
+    /// later. A downloaded model keeps working. Off, a download Offline mode
+    /// held back starts while Find is on.
+    public func offlineModeChanged(_ offline: Bool) async {
+        if offline {
+            if !modelState.isReady { await dependencies.model.cancel() }
+            if !mediaModelState.isReady { await dependencies.mediaModel.cancel() }
+        }
+        // The switch may have flipped back during those awaits (a later
+        // change runs meanwhile): act on where it stands now.
+        if dependencies.isOffline() {
+            if Self.isFetching(modelState) { modelState = .waitingForOfflineMode }
+            if Self.isFetching(mediaModelState) { mediaModelState = .waitingForOfflineMode }
+            return
+        }
+        guard settings.enabled else { return }
+        // Not a failed one: that waits for Retry, as before.
+        if Self.wantsFetch(modelState) {
+            Task { await ensureModel() }
+        } else if modelState.isReady, settings.readMedia, Self.wantsFetch(mediaModelState) {
+            Task { await ensureMediaModel() }
+        }
+    }
+
+    /// Not on the Mac and not failed: a download should run (one already
+    /// running is joined, not started twice).
+    private static func wantsFetch(_ state: FindModelState) -> Bool {
+        switch state {
+        case .ready, .failed: false
+        default: true
+        }
+    }
+
+    private static func isFetching(_ state: FindModelState) -> Bool {
+        switch state {
+        case .downloading, .verifying: true
+        default: false
+        }
     }
 
     /// Retries the model download after a failure.
@@ -482,9 +535,17 @@ public final class FindService: ChatFilesProviding {
     }
 
     private func ensureModel() async {
+        // Offline: a downloaded model is used; a missing one waits.
+        if !(await dependencies.model.currentState()).isReady, dependencies.isOffline() {
+            modelState = .waitingForOfflineMode
+            return
+        }
         do {
             let url = try await dependencies.model.ensureDownloaded { [weak self] state in
-                Task { @MainActor in self?.modelState = state }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.modelState = self.shown(state)
+                }
             }
             modelState = .ready(url)
             if embedder == nil {
@@ -493,7 +554,9 @@ public final class FindService: ChatFilesProviding {
             }
             if settings.readMedia { await ensureMediaModel() }
         } catch {
-            if case .failed = modelState {} else if !(error is CancellationError) {
+            if error is CancellationError, dependencies.isOffline() {
+                modelState = .waitingForOfflineMode
+            } else if case .failed = modelState {} else if !(error is CancellationError) {
                 modelState = .failed(error.localizedDescription)
             }
         }
@@ -501,19 +564,37 @@ public final class FindService: ChatFilesProviding {
 
     /// Fetches the media encoders and switches to an embedder that has them.
     private func ensureMediaModel() async {
+        guard settings.readMedia else { return }
+        let current = await dependencies.mediaModel.currentState()
+        guard settings.readMedia else { return }
+        if !current.isReady, dependencies.isOffline() {
+            mediaModelState = .waitingForOfflineMode
+            return
+        }
         do {
             let url = try await dependencies.mediaModel.ensureDownloaded { [weak self] state in
-                Task { @MainActor in self?.mediaModelState = state }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.mediaModelState = self.shown(state)
+                }
             }
             mediaModelState = .ready(url)
             guard settings.readMedia, case .ready(let text) = modelState, embedder?.supportsMedia != true else { return }
             await embedder?.unload()
             await install(dependencies.makeEmbedder(text, url))
         } catch {
-            if case .failed = mediaModelState {} else if !(error is CancellationError) {
+            if error is CancellationError, dependencies.isOffline() {
+                mediaModelState = .waitingForOfflineMode
+            } else if case .failed = mediaModelState {} else if !(error is CancellationError) {
                 mediaModelState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// A download's progress as shown: one that arrives after Offline mode
+    /// stopped the download reads as waiting.
+    private func shown(_ state: FindModelState) -> FindModelState {
+        !state.isReady && dependencies.isOffline() ? .waitingForOfflineMode : state
     }
 
     private func install(_ embedder: any FindTextEmbedding) async {

@@ -136,15 +136,19 @@ public final class AppServices {
             settings.onIdleUnloadChange = { idleUnload.setDelay($0) }
         }
         let speechService = self.speech as? SpeechService
-        if downloads != nil || imageDownloads != nil || speechService != nil {
+        if downloads != nil || imageDownloads != nil || speechService != nil || find != nil {
             // Offline mode stops downloads already running, not only new
-            // ones: the GGUF models and the speech packages.
-            settings.onOfflineModeChange = { offline in
-                guard offline else { return }
-                Task {
-                    await downloads?.pauseAll()
-                    await imageDownloads?.pauseAll()
-                    await speechService?.pauseAllInstalls()
+            // ones: the GGUF models, the speech packages and Find's search
+            // model. Back online, only Find's model (which Find fetches on
+            // its own) starts again.
+            settings.onOfflineModeChange = { [weak find] offline in
+                Task { @MainActor in
+                    if offline {
+                        await downloads?.pauseAll()
+                        await imageDownloads?.pauseAll()
+                        await speechService?.pauseAllInstalls()
+                    }
+                    await find?.offlineModeChanged(offline)
                 }
             }
         }
@@ -197,7 +201,8 @@ public final class AppServices {
                                    speechPreferences: SpeechPreferences(),
                                    noteAttachments: .live,
                                    find: FindService.live(settings: FindSettings(), engine: engine, helper: findHelper,
-                                                          permissions: permissions),
+                                                          permissions: permissions,
+                                                          isOffline: { settings.offlineMode }),
                                    appleChat: FoundationChatModel(),
                                    storeError: storeError,
                                    idleUnload: idleUnload)

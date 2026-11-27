@@ -87,7 +87,9 @@ public final class AppSettings {
         didSet { store.set(webSearchEnabled, forKey: Key.webSearchEnabled) }
     }
 
-    /// Turns off web search, mail sync, errands and downloads.
+    /// Turns off web search and every model download (chat, image
+    /// understanding, speech, Find); a running one stops. Models already on
+    /// the Mac keep working. Apple Mail and Calendar sync on their own.
     public var offlineMode: Bool {
         didSet {
             store.set(offlineMode, forKey: Key.offlineMode)
@@ -160,8 +162,7 @@ public final class AppSettings {
     /// Web search actually runs: switched on and not offline.
     public var isWebSearchActive: Bool { webSearchEnabled && !offlineMode }
 
-    /// Anything that reaches the network for the person (downloads, mail
-    /// sync, errands) checks this first.
+    /// Not in Offline mode: web search and model downloads may run.
     public var allowsNetwork: Bool { !offlineMode }
 
     /// Thinking for a new request on `model`: nil when the model has no

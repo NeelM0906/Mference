@@ -393,12 +393,17 @@ struct FindStatusBanner: View {
             return "Checking the search model…"
         case .failed(let message):
             return "The search model could not be downloaded: \(message) Word search still works."
+        case .waitingForOfflineMode:
+            return "The search model downloads when Offline mode is off. Word search already works."
         default:
             break
         }
         if case .downloading(let fraction) = mediaModelState {
             return "Downloading the photo, video and audio model (\(FindModelFile.media.sizeLabel), "
                 + "\(Int(fraction * 100))%). Everything else already works."
+        }
+        if case .waitingForOfflineMode = mediaModelState {
+            return "The photo, video and audio model downloads when Offline mode is off. Everything else already works."
         }
         return status.line
     }

@@ -53,7 +53,7 @@ public struct MFComponentGallery: View {
                     MFBadge(.custom("Installed · default", .success))
                     Button("Details") {}.buttonStyle(.mfSecondary)
                 }
-                MFListRow("Offline mode", subtitle: "Turns off web search, mail sync and errands.") {
+                MFListRow("Offline mode", subtitle: "Turns off web search and every model download.") {
                     Toggle("Offline mode", isOn: $off).toggleStyle(.mf)
                 }
                 VStack(alignment: .leading) {

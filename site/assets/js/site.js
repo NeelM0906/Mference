@@ -124,8 +124,8 @@
   });
 
   /* offline switch: flips every data-flow="out" row in the same scope; "local"
-     rows stay on the Mac and "system" rows (Apple Mail and Calendar sync) and
-     "once" rows (Find's model) are not paused by it */
+     rows stay on the Mac and "system" rows (Apple Mail and Calendar sync) are
+     not paused by it */
   $$("[data-offline]").forEach(function (scope) {
     var sw = $(".switch", scope), sub = $("[data-offline-sub]", scope);
     function set(on) {

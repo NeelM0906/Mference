@@ -428,7 +428,7 @@ public struct SettingsView: View {
                     settingToggle("Web search through SearXNG", .webSearchEnabled)
                 }
                 MFListRow("Offline mode",
-                          subtitle: "Turns off web search, model downloads and mail sync. Chat and scanning keep working.") {
+                          subtitle: "Turns off web search and every model download. Chat, scanning and Find keep working with what's on this Mac. Apple Mail and Calendar keep syncing on their own.") {
                     settingToggle("Offline mode", .offlineMode)
                 }
                 MFListRow("Block remote images and trackers in mail",

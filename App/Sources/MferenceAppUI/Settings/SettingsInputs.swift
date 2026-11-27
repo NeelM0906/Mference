@@ -51,7 +51,8 @@ public enum ConnectionKind: String, Sendable, Hashable, CaseIterable {
 public protocol AppSettingsModel: AnyObject, Observable {
     /// Off until the person turns it on (L7).
     var webSearchEnabled: Bool { get set }
-    /// Turns off web search and mail sync; chat and scanning keep working.
+    /// Turns off web search and every model download; chat, scanning and
+    /// Find keep working with what is on this Mac.
     var offlineMode: Bool { get set }
     /// Remote images and trackers are removed before a message is shown.
     var blockRemoteMailContent: Bool { get set }
