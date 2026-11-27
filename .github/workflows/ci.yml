@@ -126,9 +126,11 @@ jobs:
         run: swift --version
       - name: Build the app (release, warnings are errors)
         run: swift build -c release --package-path App --force-resolved-versions
+      - name: Build the app's tests
+        run: swift build --build-tests --package-path App --force-resolved-versions
       - name: Run the app's model-free tests
         timeout-minutes: 40
-        run: swift test --package-path App --force-resolved-versions
+        run: swift test --skip-build --package-path App --force-resolved-versions
 
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

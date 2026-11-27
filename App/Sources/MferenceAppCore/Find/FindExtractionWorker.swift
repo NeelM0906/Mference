@@ -123,7 +123,7 @@ actor FindTurnstile {
 
 /// Runs the extractor in this process (tests, and a fallback when the helper
 /// cannot start). A file that takes longer than `timeout` is reported as
-/// skipped; its thread is left to finish on its own.
+/// skipped at the timeout; its thread is left to finish on its own.
 public struct InProcessFindExtractor: FindExtracting {
     public var timeout: Duration
 
@@ -135,17 +135,29 @@ public struct InProcessFindExtractor: FindExtracting {
         let work = Task.detached(priority: Task.currentPriority) {
             await BlockingWork.run { FindExtractor.extract(url, kind: kind, options: options) }
         }
-        let timeout = self.timeout
-        return await withTaskGroup(of: FindExtraction?.self) { group in
-            group.addTask { await work.value }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first ?? .skipped(reason: "Took too long to read.")
+        return await Self.result(of: work, within: timeout)
+    }
+
+    /// `work`'s result, or skipped once `timeout` passes first (or the caller
+    /// is cancelled). The caller resumes then; a stuck read keeps its thread
+    /// and finishes on its own. (A task group would wait for the read:
+    /// awaiting `work.value` does not end when the group is cancelled.)
+    static func result(of work: Task<FindExtraction, Never>, within timeout: Duration) async -> FindExtraction {
+        let skipped = FindExtraction.skipped(reason: "Took too long to read.")
+        // The first value in wins; the stream ends with it.
+        let (first, input) = AsyncStream.makeStream(of: FindExtraction.self, bufferingPolicy: .bufferingOldest(1))
+        let timer = Task {
+            try? await Task.sleep(for: timeout)
+            input.yield(skipped)
+            input.finish()
         }
+        defer { timer.cancel() }
+        Task {
+            input.yield(await work.value)
+            input.finish()
+        }
+        var results = first.makeAsyncIterator()
+        return await results.next() ?? skipped
     }
 
     public func prepare(_ url: URL, kind: FindKind, pieces: [FindMediaPiece]) async -> [URL?] {

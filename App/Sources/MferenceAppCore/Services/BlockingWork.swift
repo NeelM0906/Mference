@@ -12,10 +12,14 @@ import Foundation
 public enum BlockingWork {
     /// Runs `work` on a global Dispatch queue at the caller's priority and
     /// resumes with its result. The calling task is suspended, not blocked.
+    /// Each job drains its own autorelease pool (Vision and CGImage
+    /// temporaries), as the helper process does per file.
     public static func run<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
         let qos = qos(for: Task.currentPriority)
         return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: qos).async { continuation.resume(returning: work()) }
+            DispatchQueue.global(qos: qos).async {
+                continuation.resume(returning: autoreleasepool { work() })
+            }
         }
     }
 

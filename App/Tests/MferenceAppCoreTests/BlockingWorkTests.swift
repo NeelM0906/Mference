@@ -29,6 +29,52 @@ import Testing
         #expect(allStarted, "only \(started.load(ordering: .sequentiallyConsistent)) of \(jobs) jobs started")
     }
 
+    /// A read that never finishes is reported as skipped once the extractor's
+    /// timeout passes, instead of holding its caller until the read returns.
+    @Test func aStuckReadIsSkippedAtTheTimeout() async {
+        let release = DispatchSemaphore(value: 0)
+        let stuck = Task.detached {
+            await BlockingWork.run { () -> FindExtraction in
+                _ = release.wait(timeout: .now() + 30)
+                return .text([])
+            }
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
+        let result = await InProcessFindExtractor.result(of: stuck, within: .milliseconds(200))
+        let waited = clock.now - start
+        release.signal()
+        guard case .skipped = result else {
+            Issue.record("a stuck read was not skipped: \(result)")
+            return
+        }
+        #expect(waited < .seconds(5), "waited \(waited) for a 200 ms timeout")
+    }
+
+    @Test func aQuickReadReturnsItsOwnResult() async {
+        let quick = Task.detached { await BlockingWork.run { FindExtraction.text([]) } }
+        #expect(await InProcessFindExtractor.result(of: quick, within: .seconds(30)) == .text([]))
+    }
+
+    @Test func aCancelledCallerStopsWaiting() async {
+        let release = DispatchSemaphore(value: 0)
+        let stuck = Task.detached {
+            await BlockingWork.run { () -> FindExtraction in
+                _ = release.wait(timeout: .now() + 30)
+                return .text([])
+            }
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
+        let caller = Task { await InProcessFindExtractor.result(of: stuck, within: .seconds(30)) }
+        caller.cancel()
+        let result = await caller.value
+        let waited = clock.now - start
+        release.signal()
+        #expect(result != .text([]), "a cancelled caller does not wait for the read")
+        #expect(waited < .seconds(5), "waited \(waited) after cancelling")
+    }
+
     @Test func runsAtTheCallersPriority() {
         #expect(BlockingWork.qos(for: .userInitiated) == .userInitiated)
         #expect(BlockingWork.qos(for: .medium) == .default)
