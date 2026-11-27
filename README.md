@@ -27,18 +27,18 @@
   Deep ones for harder work, and large mixture-of-experts models that stream
   from the SSD. Pick one per chat; the app shows how much memory each needs
   before you load it. [The models](#models).
-- **Chat with your files.** Ask about a lease, a quote or your notes, and the
-  answer comes back with the files it used.
+- **Chat with your files.** Ask about what's in your files, like a lease, a
+  quote or your notes, and the answer comes back with the files it used.
 - **Find files by what is in them**: "the lease clause about pets", "that
   screenshot with the wifi password", "the zebra photo". Word matches show as
   you type and meaning matches follow, from any app with ⌥Space. Turn on photos,
   video and audio to search what is in them. The index and its small search
   model stay on your Mac.
-- **Scan images.** Receipts, documents and screenshots are read on the Mac,
-  and the model fills in merchant, date, total and tax for you to check.
+- **Scan images.** Receipts, documents and screenshots are read on the Mac.
 - **Search the web when you need it.** Turn it on for a chat and answers come
-  back with numbered sources, through a search engine bundled inside the app.
-  Offline mode turns it off, along with every model download.
+  back with numbered sources, through SearXNG, the open-source metasearch
+  engine, bundled inside the app. Offline mode turns it off, along with every
+  model download.
 - **Calendar and to-dos, in step with your Mac.** Your Mac's calendars in day,
   week, month and year views, to-dos that sync with Reminders once you turn it
   on, and questions about your week answered from your own calendar.

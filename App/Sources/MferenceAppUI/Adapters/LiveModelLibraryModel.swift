@@ -169,7 +169,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         case .quick: "Qwen3.5 4B"
         case .deep: "Qwen3.8 27B"
         case .bonsai27b: "Ternary Qwen3.8 27B"
-        case .inkling2Mini: "Mini"
+        case .inkling2Mini: "Looped MoE"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
         case .minicpm5_1b: "1B"

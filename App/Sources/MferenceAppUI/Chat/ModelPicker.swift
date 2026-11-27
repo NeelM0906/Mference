@@ -2,35 +2,48 @@ import MferenceAppCore
 import MferenceDesign
 import SwiftUI
 
-/// The per-chat model picker (mockup 02b, decisions L2/L3): Recommended
-/// (Quick, Deep, Auto "Coming later"), Built into macOS (Apple's on-device
-/// model, only while Settings > Models > Apple Intelligence model is on and
-/// this Mac can run it) and Also on this Mac (Inkling 2 Mini, Qwen 3.6,
-/// MiniCPM5 2B and 1B, Maple), each with its live state and, small under it, the
-/// engine.
+/// The per-chat model picker: Auto ("Coming later") on top, then the models
+/// grouped by size (Small, Large, Mixture of experts) or by family, as the
+/// switch at the top says (`ModelPickerGrouping`, remembered). Quick and Deep
+/// carry a Recommended tag in their group. Apple's on-device model shows only
+/// while Settings > Models > Apple Intelligence model is on and this Mac can
+/// run it. Each row has its live state and, small under it, the engine.
 struct ModelPicker: View {
     @Bindable var model: ChatViewModel
     @Binding var isOpen: Bool
     let actions: ChatActions
     @Environment(\.openURL) private var openURL
+    @AppStorage(ModelPickerGrouping.storageKey) private var grouping: ModelPickerGrouping = .size
+
+    /// Every model the picker lists: Apple's only while it is offered.
+    private var offeredModels: [AppModel] {
+        AppModel.allCases.filter { $0 != .apple || model.option(for: .apple) != nil }
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                header("Recommended")
-                ForEach(AppModel.allCases.filter { $0.group == .recommended }) { item in
-                    row(item)
+                Picker("Group models", selection: $grouping) {
+                    ForEach(ModelPickerGrouping.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
+                .padding(.top, MFSpacing.s)
+                .padding(.bottom, MFSpacing.xxs)
                 AutoRow()
-                if let apple = model.option(for: .apple) {
+                ForEach(grouping.sections(for: offeredModels)) { section in
                     divider
-                    header("Built into macOS")
-                    appleRow(apple)
-                }
-                divider
-                header("Also on this Mac")
-                ForEach(AppModel.allCases.filter { $0.group == .alsoOnThisMac }) { item in
-                    row(item)
+                    header(section.title, hint: section.hint)
+                    ForEach(section.models) { item in
+                        if item == .apple, let apple = model.option(for: .apple) {
+                            appleRow(apple)
+                        } else {
+                            row(item)
+                        }
+                    }
                 }
                 divider
                 HStack(spacing: MFSpacing.s) {
@@ -91,15 +104,22 @@ struct ModelPicker: View {
         }
     }
 
-    private func header(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(MFFont.sectionHeader)
-            .tracking(MFFont.sectionHeaderTracking)
-            .foregroundStyle(MFColor.tertiary)
-            .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
-            .padding(.top, MFSpacing.s + MFSpacing.xxs)
-            .padding(.bottom, MFSpacing.xs)
-            .accessibilityAddTraits(.isHeader)
+    private func header(_ title: String, hint: String? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: MFSpacing.s) {
+            Text(title.uppercased())
+                .font(MFFont.sectionHeader)
+                .tracking(MFFont.sectionHeaderTracking)
+            if let hint {
+                Text(hint)
+                    .font(MFFont.caption)
+            }
+        }
+        .foregroundStyle(MFColor.tertiary)
+        .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
+        .padding(.top, MFSpacing.s + MFSpacing.xxs)
+        .padding(.bottom, MFSpacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 
     private var divider: some View {
@@ -130,6 +150,9 @@ struct ModelRow: View {
     let onPick: () -> Void
     @State private var isHovered = false
 
+    /// Quick and Deep: tagged in their group instead of a section of their own.
+    private var isRecommended: Bool { model.group == .recommended }
+
     private var isInstalled: Bool {
         if case .notInstalled = availability { return false }
         return true
@@ -147,6 +170,14 @@ struct ModelRow: View {
                         Text(model.detail)
                             .font(MFFont.chip)
                             .foregroundStyle(model.isPreview ? MFColor.preview : MFColor.tertiary)
+                        if isRecommended {
+                            Text("Recommended")
+                                .font(MFFont.micro)
+                                .foregroundStyle(MFColor.accent)
+                                .padding(.horizontal, MFSpacing.xs)
+                                .padding(.vertical, MFSpacing.xxs / 2)
+                                .background(MFColor.accentFillFaint, in: RoundedRectangle(cornerRadius: MFRadius.xs))
+                        }
                     }
                     Text(summaryOverride ?? model.summary)
                         .font(MFFont.caption)
@@ -173,7 +204,7 @@ struct ModelRow: View {
         .disabled(!isInstalled)
         .onHover { isHovered = $0 }
         .help(helpText)
-        .accessibilityLabel("\(model.name), \(model.detail)")
+        .accessibilityLabel("\(model.name), \(model.detail)\(isRecommended ? ", recommended" : "")")
         .accessibilityValue(statusText)
         .accessibilityHint(summaryOverride ?? model.summary)
         .accessibilityAddTraits(isSelected ? .isSelected : [])

@@ -113,6 +113,29 @@ import Testing
         #expect(!ShellTrailingControls.showsGeneralControls(screenItems: [scan]))
     }
 
+    /// The section pills step back to icons only when the bar with every
+    /// name would not fit, so macOS never folds the screen's actions and
+    /// Settings into its » menu (which shows nothing for them).
+    @Test func pillsStepBackOnlyWhenTheNamedBarWouldNotFit() {
+        // Not measured yet: keep the names.
+        #expect(!ShellMetrics.usesCompactPills(windowWidth: 0, fullBarWidth: 900))
+        #expect(!ShellMetrics.usesCompactPills(windowWidth: 1_200, fullBarWidth: 0))
+        #expect(ShellMetrics.usesCompactPills(windowWidth: 1_000, fullBarWidth: 1_000))
+        #expect(!ShellMetrics.usesCompactPills(
+            windowWidth: 1_000 + ShellMetrics.toolbarChromeAllowance, fullBarWidth: 1_000))
+    }
+
+    @Test func compactPillsAreNarrowerAndKeepTheOpenSectionNamed() {
+        let model = ShellModel(selection: .scan, defaults: nil)
+        let full = NSHostingView(rootView: ShellPillBar(model: model)).fittingSize.width
+        let compact = NSHostingView(rootView: ShellPillBar(model: model, compact: true)).fittingSize.width
+        // Six names go; Scan's stays.
+        #expect(compact < full - 150)
+        let allIcons = NSHostingView(rootView: ShellPillBar(model: ShellModel(selection: .settings, defaults: nil),
+                                                            compact: true)).fittingSize.width
+        #expect(allIcons < compact)
+    }
+
     @Test func itemsAreEqualByID() {
         let a = ShellToolbarItem(id: "x", view: AnyView(Text("1")))
         let b = ShellToolbarItem(id: "x", view: AnyView(Text("2")))

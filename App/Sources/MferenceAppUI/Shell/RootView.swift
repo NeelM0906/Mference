@@ -24,6 +24,13 @@ public struct RootView: View {
     @Environment(ScreenModels.self) private var screenModels: ScreenModels?
     /// The visible screen's `shellToolbar` items, for the window toolbar.
     @State private var toolbarItems: [ShellToolbarItem] = []
+    /// The window's width and the toolbar's width with every pill named.
+    @State private var windowWidth: CGFloat = 0
+    @State private var fullToolbarWidth: CGFloat = 0
+    /// Each screen's actions' width, measured while they show, by item ids.
+    @State private var toolbarItemsWidths: [String: CGFloat] = [:]
+
+    private var toolbarItemsKey: String { toolbarItems.map(\.id).joined(separator: ",") }
 
     public init(model: ShellModel, chrome: ChromePlacement = .toolbar) {
         self.model = model
@@ -76,17 +83,28 @@ public struct RootView: View {
                     Rectangle().fill(MFColor.chromeDivider).frame(height: MFLayout.hairline)
                 }
                 .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
+                .background(alignment: .topLeading) {
+                    ShellToolbarMeasure(model: model, items: toolbarItems,
+                                        itemsWidth: toolbarItemsWidths[toolbarItemsKey]
+                                            ?? ShellMetrics.unmeasuredScreenActionsWidth) { fullToolbarWidth = $0 }
+                }
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
                         HStack(spacing: MFSpacing.m) {
                             ShellBrand()
-                            ShellPillBar(model: model)
+                            ShellPillBar(model: model,
+                                         compact: ShellMetrics.usesCompactPills(windowWidth: windowWidth,
+                                                                                fullBarWidth: fullToolbarWidth))
                         }
                     }
                     .sharedBackgroundVisibility(.hidden)
                     ToolbarSpacer(.flexible)
                     ToolbarItem(placement: .primaryAction) {
-                        ShellTrailingControls(model: model, items: toolbarItems)
+                        ShellTrailingControls(model: model, items: toolbarItems) { width in
+                            let key = toolbarItemsKey
+                            if width > 0, toolbarItemsWidths[key] != width { toolbarItemsWidths[key] = width }
+                        }
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.trailing, MFSpacing.xs)
                     }

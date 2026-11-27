@@ -19,12 +19,17 @@ struct ShellBrand: View {
 /// The section pills (Chat, Mail, Calendar, Notes, Errands, Scan).
 struct ShellPillBar: View {
     @Bindable var model: ShellModel
+    /// Icons only, except the open section, when the window is too narrow
+    /// for every name (`ShellMetrics.usesCompactPills`). Names stay in the
+    /// tooltips and the accessibility labels.
+    var compact = false
 
     var body: some View {
         HStack(spacing: MFSpacing.xxs) {
             ForEach(AppSection.pills) { section in
                 MFPill(section.title, systemImage: section.systemImage,
-                       isSelected: model.selection == section) {
+                       isSelected: model.selection == section,
+                       showsTitle: !compact || model.selection == section) {
                     model.show(section)
                 }
                 .help("\(section.title) (⌘\(AppSection.pills.firstIndex(of: section).map { $0 + 1 } ?? 0))")
@@ -42,6 +47,13 @@ struct ShellTrailingControls: View {
     @Bindable var model: ShellModel
     /// Actions the visible screen contributes (`shellToolbar`).
     var items: [ShellToolbarItem] = []
+    /// A hidden copy that only measures the bar's width: no popover, and a
+    /// blank of `measuredItemsWidth` in place of the screen's actions, whose
+    /// views may present sheets of their own and must exist once.
+    var isMeasuring = false
+    var measuredItemsWidth: CGFloat = 0
+    /// Reports the screen actions' width while they show (the real bar).
+    var onItemsWidth: ((CGFloat) -> Void)?
     /// Team N3's voice models: the red recording timer chip (D7).
     @Environment(VoiceModels.self) private var voice: VoiceModels?
 
@@ -51,6 +63,17 @@ struct ShellTrailingControls: View {
     static func showsGeneralControls(screenItems: [ShellToolbarItem]) -> Bool { screenItems.isEmpty }
 
     var body: some View {
+        if isMeasuring {
+            controls
+        } else {
+            // On the whole group, so ⌘K works even when the search button steps back.
+            controls.popover(isPresented: $model.isSearchPresented, arrowEdge: .bottom) {
+                ShellSearchPanel(model: model)
+            }
+        }
+    }
+
+    private var controls: some View {
         HStack(spacing: MFSpacing.m) {
             // While a meeting records, on every section: opens the meeting note.
             if let voice, let live = voice.liveMeeting {
@@ -59,7 +82,14 @@ struct ShellTrailingControls: View {
                     voice.openLiveMeeting()
                 }
             }
-            ShellToolbarItems(items: items)
+            if isMeasuring {
+                if !items.isEmpty {
+                    Color.clear.frame(width: measuredItemsWidth, height: 1)
+                }
+            } else {
+                ShellToolbarItems(items: items)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { onItemsWidth?($0) }
+            }
             if Self.showsGeneralControls(screenItems: items) {
                 MFChip("On this Mac", systemImage: "lock", tone: .success)
                     .help("Runs on this Mac. Nothing leaves it except web searches you turn on and model downloads.")
@@ -102,10 +132,32 @@ struct ShellTrailingControls: View {
             .accessibilityLabel(model.selection == .settings ? "Close Settings" : "Settings")
             .help(model.selection == .settings ? "Close Settings" : "Settings (⌘,)")
         }
-        // On the whole group, so ⌘K works even when the search button steps back.
-        .popover(isPresented: $model.isSearchPresented, arrowEdge: .bottom) {
-            ShellSearchPanel(model: model)
+    }
+}
+
+/// The window toolbar's full width with every pill named, laid out hidden
+/// behind the content and never shown or clicked, so the shell knows when
+/// the names must step back (`ShellMetrics.usesCompactPills`).
+struct ShellToolbarMeasure: View {
+    @Bindable var model: ShellModel
+    let items: [ShellToolbarItem]
+    /// The screen actions' last measured width (`ShellMetrics`' estimate
+    /// until they have shown once).
+    let itemsWidth: CGFloat
+    let onWidth: (CGFloat) -> Void
+
+    var body: some View {
+        HStack(spacing: MFSpacing.m) {
+            ShellBrand()
+            ShellPillBar(model: model)
+            ShellTrailingControls(model: model, items: items, isMeasuring: true, measuredItemsWidth: itemsWidth)
         }
+        .fixedSize()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { onWidth($0) }
+        .hidden()
+        .disabled(true)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

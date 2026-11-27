@@ -57,12 +57,17 @@ public struct MFPill: View {
     let title: String
     let systemImage: String?
     let isSelected: Bool
+    /// False draws the icon alone (a narrow window); the title stays the
+    /// accessibility label. Ignored without an icon.
+    let showsTitle: Bool
     let action: () -> Void
 
-    public init(_ title: String, systemImage: String? = nil, isSelected: Bool, action: @escaping () -> Void) {
+    public init(_ title: String, systemImage: String? = nil, isSelected: Bool, showsTitle: Bool = true,
+                action: @escaping () -> Void) {
         self.title = title
         self.systemImage = systemImage
         self.isSelected = isSelected
+        self.showsTitle = showsTitle || systemImage == nil
         self.action = action
     }
 
@@ -74,10 +79,13 @@ public struct MFPill: View {
                         .font(.system(size: MFMetrics.iconSize, weight: .medium))
                         .accessibilityHidden(true)
                 }
-                Text(title)
+                if showsTitle {
+                    Text(title)
+                }
             }
         }
         .buttonStyle(MFPillButtonStyle(isSelected: isSelected))
+        .accessibilityLabel(title)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

@@ -18,8 +18,10 @@ import Testing
         #expect(model.group == .alsoOnThisMac)
         #expect(AppModel.allCases.filter { $0.group == .alsoOnThisMac } == [.bonsai27b, .inkling2Mini, .qwen36, .minicpm5, .minicpm5_1b, .maple])
         #expect(AppModel.allCases.filter { $0.group == .recommended } == [.quick, .deep])
-        #expect(model.engineLabel == "Mference" && model.isPreview && model.supportsThinking)
-        #expect(model.name == "Inkling 2 Mini" && model.shortName == "Inkling 2" && model.detail == "Mini")
+        // Not a preview (only Maple is), and no stray "Mini" after its name.
+        #expect(model.engineLabel == "Mference" && !model.isPreview && model.supportsThinking)
+        #expect(model.name == "Inkling 2 Mini" && model.shortName == "Inkling 2" && model.detail == "Looped MoE")
+        #expect(AppModel.allCases.filter(\.isPreview) == [.maple])
         #expect(model.summary == "Deep-tier mixture-of-experts model.")
     }
 

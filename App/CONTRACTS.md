@@ -142,3 +142,13 @@ in the "Also on this Mac" group. It follows Deep's rules: offered only on Macs
 with more than 16 GB, downloaded after approval
 (`DownloadSource.bonsai27b`), and image understanding through its own Q8_0
 projector (`DownloadSource.bonsai27bImageUnderstanding`).
+
+## AppModel: picker grouping and Inkling's label (2026-11-27)
+
+The chat's model picker groups its rows by size (Small, Large, Mixture of
+experts; the default) or by family, from `ModelPickerGrouping` in
+`MferenceAppCore/Models`, and keeps the choice under its `storageKey`.
+`ModelGroup` is unchanged: the menu bar still uses it, and
+`group == .recommended` now draws a Recommended tag on Quick and Deep inside
+their picker section. `AppModel.isPreview` is Maple only, and Inkling 2 Mini's
+`detail` is "Looped MoE" (it was "Mini").
