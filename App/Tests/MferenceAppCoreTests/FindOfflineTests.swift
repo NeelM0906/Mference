@@ -35,7 +35,7 @@ actor GatedFindModel: FindModelProviding {
             return url
         }
         running = work
-        defer { running = nil }
+        defer { if running == work { running = nil } }
         do {
             let result = try await work.value
             state = .ready(result)
@@ -152,14 +152,54 @@ final class OfflineSwitch: Sendable {
     }
 
     @Test func offlineChangesLeaveAFindThatIsOffAlone() async throws {
+        let folder = try FindTempFolder()
         let model = GatedFindModel()
         let offline = OfflineSwitch(true)
         let find = service(model: model, offline: offline)
+        await find.turnOn(roots: [folder.url])
+        #expect(await eventually { find.modelState == .waitingForOfflineMode })
+        await find.turnOff()
         await find.offlineModeChanged(true)
         offline.set(false)
         await find.offlineModeChanged(false)
         try await Task.sleep(for: .milliseconds(100))
         #expect(await model.downloadsStarted == 0)
+    }
+
+    /// Offline on and straight off again: the second change can run while
+    /// the first is still stopping the download. Find ends up downloading.
+    @Test func offlineOnAndStraightOffAgainKeepsTheDownloadGoing() async throws {
+        let folder = try FindTempFolder()
+        let model = GatedFindModel()
+        let offline = OfflineSwitch(false)
+        let find = service(model: model, offline: offline)
+        await find.turnOn(roots: [folder.url])
+        #expect(await eventually { await model.isDownloading })
+        offline.set(true)
+        let goingOffline = Task { await find.offlineModeChanged(true) }
+        offline.set(false)
+        let goingOnline = Task { await find.offlineModeChanged(false) }
+        await goingOffline.value
+        await goingOnline.value
+        #expect(await eventually { await model.isDownloading })
+        #expect(find.modelState != .waitingForOfflineMode)
+        await model.finish()
+        #expect(await eventually { find.modelState.isReady })
+        await find.turnOff()
+    }
+
+    /// Photos, video and audio turned off while its model waits: nothing is
+    /// left waiting (the banner would show it instead of Find's progress).
+    @Test func turningMediaOffClearsItsWait() async throws {
+        let folder = try FindTempFolder()
+        let find = service(model: GatedFindModel(downloaded: true), mediaModel: GatedFindModel(),
+                           offline: OfflineSwitch(true))
+        await find.turnOn(roots: [folder.url])
+        await find.setReadMedia(true)
+        #expect(await eventually { find.mediaModelState == .waitingForOfflineMode })
+        await find.setReadMedia(false)
+        #expect(find.mediaModelState == .notDownloaded)
+        await find.turnOff()
     }
 
     /// The app's own switch reaches Find: AppServices forwards Offline mode.
@@ -182,9 +222,51 @@ final class OfflineSwitch: Sendable {
         settings.offlineMode = true
         #expect(await eventually { find.modelState == .waitingForOfflineMode })
         #expect(await model.downloadsCancelled == 1)
+        #expect(await eventually { await !model.isDownloading })
         settings.offlineMode = false
         #expect(await eventually { await model.downloadsStarted == 2 })
         await model.cancel()
         await find.turnOff()
+    }
+}
+
+/// Holds every request open until it is cancelled: a model download in
+/// progress. Its own statics, used only by the serialized suite below.
+final class HoldingModelURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let started = Mutex(0)
+    static var requests: Int { started.withLock { $0 } }
+    static func reset() { started.withLock { $0 = 0 } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.started.withLock { $0 += 1 } }
+    override func stopLoading() {}
+}
+
+@Suite(.serialized) struct FindModelStoreRestartTests {
+    /// A download asked for right after a cancel is a new one, not the
+    /// cancelled one still ending (which would fail with CancellationError).
+    @Test func aDownloadAskedForRightAfterACancelStartsAgain() async throws {
+        HoldingModelURLProtocol.reset()
+        let folder = try FindTempFolder()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HoldingModelURLProtocol.self]
+        let store = FindModelStore(directory: folder.url,
+                                   file: FindModelFile(fileName: "model.gguf", sizeBytes: 1_000, sha256: "0"),
+                                   configuration: configuration)
+        let first = Task { try await store.ensureDownloaded { _ in } }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while HoldingModelURLProtocol.requests < 1, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        await store.cancel()
+        let second = Task { try await store.ensureDownloaded { _ in } }
+        while HoldingModelURLProtocol.requests < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(HoldingModelURLProtocol.requests == 2, "the second ask joined the cancelled download")
+        await store.cancel()
+        _ = try? await first.value
+        _ = try? await second.value
     }
 }

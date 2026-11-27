@@ -312,6 +312,10 @@ public final class FindService: ChatFilesProviding {
         await reconfigure()
         try? await indexer?.requeue(kinds: [.image, .video, .audio])
         if on, settings.enabled { Task { await ensureMediaModel() } }
+        // Off: a model only waiting for Offline mode is no longer wanted.
+        if !on, mediaModelState == .waitingForOfflineMode {
+            mediaModelState = await dependencies.mediaModel.currentState()
+        }
     }
 
     /// The Photos library. On asks for the Photos permission first (the
@@ -396,14 +400,18 @@ public final class FindService: ChatFilesProviding {
         if offline {
             if !modelState.isReady { await dependencies.model.cancel() }
             if !mediaModelState.isReady { await dependencies.mediaModel.cancel() }
+        }
+        // The switch may have flipped back during those awaits (a later
+        // change runs meanwhile): act on where it stands now.
+        if dependencies.isOffline() {
             if Self.isFetching(modelState) { modelState = .waitingForOfflineMode }
             if Self.isFetching(mediaModelState) { mediaModelState = .waitingForOfflineMode }
             return
         }
         guard settings.enabled else { return }
-        if modelState == .waitingForOfflineMode {
+        if !modelState.isReady {
             Task { await ensureModel() }
-        } else if settings.readMedia, mediaModelState == .waitingForOfflineMode {
+        } else if settings.readMedia, !mediaModelState.isReady {
             Task { await ensureMediaModel() }
         }
     }

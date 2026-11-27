@@ -88,18 +88,27 @@ public actor FindModelStore {
     /// Downloads the model if it is missing; `progress` gets each new state.
     public func ensureDownloaded(progress: @escaping @Sendable (FindModelState) -> Void) async throws -> URL {
         if case .ready(let url) = state, FileManager.default.fileExists(atPath: url.path) { return url }
+        // A cancelled download still ending is not joined (that would fail
+        // with its CancellationError): it ends, then a new one starts.
+        if let running = task, running.isCancelled {
+            _ = try? await running.value
+            if task == running { task = nil }
+        }
         if let task { return try await task.value }
         let work = Task { try await download(progress: progress) }
         task = work
-        defer { task = nil }
+        defer { if task == work { task = nil } }
         do {
             let url = try await work.value
             state = .ready(url)
             progress(state)
             return url
         } catch is CancellationError {
-            state = .notDownloaded
-            progress(state)
+            // A newer download may already be running: leave its state.
+            if task == work {
+                state = .notDownloaded
+                progress(state)
+            }
             throw CancellationError()
         } catch {
             let message = (error as? DownloadError)?.userMessage ?? error.localizedDescription

@@ -143,11 +143,12 @@ public final class AppServices {
             // its own) starts again.
             settings.onOfflineModeChange = { [weak find] offline in
                 Task { @MainActor in
+                    if offline {
+                        await downloads?.pauseAll()
+                        await imageDownloads?.pauseAll()
+                        await speechService?.pauseAllInstalls()
+                    }
                     await find?.offlineModeChanged(offline)
-                    guard offline else { return }
-                    await downloads?.pauseAll()
-                    await imageDownloads?.pauseAll()
-                    await speechService?.pauseAllInstalls()
                 }
             }
         }
