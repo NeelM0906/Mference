@@ -59,6 +59,18 @@ enum FindMediaFixtures {
             try folder.write("Notes/note \(index).txt", "Note \(index): \(topics[index % topics.count]) and more plans.")
         }
     }
+
+    /// `FindExtractor.extract` off the cooperative pool. Vision and the
+    /// AVFoundation bridge need a free pool thread to finish, so a test that
+    /// blocks one per read hangs the whole run once the pool is full.
+    static func extract(_ url: URL, kind: FindKind, options: FindExtractOptions) async -> FindExtraction {
+        await BlockingWork.run { FindExtractor.extract(url, kind: kind, options: options) }
+    }
+
+    /// `FindMedia.prepare` off the cooperative pool, for the same reason.
+    static func prepare(_ url: URL, kind: FindKind, pieces: [FindMediaPiece], into folder: URL) async -> [URL?] {
+        await BlockingWork.run { FindMedia.prepare(url, kind: kind, pieces: pieces, into: folder) }
+    }
 }
 
 @Suite struct FindMediaPlanTests {
@@ -135,18 +147,19 @@ enum FindMediaFixtures {
         #expect((a ^ b).nonzeroBitCount > FindMedia.sameShotBits)
     }
 
-    @Test func photoIsPlannedThenPreparedAtTheEncoderSize() throws {
+    @Test func photoIsPlannedThenPreparedAtTheEncoderSize() async throws {
         let folder = try FindTempFolder()
         let photo = try FindMediaFixtures.png(folder.url.appending(path: "IMG_1.png"), red: 1, green: 0, blue: 0)
-        let extraction = FindExtractor.extract(photo, kind: .image, options: FindExtractOptions(ocr: false, media: true))
+        let extraction = await FindMediaFixtures.extract(photo, kind: .image, options: FindExtractOptions(ocr: false, media: true))
         let chunks = extraction.chunks
         #expect(chunks.count == 1)
         let piece = try #require(chunks.first?.media)
         #expect(piece.modality == .image && piece.tokens == FindMedia.photoTokens)
         // Without media on, a photo has no pieces.
-        #expect(FindExtractor.extract(photo, kind: .image, options: FindExtractOptions(ocr: false)).chunks.isEmpty)
+        #expect(await FindMediaFixtures.extract(photo, kind: .image, options: FindExtractOptions(ocr: false)).chunks.isEmpty)
 
-        let files = FindMedia.prepare(photo, kind: .image, pieces: [piece], into: folder.url.appending(path: "prep"))
+        let files = await FindMediaFixtures.prepare(photo, kind: .image, pieces: [piece],
+                                                   into: folder.url.appending(path: "prep"))
         let file = try #require(files.first ?? nil)
         guard case .image(let width, let height, let rgb) = try FindMediaData(contentsOf: file) else {
             Issue.record("not an image")
@@ -158,16 +171,16 @@ enum FindMediaFixtures {
         #expect(rgb[0] > 200 && rgb[1] < 40 && rgb[2] < 40)
     }
 
-    @Test func audioIsPlannedInWindowsWithSilenceSkipped() throws {
+    @Test func audioIsPlannedInWindowsWithSilenceSkipped() async throws {
         let folder = try FindTempFolder()
         // Sound for the first 20 s of 70: the window from 50 s is silent.
         let wav = try FindMediaFixtures.wav(folder.url.appending(path: "memo.wav"), seconds: 70, loud: 26,
                                              amplitude: 0.5)
-        let chunks = FindExtractor.extract(wav, kind: .audio, options: FindExtractOptions(media: true)).chunks
+        let chunks = await FindMediaFixtures.extract(wav, kind: .audio, options: FindExtractOptions(media: true)).chunks
         #expect(chunks.compactMap(\.media?.start) == [0, 25])
         #expect(chunks.first?.location == "0:00–0:30")
-        let files = FindMedia.prepare(wav, kind: .audio, pieces: chunks.compactMap(\.media),
-                                      into: folder.url.appending(path: "prep"))
+        let files = await FindMediaFixtures.prepare(wav, kind: .audio, pieces: chunks.compactMap(\.media),
+                                                   into: folder.url.appending(path: "prep"))
         let file = try #require(files.first ?? nil)
         guard case .audio(let samples) = try FindMediaData(contentsOf: file) else {
             Issue.record("not audio")
@@ -175,13 +188,13 @@ enum FindMediaFixtures {
         }
         #expect(abs(samples.count - 30 * 16_000) < 1_600)
         // Without media on, audio is name-only.
-        #expect(FindExtractor.extract(wav, kind: .audio, options: FindExtractOptions()).chunks.isEmpty)
+        #expect(await FindMediaFixtures.extract(wav, kind: .audio, options: FindExtractOptions()).chunks.isEmpty)
     }
 
-    @Test func aDamagedVideoIsSkipped() throws {
+    @Test func aDamagedVideoIsSkipped() async throws {
         let folder = try FindTempFolder()
         let file = try folder.write("broken.mp4", "not a video at all")
-        if case .skipped = FindExtractor.extract(file, kind: .video, options: FindExtractOptions(media: true)) {
+        if case .skipped = await FindMediaFixtures.extract(file, kind: .video, options: FindExtractOptions(media: true)) {
         } else {
             Issue.record("a damaged video was not skipped")
         }

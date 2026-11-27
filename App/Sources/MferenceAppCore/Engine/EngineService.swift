@@ -114,7 +114,7 @@ public actor EngineService: EngineServicing {
         refreshGeneration &+= 1
         let generation = refreshGeneration
         let discover = self.discover
-        let fresh = await Task.detached { discover() }.value
+        let fresh = await BlockingWork.run { discover() }
         // A newer refresh started meanwhile: its catalog wins.
         guard !isShutDown, generation == refreshGeneration else { return }
         discovery = nil
@@ -170,7 +170,7 @@ public actor EngineService: EngineServicing {
             task = discovery
         } else {
             let discover = self.discover
-            task = Task.detached { discover() }
+            task = Task.detached { await BlockingWork.run { discover() } }
             discovery = task
         }
         let result = await task.value

@@ -539,10 +539,22 @@ public final class FindService: ChatFilesProviding {
         }
     }
 
-    /// When this process first started Find.
-    private static let started = Date()
+    /// When this process started. Files prepared since then are this run's,
+    /// even those prepared before Find first started here (tests run side by
+    /// side, each starting its own Find).
+    private static let started = processStart() ?? Date()
 
-    private static func removeEarlierPrepared() {
+    /// The process's start time from the kernel; nil if it cannot be read.
+    static func processStart() -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&name, u_int(name.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        return Date(timeIntervalSince1970: TimeInterval(start.tv_sec) + TimeInterval(start.tv_usec) / 1_000_000)
+    }
+
+    static func removeEarlierPrepared() {
         let cutoff = started
         let manager = FileManager.default
         let files = (try? manager.contentsOfDirectory(at: FindMediaFolder.ready,

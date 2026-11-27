@@ -33,11 +33,11 @@ final class SlowReader: FindExtracting {
         }
         try? await Task.sleep(for: delay)
         state.withLock { $0.inFlight -= 1 }
-        return FindExtractor.extract(url, kind: kind, options: options)
+        return await FindMediaFixtures.extract(url, kind: kind, options: options)
     }
 
     func prepare(_ url: URL, kind: FindKind, pieces: [FindMediaPiece]) async -> [URL?] {
-        FindMedia.prepare(url, kind: kind, pieces: pieces, into: FindMediaFolder.url)
+        await FindMediaFixtures.prepare(url, kind: kind, pieces: pieces, into: FindMediaFolder.url)
     }
 
     func shutdown() async {}
@@ -125,12 +125,12 @@ final class CountingEmbedder: FindTextEmbedding {
         #expect(reader.hurryCalls.last == false, "back to background once caught up")
     }
 
-    @Test func photosWithoutTextSkipTheFullRead() throws {
+    @Test func photosWithoutTextSkipTheFullRead() async throws {
         let folder = try FindTempFolder()
         let plain = try FindMediaFixtures.png(folder.url.appending(path: "IMG_1.png"), red: 0.2, green: 0.5, blue: 0.3)
-        #expect(FindExtractor.extract(plain, kind: .image, options: FindExtractOptions(ocr: true)).chunks.isEmpty)
+        #expect(await FindMediaFixtures.extract(plain, kind: .image, options: FindExtractOptions(ocr: true)).chunks.isEmpty)
         let sign = try Self.textImage(folder.url.appending(path: "IMG_2.png"), lines: ["PARKING PERMIT", "ZONE 4 ONLY"])
-        let read = FindExtractor.extract(sign, kind: .image, options: FindExtractOptions(ocr: true)).chunks
+        let read = await FindMediaFixtures.extract(sign, kind: .image, options: FindExtractOptions(ocr: true)).chunks
         #expect(read.first?.fromOCR == true)
         #expect(read.first?.text.uppercased().contains("PARKING") == true)
     }
@@ -236,5 +236,26 @@ extension FindIndexer {
         let first = try await index.pendingChunks(limit: 1, includeMedia: true)
         #expect(first.first?.fileID == newer)
         #expect(first.first?.media?.prepared == "/tmp/x.fmd")
+    }
+}
+
+@Suite struct FindPreparedCleanupTests {
+    /// A picture this process prepared before its first Find start is this
+    /// run's, so Find's start-up cleanup keeps it. (Tests run side by side:
+    /// one test's Find start must not delete what another just prepared.)
+    @Test @MainActor func cleanupKeepsWhatThisProcessPrepared() throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: FindMediaFolder.ready, withIntermediateDirectories: true)
+        let file = FindMediaFolder.ready.appending(path: "cleanup-\(UUID().uuidString).fmd")
+        try Data([1]).write(to: file)
+        defer { try? manager.removeItem(at: file) }
+        FindService.removeEarlierPrepared()
+        #expect(manager.fileExists(atPath: file.path), "a file prepared by this process was removed")
+    }
+
+    @Test @MainActor func theProcessStartTimeIsRead() throws {
+        let start = try #require(FindService.processStart())
+        #expect(start <= Date())
+        #expect(Date().timeIntervalSince(start) < 24 * 3_600, "a test process is not a day old")
     }
 }

@@ -16,8 +16,11 @@ public actor InMemoryCalendarService: CalendarServicing {
     private let promptShown: Bool
     public private(set) var requests: [AppPermission] = []
     private var nextID = 1
-    /// Tests: how long the next events read waits, like a slow EventKit read.
-    private var nextReadDelay: Duration?
+    /// Tests: the next events read waits until released, like a slow
+    /// EventKit read.
+    private var holdsNextRead = false
+    /// Tests: ends the held read's wait.
+    private var heldReadRelease: AsyncStream<Void>.Continuation?
 
     public init(events: [CalendarEvent] = [], calendarAccess: PermissionState = .granted,
                 remindersAccess: PermissionState = .notDetermined, grantOnRequest: Bool = true,
@@ -59,16 +62,25 @@ public actor InMemoryCalendarService: CalendarServicing {
         return remindersState
     }
 
-    /// Tests: the next events read waits `delay` before reading.
-    public func delayNextRead(by delay: Duration) { nextReadDelay = delay }
+    /// Tests: the next events read waits until `releaseHeldRead()`. A hold,
+    /// not a timer, so a slow machine cannot end the wait early.
+    public func holdNextRead() { holdsNextRead = true }
 
-    /// Tests: the delayed read has not started yet.
-    public var isNextReadDelayed: Bool { nextReadDelay != nil }
+    /// Tests: the held read has started and is waiting.
+    public var isReadHeld: Bool { heldReadRelease != nil }
+
+    /// Tests: lets the held read go on.
+    public func releaseHeldRead() {
+        heldReadRelease?.finish()
+        heldReadRelease = nil
+    }
 
     public func events(from start: Date, to end: Date) async throws -> [CalendarEvent] {
-        if let delay = nextReadDelay {
-            nextReadDelay = nil
-            try await Task.sleep(for: delay)
+        if holdsNextRead {
+            holdsNextRead = false
+            let (released, release) = AsyncStream<Void>.makeStream()
+            heldReadRelease = release
+            for await _ in released {}
         }
         guard calendarState == .granted else { throw CalendarServiceError.noAccess(calendarState) }
         return storedEvents.filter { $0.end > start && $0.start < end }.sorted { $0.start < $1.start }
