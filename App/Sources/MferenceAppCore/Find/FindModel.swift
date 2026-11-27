@@ -67,15 +67,20 @@ public actor FindModelStore {
     public nonisolated let file: FindModelFile
     private let allowedHosts: [String]
     private let configuration: URLSessionConfiguration
+    /// Offline mode: checked inside the download's own task, so a cancel
+    /// that comes before the task is in place cannot be missed.
+    private let isOffline: @Sendable () async -> Bool
     private(set) var state: FindModelState
     private var task: Task<URL, Error>?
 
     public init(directory: URL, file: FindModelFile = .text, allowedHosts: [String] = DownloadSource.allowedHosts,
-                configuration: URLSessionConfiguration = .default) {
+                configuration: URLSessionConfiguration = .default,
+                isOffline: @escaping @Sendable () async -> Bool = { false }) {
         self.directory = directory
         self.file = file
         self.allowedHosts = allowedHosts
         self.configuration = configuration
+        self.isOffline = isOffline
         let final = directory.appending(path: file.fileName)
         state = FileManager.default.fileExists(atPath: final.path) ? .ready(final) : .notDownloaded
     }
@@ -93,9 +98,15 @@ public actor FindModelStore {
         if let running = task, running.isCancelled {
             _ = try? await running.value
             if task == running { task = nil }
+            // It may have finished before the cancel reached it.
+            if case .ready(let url) = state, FileManager.default.fileExists(atPath: url.path) { return url }
         }
         if let task { return try await task.value }
-        let work = Task { try await download(progress: progress) }
+        let isOffline = self.isOffline
+        let work = Task {
+            if await isOffline() { throw CancellationError() }
+            return try await download(progress: progress)
+        }
         task = work
         defer { if task == work { task = nil } }
         do {
@@ -112,8 +123,10 @@ public actor FindModelStore {
             throw CancellationError()
         } catch {
             let message = (error as? DownloadError)?.userMessage ?? error.localizedDescription
-            state = .failed(message)
-            progress(state)
+            if task == work {
+                state = .failed(message)
+                progress(state)
+            }
             throw error
         }
     }

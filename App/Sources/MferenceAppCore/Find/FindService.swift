@@ -210,10 +210,11 @@ public final class FindService: ChatFilesProviding {
         let library = LivePhotoLibrary()
         let extractor = FindLibraryReader(base: files, library: library)
         let models = base.appending(path: "Model", directoryHint: .isDirectory)
+        let storeOffline: @Sendable () async -> Bool = { await MainActor.run { isOffline() } }
         return FindService(settings: settings, dependencies: Dependencies(
             indexDirectory: base.appending(path: "Index", directoryHint: .isDirectory),
-            model: FindModelStore(directory: models),
-            mediaModel: FindModelStore(directory: models, file: .media),
+            model: FindModelStore(directory: models, isOffline: storeOffline),
+            mediaModel: FindModelStore(directory: models, file: .media, isOffline: storeOffline),
             makeEmbedder: { FindEmbedderLive(modelPath: $0, mediaModelPath: $1) },
             extractor: extractor, watchFolders: true,
             recentFiles: { FindRecentFiles.lastUsed(under: $0) },
@@ -409,10 +410,20 @@ public final class FindService: ChatFilesProviding {
             return
         }
         guard settings.enabled else { return }
-        if !modelState.isReady {
+        // Not a failed one: that waits for Retry, as before.
+        if Self.wantsFetch(modelState) {
             Task { await ensureModel() }
-        } else if settings.readMedia, !mediaModelState.isReady {
+        } else if modelState.isReady, settings.readMedia, Self.wantsFetch(mediaModelState) {
             Task { await ensureMediaModel() }
+        }
+    }
+
+    /// Not on the Mac and not failed: a download should run (one already
+    /// running is joined, not started twice).
+    private static func wantsFetch(_ state: FindModelState) -> Bool {
+        switch state {
+        case .ready, .failed: false
+        default: true
         }
     }
 
@@ -553,7 +564,10 @@ public final class FindService: ChatFilesProviding {
 
     /// Fetches the media encoders and switches to an embedder that has them.
     private func ensureMediaModel() async {
-        if !(await dependencies.mediaModel.currentState()).isReady, dependencies.isOffline() {
+        guard settings.readMedia else { return }
+        let current = await dependencies.mediaModel.currentState()
+        guard settings.readMedia else { return }
+        if !current.isReady, dependencies.isOffline() {
             mediaModelState = .waitingForOfflineMode
             return
         }

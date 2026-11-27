@@ -269,4 +269,49 @@ final class HoldingModelURLProtocol: URLProtocol, @unchecked Sendable {
         _ = try? await first.value
         _ = try? await second.value
     }
+
+    func store(_ folder: FindTempFolder, offline: OfflineSwitch) -> FindModelStore {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HoldingModelURLProtocol.self]
+        return FindModelStore(directory: folder.url,
+                              file: FindModelFile(fileName: "model.gguf", sizeBytes: 1_000, sha256: "0"),
+                              configuration: configuration, isOffline: { offline.isOn })
+    }
+
+    @Test func anOfflineStoreSendsNoRequest() async throws {
+        HoldingModelURLProtocol.reset()
+        let folder = try FindTempFolder()
+        let store = store(folder, offline: OfflineSwitch(true))
+        let ask = Task { try await store.ensureDownloaded { _ in } }
+        let result = await ask.result
+        #expect(throws: CancellationError.self) { try result.get() }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(HoldingModelURLProtocol.requests == 0)
+        await store.cancel()
+    }
+
+    /// Offline on, off, on again in quick succession: the restart that was
+    /// waiting for the first download to end must not go out while offline.
+    @Test func aRestartWaitingWhileOfflineReturnsSendsNoRequest() async throws {
+        HoldingModelURLProtocol.reset()
+        let folder = try FindTempFolder()
+        let offline = OfflineSwitch(false)
+        let store = store(folder, offline: offline)
+        let first = Task { try await store.ensureDownloaded { _ in } }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while HoldingModelURLProtocol.requests < 1, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        offline.set(true)
+        await store.cancel()
+        offline.set(false)
+        let restart = Task { try await store.ensureDownloaded { _ in } }
+        offline.set(true)
+        await store.cancel()
+        _ = try? await first.value
+        _ = try? await restart.value
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(HoldingModelURLProtocol.requests == 1, "a download went out while offline")
+        await store.cancel()
+    }
 }
