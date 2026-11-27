@@ -108,7 +108,17 @@ struct ScanContent: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if session.phase != .empty { closeButton }
+            if session.phase != .empty {
+                closeButton
+                    .background {
+                        // Esc: leaves a field being edited first, so a
+                        // corrected value is never thrown away by Esc.
+                        Button("Close scan", action: escape)
+                            .keyboardShortcut(.cancelAction)
+                            .hidden()
+                            .accessibilityHidden(true)
+                    }
+            }
         }
         .onPasteCommand(of: [.fileURL, .png, .tiff, .image]) { providers in paste(providers) }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
@@ -125,9 +135,19 @@ struct ScanContent: View {
         .accessibilityLabel("Drop area for documents and photos")
     }
 
-    /// Closes the scan (✕ or Esc) and goes back to the empty drop screen,
-    /// while it reads, in review, after saving and when it failed. A receipt
-    /// not yet added as a row is dropped; saved scans stay saved.
+    /// Esc: ends the edit in progress, else closes the scan.
+    private func escape() {
+        let window = NSApp.keyWindow
+        switch ScanEscape.action(firstResponder: window?.firstResponder) {
+        case .endEditing: window?.makeFirstResponder(nil)
+        case .closeScan: session.reset()
+        }
+    }
+
+    /// Closes the scan (✕, or Esc with no field in edit) and goes back to the
+    /// empty drop screen, while it reads, in review, after saving and when it
+    /// failed. A receipt not yet added as a row is dropped; saved scans stay
+    /// saved.
     private var closeButton: some View {
         Button { session.reset() } label: {
             Image(systemName: "xmark")
@@ -136,11 +156,10 @@ struct ScanContent: View {
                 .frame(width: ScanMetrics.closeButtonSide, height: ScanMetrics.closeButtonSide)
                 .background(Circle().fill(MFColor.surface))
                 .overlay(Circle().strokeBorder(MFColor.hairlineStrong))
-                .shadow(color: MFColor.ink.opacity(0.12), radius: MFSpacing.xxs, y: 1)
+                .shadow(color: MFColor.ink.opacity(0.12), radius: MFSpacing.xxs, y: MFSpacing.xxs / 2)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .keyboardShortcut(.cancelAction)
         .help("Close this scan (Esc)")
         .accessibilityLabel("Close scan")
         .accessibilityHint("Goes back to the empty Scan screen")
@@ -422,6 +441,21 @@ struct ScanToolbarActions: View {
         panel.message = "Choose a receipt or document to read on this Mac."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         session.open(url)
+    }
+}
+
+/// What Esc does on Scan: a field being edited (a text field's editor, a
+/// date picker) only loses focus, keeping its value; otherwise the scan
+/// closes.
+enum ScanEscape: Equatable {
+    case endEditing
+    case closeScan
+
+    static func action(firstResponder: NSResponder?) -> ScanEscape {
+        switch firstResponder {
+        case is NSText, is NSDatePicker: .endEditing
+        default: .closeScan
+        }
     }
 }
 

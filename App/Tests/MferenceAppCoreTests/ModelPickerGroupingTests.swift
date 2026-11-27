@@ -37,6 +37,8 @@ import Testing
     @Test func recommendedStaysQuickAndDeep() {
         #expect(AppModel.allCases.filter { $0.group == .recommended } == [.quick, .deep])
         #expect(ModelPickerGrouping(rawValue: "size") == .size)
+        // The saved choice reads back as stored.
+        #expect(ModelPickerGrouping(rawValue: "family") == .family)
         #expect(ModelPickerGrouping.allCases.map(\.title) == ["By size", "By family"])
     }
 }
