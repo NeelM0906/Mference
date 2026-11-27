@@ -238,3 +238,24 @@ extension FindIndexer {
         #expect(first.first?.media?.prepared == "/tmp/x.fmd")
     }
 }
+
+@Suite struct FindPreparedCleanupTests {
+    /// A picture this process prepared before its first Find start is this
+    /// run's, so Find's start-up cleanup keeps it. (Tests run side by side:
+    /// one test's Find start must not delete what another just prepared.)
+    @Test @MainActor func cleanupKeepsWhatThisProcessPrepared() throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: FindMediaFolder.ready, withIntermediateDirectories: true)
+        let file = FindMediaFolder.ready.appending(path: "cleanup-\(UUID().uuidString).fmd")
+        try Data([1]).write(to: file)
+        defer { try? manager.removeItem(at: file) }
+        FindService.removeEarlierPrepared()
+        #expect(manager.fileExists(atPath: file.path), "a file prepared by this process was removed")
+    }
+
+    @Test @MainActor func theProcessStartTimeIsRead() throws {
+        let start = try #require(FindService.processStart())
+        #expect(start <= Date())
+        #expect(Date().timeIntervalSince(start) < 24 * 3_600, "a test process is not a day old")
+    }
+}

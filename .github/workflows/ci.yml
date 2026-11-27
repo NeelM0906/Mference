@@ -129,9 +129,8 @@ jobs:
       - name: Build the app's tests
         run: swift build --build-tests --package-path App --force-resolved-versions
       # Serial, like the root suite: on this 3-core runner about 1,200 tests in
-      # parallel starve the main actor, so waits of 5-10 s run out and tests
-      # that share temporary folders collide. Serial takes about a minute on
-      # an M-series Mac.
+      # parallel starve the main actor, so their waits of 5-10 s run out.
+      # Serial takes about a minute on an M-series Mac.
       - name: Run the app's model-free tests
         timeout-minutes: 40
         run: swift test --skip-build --no-parallel --package-path App --force-resolved-versions
