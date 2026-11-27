@@ -9,24 +9,32 @@ import Testing
     /// ones would wait out the deadline; that was the CI hang.
     @Test func moreBlockedJobsThanCoresAllStart() async {
         let jobs = ProcessInfo.processInfo.activeProcessorCount + 2
-        let started = Atomic<Int>(0)
+        let counter = StartedJobs()
         let deadline = Date().addingTimeInterval(20)
         let allStarted = await withTaskGroup(of: Bool.self) { group in
             for _ in 0..<jobs {
                 group.addTask {
                     await BlockingWork.run {
-                        started.add(1, ordering: .sequentiallyConsistent)
+                        counter.start()
                         // Blocks this thread, the way Vision and FindMedia.blocking do.
-                        while started.load(ordering: .sequentiallyConsistent) < jobs, Date() < deadline {
+                        while counter.started < jobs, Date() < deadline {
                             Thread.sleep(forTimeInterval: 0.005)
                         }
-                        return started.load(ordering: .sequentiallyConsistent) == jobs
+                        return counter.started == jobs
                     }
                 }
             }
             return await group.allSatisfy { $0 }
         }
-        #expect(allStarted, "only \(started.load(ordering: .sequentiallyConsistent)) of \(jobs) jobs started")
+        #expect(allStarted, "only \(counter.started) of \(jobs) jobs started")
+    }
+
+    /// A shared count of started jobs. A class, because Swift 6.3 rejects
+    /// sending closures that capture an `Atomic` local.
+    private final class StartedJobs: Sendable {
+        private let count = Atomic<Int>(0)
+        var started: Int { count.load(ordering: .sequentiallyConsistent) }
+        func start() { count.add(1, ordering: .sequentiallyConsistent) }
     }
 
     /// A read that never finishes is reported as skipped once the extractor's
