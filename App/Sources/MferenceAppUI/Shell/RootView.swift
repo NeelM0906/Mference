@@ -24,6 +24,22 @@ public struct RootView: View {
     @Environment(ScreenModels.self) private var screenModels: ScreenModels?
     /// The visible screen's `shellToolbar` items, for the window toolbar.
     @State private var toolbarItems: [ShellToolbarItem] = []
+    /// The window's width and the toolbar's width with every pill named,
+    /// kept unobserved so a live resize redraws nothing until the pills
+    /// actually change (`compactPills`).
+    @State private var toolbarWidths = ToolbarWidths()
+    @State private var compactPills = false
+    /// Each screen's actions' width, measured while they show, by item ids.
+    @State private var toolbarItemsWidths: [String: CGFloat] = [:]
+
+    private var toolbarItemsKey: String { toolbarItems.map(\.id).joined(separator: ",") }
+
+    /// Sets `compactPills` only when the answer changes.
+    private func updateCompactPills() {
+        let compact = ShellMetrics.usesCompactPills(windowWidth: toolbarWidths.window,
+                                                    fullBarWidth: toolbarWidths.fullBar)
+        if compact != compactPills { compactPills = compact }
+    }
 
     public init(model: ShellModel, chrome: ChromePlacement = .toolbar) {
         self.model = model
@@ -76,17 +92,32 @@ public struct RootView: View {
                     Rectangle().fill(MFColor.chromeDivider).frame(height: MFLayout.hairline)
                 }
                 .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                    toolbarWidths.window = width
+                    updateCompactPills()
+                }
+                .background(alignment: .topLeading) {
+                    ShellToolbarMeasure(model: model, items: toolbarItems,
+                                        itemsWidth: toolbarItemsWidths[toolbarItemsKey]
+                                            ?? ShellMetrics.unmeasuredScreenActionsWidth) { width in
+                        toolbarWidths.fullBar = width
+                        updateCompactPills()
+                    }
+                }
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
                         HStack(spacing: MFSpacing.m) {
                             ShellBrand()
-                            ShellPillBar(model: model)
+                            ShellPillBar(model: model, compact: compactPills)
                         }
                     }
                     .sharedBackgroundVisibility(.hidden)
                     ToolbarSpacer(.flexible)
                     ToolbarItem(placement: .primaryAction) {
-                        ShellTrailingControls(model: model, items: toolbarItems)
+                        ShellTrailingControls(model: model, items: toolbarItems) { width in
+                            let key = toolbarItemsKey
+                            if width > 0, toolbarItemsWidths[key] != width { toolbarItemsWidths[key] = width }
+                        }
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.trailing, MFSpacing.xs)
                     }
@@ -101,6 +132,13 @@ public struct RootView: View {
 }
 
 /// The screen for one section.
+/// The two widths that decide `compactPills`, outside SwiftUI's
+/// observation.
+private final class ToolbarWidths {
+    var window: CGFloat = 0
+    var fullBar: CGFloat = 0
+}
+
 struct SectionContent: View {
     let section: AppSection
     @Environment(ScreenModels.self) private var screenModels: ScreenModels?

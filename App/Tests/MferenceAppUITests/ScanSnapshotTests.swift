@@ -37,6 +37,27 @@ import Testing
                 .environment(empty), name: "07-scan-empty")
     }
 
+    /// The top bar holds Open file alone: Capture (Later) and the clear icon
+    /// are gone, and closing a scan is the ✕ on the image (or Esc).
+    @Test func scanBarIsOpenFileAlone() {
+        let model = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: AppleUIFixtures.receiptAnswer)
+        let session = ScanSession(scanner: AppleUIFixtures.FixedScanner(lines: []),
+                                  assistant: AppleModelService(primary: model, fallback: nil),
+                                  context: Self.container.mainContext)
+        let width = NSHostingView(rootView: ScanToolbarActions(session: session)).fittingSize.width
+        #expect(width > 0 && width < 140)
+    }
+
+    /// Esc while a field is being edited only leaves the field (the edits
+    /// stay); with nothing in edit it closes the scan. The ✕ always closes.
+    @Test func escapeLeavesAFieldBeforeItClosesTheScan() {
+        #expect(ScanEscape.action(firstResponder: NSTextView()) == .endEditing)
+        #expect(ScanEscape.action(firstResponder: NSDatePicker()) == .endEditing)
+        #expect(ScanEscape.action(firstResponder: nil) == .closeScan)
+        #expect(ScanEscape.action(firstResponder: NSWindow()) == .closeScan)
+        #expect(ScanEscape.action(firstResponder: NSView()) == .closeScan)
+    }
+
     /// General scans: a two-page letter as a document (full text, page
     /// control) and a business card as a contact.
     @Test func generalScans() async throws {

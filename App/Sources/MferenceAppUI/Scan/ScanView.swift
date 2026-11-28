@@ -107,6 +107,19 @@ struct ScanContent: View {
                     .accessibilityHidden(true)
             }
         }
+        .overlay(alignment: .topLeading) {
+            if session.phase != .empty {
+                closeButton
+                    .background {
+                        // Esc: leaves a field being edited first, so a
+                        // corrected value is never thrown away by Esc.
+                        Button("Close scan", action: escape)
+                            .keyboardShortcut(.cancelAction)
+                            .hidden()
+                            .accessibilityHidden(true)
+                    }
+            }
+        }
         .onPasteCommand(of: [.fileURL, .png, .tiff, .image]) { providers in paste(providers) }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             guard let provider = providers.first else { return false }
@@ -120,6 +133,37 @@ struct ScanContent: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Drop area for documents and photos")
+    }
+
+    /// Esc: ends the edit in progress, else closes the scan.
+    private func escape() {
+        let window = NSApp.keyWindow
+        switch ScanEscape.action(firstResponder: window?.firstResponder) {
+        case .endEditing: window?.makeFirstResponder(nil)
+        case .closeScan: session.reset()
+        }
+    }
+
+    /// Closes the scan (✕, or Esc with no field in edit) and goes back to the
+    /// empty drop screen, while it reads, in review, after saving and when it
+    /// failed. A receipt not yet added as a row is dropped; saved scans stay
+    /// saved.
+    private var closeButton: some View {
+        Button { session.reset() } label: {
+            Image(systemName: "xmark")
+                .font(MFFont.calloutEmphasis)
+                .foregroundStyle(MFColor.ink)
+                .frame(width: ScanMetrics.closeButtonSide, height: ScanMetrics.closeButtonSide)
+                .background(Circle().fill(MFColor.surface))
+                .overlay(Circle().strokeBorder(MFColor.hairlineStrong))
+                .shadow(color: MFColor.ink.opacity(0.12), radius: MFSpacing.xxs, y: MFSpacing.xxs / 2)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("Close this scan (Esc)")
+        .accessibilityLabel("Close scan")
+        .accessibilityHint("Goes back to the empty Scan screen")
+        .padding(MFSpacing.m)
     }
 
     /// "Page 2 of 5" under a PDF's page.
@@ -378,33 +422,16 @@ struct ScanContent: View {
     }
 }
 
-/// Capture (Later) and Open file in the shell toolbar, as their own view so
-/// the retained toolbar item acts on the live session.
+/// Open file in the shell toolbar, as its own view so the retained toolbar
+/// item acts on the live session. Closing a scan is the ✕ on the image.
 struct ScanToolbarActions: View {
     var session: ScanSession
 
     var body: some View {
-        HStack(spacing: MFSpacing.s) {
-            HStack(spacing: MFSpacing.s) {
-                Button("Capture screen area") {}
-                    .buttonStyle(.appleSecondary)
-                    .disabled(true)
-                AppleChip(text: "Later", tone: .preview)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Capture screen area, coming later")
-            // An icon, so the section pills keep their names at the
-            // window's usual width.
-            Button { session.reset() } label: { Image(systemName: "xmark.circle") }
-                .buttonStyle(.appleSecondary)
-                .disabled(session.phase == .empty)
-                .help("Clear this scan and start again")
-                .accessibilityLabel("Clear this scan")
-            Button("Open file") { ScanToolbarActions.chooseFile(for: session) }
-                .buttonStyle(.applePrimary)
-                .keyboardShortcut("o", modifiers: .command)
-                .help("Read a document, receipt, card or photo on this Mac")
-        }
+        Button("Open file") { ScanToolbarActions.chooseFile(for: session) }
+            .buttonStyle(.applePrimary)
+            .keyboardShortcut("o", modifiers: .command)
+            .help("Read a document, receipt, card or photo on this Mac")
     }
 
     static func chooseFile(for session: ScanSession) {
@@ -414,6 +441,21 @@ struct ScanToolbarActions: View {
         panel.message = "Choose a receipt or document to read on this Mac."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         session.open(url)
+    }
+}
+
+/// What Esc does on Scan: a field being edited (a text field's editor, a
+/// date picker) only loses focus, keeping its value; otherwise the scan
+/// closes.
+enum ScanEscape: Equatable {
+    case endEditing
+    case closeScan
+
+    static func action(firstResponder: NSResponder?) -> ScanEscape {
+        switch firstResponder {
+        case is NSText, is NSDatePicker: .endEditing
+        default: .closeScan
+        }
     }
 }
 

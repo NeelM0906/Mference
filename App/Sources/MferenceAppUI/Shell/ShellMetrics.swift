@@ -20,4 +20,20 @@ enum ShellMetrics {
     static let searchRowIconWidth: CGFloat = 18
     /// The Coming later column.
     static let comingLaterWidth: CGFloat = 520
+    /// Window width the toolbar takes beyond its items: the window buttons,
+    /// the toolbar's edge insets and the gap between the left and right
+    /// groups.
+    static let toolbarChromeAllowance: CGFloat = 160
+    /// A screen's actions before they have shown once (Notes' three, the
+    /// widest, are about 340).
+    static let unmeasuredScreenActionsWidth: CGFloat = 360
+
+    /// Section pills show icons only (the open one keeps its name) when the
+    /// bar with every name would not fit the window. Otherwise macOS folds
+    /// the right-hand controls (screen actions, Settings) into its » menu,
+    /// which cannot show them. Zero widths (not measured yet) keep the names.
+    static func usesCompactPills(windowWidth: CGFloat, fullBarWidth: CGFloat) -> Bool {
+        guard windowWidth > 0, fullBarWidth > 0 else { return false }
+        return windowWidth < fullBarWidth + toolbarChromeAllowance
+    }
 }

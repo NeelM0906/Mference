@@ -12,6 +12,8 @@ enum ScanMetrics {
     /// Rows of a table shown before "and N more rows".
     static let tablePreviewRows = 8
     static let tableCellMinWidth: CGFloat = 72
+    /// The ✕ that closes a scan, top left of the image.
+    static let closeButtonSide: CGFloat = 30
 }
 
 /// "Read as": the person chooses what the scan is when the guess was wrong.

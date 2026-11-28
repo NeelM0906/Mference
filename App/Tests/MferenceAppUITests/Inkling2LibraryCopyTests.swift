@@ -9,7 +9,7 @@ import Testing
 @Suite struct Inkling2LibraryCopyTests {
     @Test func libraryAndPickerCopyMakeNoSSDClaim() {
         #expect(LiveModelLibraryModel.formatDetail(.inkling2Mini) == "Mference install of Unsloth UD-Q4_K_XL")
-        #expect(LiveModelLibraryModel.variantName(.inkling2Mini) == "Mini")
+        #expect(LiveModelLibraryModel.variantName(.inkling2Mini) == "Looped MoE")
         #expect(AppModel.inkling2Mini.summary == "Deep-tier mixture-of-experts model.")
         for text in [LiveModelLibraryModel.formatDetail(.inkling2Mini), AppModel.inkling2Mini.summary] {
             #expect(!text.contains("SSD"))

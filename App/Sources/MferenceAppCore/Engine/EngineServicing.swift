@@ -97,7 +97,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .quick: "Qwen3.5 4B · default"
         case .deep: "Qwen3.8 27B · MTP"
         case .bonsai27b: "Ternary Qwen3.8 27B · MTP"
-        case .inkling2Mini: "Mini"
+        case .inkling2Mini: "Looped MoE"
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
         case .minicpm5_1b: "1B"
@@ -130,8 +130,8 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         }
     }
 
-    /// Shown with a Preview badge.
-    public var isPreview: Bool { self == .maple || self == .inkling2Mini }
+    /// Shown with a Preview badge: Maple only.
+    public var isPreview: Bool { self == .maple }
 
     /// Whether the model can see images once its image-understanding add-on
     /// (the vision projector, `DownloadSource.imageUnderstanding`) is
