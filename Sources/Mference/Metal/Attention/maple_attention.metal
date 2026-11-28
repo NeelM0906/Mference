@@ -59,8 +59,11 @@ void maple_qk_norm_rope_decode(
             const float partner = simd_shuffle(normalized[i], partner_lane);
             const uint pair = j < rope_half ? j : j - rope_half;
             const float angle = float(position) * inv_freq[pair];
-            const float cosine = metal::cos(angle);
-            const float sine = metal::sin(angle);
+            // Explicitly precise: MTLMathMode.safe does not select precise
+            // trig on every toolchain, and the fast versions drift by up to
+            // 3 BF16 ulps at 128K-position angles.
+            const float cosine = metal::precise::cos(angle);
+            const float sine = metal::precise::sin(angle);
             value = j < rope_half
                 ? value * cosine - partner * sine
                 : value * cosine + partner * sine;
